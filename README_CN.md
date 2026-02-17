@@ -36,7 +36,7 @@
 - **编解码器编译** — 可选的 `torch.compile` 优化，批量解码速度提升 3-4 倍
 
 ### Web UI 编辑器
-- **8 标签页界面** — 设置、脚本生成、声音配置、声音设计、LoRA 训练、数据集构建、编辑器、结果
+- **简洁界面** — 5 步核心流水线（设置、脚本、声音、编辑器、结果）加高级工具（设计器、数据集、训练）
 - **分块编辑** — 编辑任意行的说话人、文本和指令
 - **选择性重新生成** — 单独重新渲染某一分块
 - **实时进度** — 所有操作的实时日志和状态跟踪
@@ -159,31 +159,47 @@ Web UI 显示的是高层状态，**详细日志在 Pinokio 终端中**：
 
 ## 快速入门
 
-1. **设置标签页** — 配置 LLM 和 TTS：
-   - **LLM Base URL**：`http://localhost:1234/v1`（LM Studio）或 `http://localhost:11434/v1`（Ollama）
-   - **LLM API Key**：你的 API 密钥（本地服务器使用 `local`）
-   - **LLM Model Name**：要使用的模型（例如 `qwen2.5-14b`）
-   - **TTS Mode**：`local`（内置引擎，推荐）或 `external`（Gradio 服务器）
+界面分为 **5 步核心流水线**（绿色标签页，带编号）和 **高级工具**（蓝色标签页，无编号）。只需核心流水线即可生成有声书。
 
-2. **脚本标签页** — 上传书籍文件（.txt 或 .md），点击"Generate Annotated Script"
+### 核心流水线
 
-3. **声音标签页** — 点击"Refresh Voices"，然后配置每个说话人：
-   - 选择 Custom Voice、Clone Voice、LoRA Voice 或 Voice Design
-   - 设置声音参数和角色风格，然后保存
-   - 详见 [Voice Types](https://github.com/Finrandojin/alexandria-audiobook/wiki/Voice-Types)
+**第 1 步 — 设置**
+配置 LLM 连接和 TTS 引擎，至少需要：
+- **LLM Base URL**：`http://localhost:1234/v1`（LM Studio）或 `http://localhost:11434/v1`（Ollama）
+- **LLM API Key**：你的 API 密钥（本地服务器使用 `local`）
+- **LLM Model Name**：要使用的模型（例如 `qwen2.5-14b`）
+- **TTS Mode**：`local`（内置引擎，推荐）— 直接加载模型，无需外部服务器
+- 完成后点击 **Save Configuration**
 
-4. **（可选）设计器标签页** — 通过文字描述创建新声音，用作克隆参考
+**第 2 步 — 脚本**
+- 使用文件选择器选取书籍文件（.txt 或 .md）— 选择后自动上传
+- 点击 **Generate Annotated Script** — 将书籍发送给 LLM，分割为带有说话人标签和语音指令的标注块
+- *（可选）* 如果生成的脚本有问题，点击 **Review Script** — 运行二次 LLM 校验，修复说话人归属错误或格式问题
+- 可以使用下方的保存功能将脚本保存供以后使用
 
-5. **（可选）训练标签页** — 在自定义语音数据集上训练 LoRA 适配器
+**第 3 步 — 声音**
+脚本中检测到的每个角色都会有一张声音卡片。为每个说话人：
+- 选择声音类型：Custom Voice（最简单）、Clone Voice、LoRA Voice 或 Voice Design
+- 使用 Custom Voice 时，从 9 个预设中选择（Ryan、Serena、Aiden 等），可选设置角色风格（例如"沉稳的旁白语调"）
+- 更改自动保存 — 各类型详细说明参见 [Voice Types](https://github.com/Finrandojin/alexandria-audiobook/wiki/Voice-Types)
 
-6. **（可选）数据集构建器标签页** — 交互式构建训练数据集，支持逐条预览
+**第 4 步 — 编辑器**
+- 点击 **Render Pending** 批量生成所有语音块的音频
+- 点击单个语音块试听，或点击 **Play Sequence** 按顺序预览
+- 可以内联编辑任何语音块的文本、说话人或指令，然后单独重新生成
+- 满意后点击 **Merge All** 将所有内容合并为最终有声书
 
-7. **编辑器标签页** — 审查和编辑分块：
-   - 选择"Batch (Fast)"模式，点击"Batch Render Pending"以获得最快生成速度
-   - 编辑任何分块的文本/指令/说话人，可单独重新生成
-   - 满意后点击"Merge All"
+**第 5 步 — 结果**
+- 在浏览器中试听完成的有声书
+- 下载 MP3，或点击 **Export to Audacity** 导出按说话人分轨的 WAV 文件
 
-8. **结果标签页** — 下载完成的有声书
+### 高级工具（可选）
+
+这些标签页面向需要更多声音控制的高级用户：
+
+- **设计器** — 通过文字描述创建新声音（例如"温和的年长女性，声音略带沙哑"）。保存后可在声音标签页中用作克隆参考
+- **数据集** — 交互式构建 LoRA 训练数据集，逐条创建并支持音频预览
+- **训练** — 在语音数据集上训练 LoRA 适配器，创建持久的声音身份，支持指令跟随
 
 ---
 

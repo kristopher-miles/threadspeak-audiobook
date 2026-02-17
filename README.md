@@ -40,10 +40,10 @@ Transform any book or novel into a fully-voiced audiobook using AI-powered scrip
 - **Natural Pauses** - Intelligent delays between speakers (500ms) and same-speaker segments (250ms)
 
 ### Web UI Editor
-- **8-Tab Interface** - Setup, Script Generation, Voices, Voice Designer, LoRA Training, Dataset Builder, Editor, Results
+- **Streamlined Interface** - 5-step core pipeline (Setup, Script, Voices, Editor, Result) plus advanced tools (Designer, Dataset, Training)
 - **Chunk Editor** - Edit speaker, text, and instruct for any line
 - **Selective Regeneration** - Re-render individual chunks without regenerating everything
-- **Batch Processing** - Two render modes: standard parallel and fast batch
+- **Batch Processing** - Optimized batch rendering with sub-batching for efficient GPU utilization
 - **Live Progress** - Real-time logs and status tracking for all operations
 - **Audio Preview** - Play individual chunks or sequence through the entire audiobook
 - **Script Library** - Save and load annotated scripts with voice configurations
@@ -162,30 +162,47 @@ For common issues and solutions, see [Troubleshooting](https://github.com/Finran
 
 ## Quick Start
 
-1. **Setup Tab** - Configure your LLM and TTS:
-   - **LLM Base URL**: `http://localhost:1234/v1` (LM Studio) or `http://localhost:11434/v1` (Ollama)
-   - **LLM API Key**: Your API key (use `local` for local servers)
-   - **LLM Model Name**: The model to use (e.g., `qwen2.5-14b`)
-   - **TTS Mode**: `local` (built-in, recommended) or `external` (Gradio server)
+The interface is split into a **5-step core pipeline** (green tabs, numbered) and **advanced tools** (blue tabs, unnumbered). You only need the core pipeline to produce an audiobook.
 
-2. **Script Tab** - Upload your book (.txt or .md) and click "Generate Annotated Script"
+### Core Pipeline
 
-3. **Voices Tab** - Click "Refresh Voices" then configure each speaker:
-   - Choose Custom Voice, Clone Voice, LoRA Voice, or Voice Design
-   - Set voice parameters and character style, then save (see [Voice Types](https://github.com/Finrandojin/alexandria-audiobook/wiki/Voice-Types) for guidance)
+**Step 1 — Setup**
+Configure your LLM connection and TTS engine. At minimum you need:
+- **LLM Base URL**: `http://localhost:1234/v1` (LM Studio) or `http://localhost:11434/v1` (Ollama)
+- **LLM API Key**: Your API key (use `local` for local servers)
+- **LLM Model Name**: The model to use (e.g., `qwen2.5-14b`)
+- **TTS Mode**: `local` (built-in, recommended) — loads models directly, no external server needed
+- Click **Save Configuration** when done
 
-4. **(Optional) Designer Tab** - Create new voices from text descriptions for use as clone references
+**Step 2 — Script**
+- Select your book file (.txt or .md) using the file picker — it uploads automatically
+- Click **Generate Annotated Script** — this sends the book to your LLM to split it into annotated chunks with speaker labels and voice directions
+- *(Optional)* Click **Review Script** if the generated script has issues — this runs a second LLM pass to fix speaker misattributions or formatting problems
+- You can save the script for later use with the Save feature below
 
-5. **(Optional) Training Tab** - Train LoRA adapters on custom voice datasets for persistent voice identities
+**Step 3 — Voices**
+Each character detected in the script gets a voice card. For each speaker:
+- Choose a voice type: Custom Voice (easiest), Clone Voice, LoRA Voice, or Voice Design
+- For Custom Voice, pick from 9 presets (Ryan, Serena, Aiden, etc.) and optionally set a character style (e.g., "Heavy Scottish accent")
+- Changes save automatically — see [Voice Types](https://github.com/Finrandojin/alexandria-audiobook/wiki/Voice-Types) for guidance on each type
 
-6. **(Optional) Dataset Builder Tab** - Build training datasets interactively with per-sample preview
+**Step 4 — Editor**
+- Click **Render Pending** to generate audio for all chunks in batch
+- Listen to individual chunks or click **Play Sequence** to preview in order
+- Edit any chunk's text, speaker, or instruct inline and regenerate it individually
+- When satisfied, click **Merge All** to combine everything into the final audiobook
 
-7. **Editor Tab** - Review and edit chunks:
-   - Select "Batch (Fast)" mode and click "Batch Render Pending" for fastest generation
-   - Edit any chunk's text/instruct/speaker and regenerate individually
-   - Click "Merge All" when satisfied
+**Step 5 — Result**
+- Listen to the finished audiobook in the browser
+- Download as MP3, or click **Export to Audacity** for per-speaker WAV tracks
 
-8. **Result Tab** - Download your finished audiobook
+### Advanced Tools (Optional)
+
+These tabs are for power users who want more control over voice creation:
+
+- **Designer** — Create new voices from text descriptions (e.g., "A warm elderly woman with a gentle raspy voice"). Save them to use as clone references in the Voices tab
+- **Dataset** — Build LoRA training datasets interactively, one sample at a time with audio preview
+- **Training** — Train LoRA adapters on voice datasets to create persistent voice identities that follow instruct directions
 
 ## Web Interface
 
