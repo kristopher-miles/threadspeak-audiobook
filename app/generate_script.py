@@ -85,11 +85,18 @@ def repair_json_array(json_text):
     if not json_text:
         return None
 
+    def _filter_entries(lst):
+        """Keep only dict entries; LLMs sometimes emit bare strings in the array."""
+        filtered = [e for e in lst if isinstance(e, dict)]
+        if len(filtered) < len(lst):
+            print(f"  Warning: Dropped {len(lst) - len(filtered)} non-object entries from LLM JSON array")
+        return filtered if filtered else None
+
     # Try parsing as-is first
     try:
         result = json.loads(json_text)
         if isinstance(result, list):
-            return result
+            return _filter_entries(result)
     except json.JSONDecodeError:
         pass
 
@@ -98,7 +105,7 @@ def repair_json_array(json_text):
     try:
         result = json.loads(fixed)
         if isinstance(result, list):
-            return result
+            return _filter_entries(result)
     except json.JSONDecodeError:
         pass
 
@@ -107,7 +114,7 @@ def repair_json_array(json_text):
     try:
         result = json.loads(fixed)
         if isinstance(result, list):
-            return result
+            return _filter_entries(result)
     except json.JSONDecodeError:
         pass
 
@@ -137,7 +144,7 @@ def repair_json_array(json_text):
                 truncated = '[' + truncated
             result = json.loads(truncated)
             if isinstance(result, list):
-                return result
+                return _filter_entries(result)
         except json.JSONDecodeError:
             pass
 
