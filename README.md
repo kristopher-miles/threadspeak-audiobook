@@ -52,6 +52,7 @@ Transform any book or novel into a fully-voiced audiobook using AI-powered scrip
 - **Combined Audiobook** - Single MP3 with all voices and natural pauses
 - **Individual Voicelines** - Separate MP3 per line for DAW editing (Audacity, etc.)
 - **Audacity Export** - One-click zip with per-speaker WAV tracks, LOF project file, and labels for automatic multi-track import into Audacity
+- **M4B Audiobook** - Chaptered M4B (AAC) with per-chunk or auto-detected chapter markers for audiobook players (Audiobookshelf, Apple Books, VLC, etc.)
 
 ## Requirements
 
@@ -333,7 +334,13 @@ High-speed rendering that sends multiple lines to the TTS engine in a single bat
 - **Parallel Workers** setting controls batch size (higher values use more VRAM)
 
 ### Result Tab
-Download your completed audiobook as MP3, or click **Export to Audacity** to download a zip with per-speaker WAV tracks that import as separate Audacity tracks. Unzip and open `project.lof` in Audacity to load all tracks, then import `labels.txt` via File > Import > Labels for chunk annotations.
+Download your completed audiobook as MP3, export as **M4B** with chapter markers for audiobook players, or click **Export to Audacity** for per-speaker WAV tracks.
+
+- **Download MP3** - Standard merged audiobook
+- **Export M4B** - AAC audiobook with chapter markers. By default, chapters are auto-detected from headings in the script (e.g. "Chapter 1", "Prologue"). Toggle **Per-chunk chapters** for fine-grained navigation where every line becomes a chapter.
+- **Export to Audacity** - Zip with per-speaker WAV tracks. Unzip and open `project.lof` in Audacity to load all tracks, then import `labels.txt` via File > Import > Labels for chunk annotations.
+
+> **Note:** Some Linux audiobook players (e.g. Cozy) have limited M4B support and may not detect the file. The M4B output has been tested with VLC, Haruna, and Audiobookshelf.
 
 ## Performance
 
@@ -422,6 +429,11 @@ audacity_export.zip
 ```
 
 Each WAV track is padded to the same total duration with silence where other speakers are talking. Playing all tracks simultaneously sounds identical to the merged MP3.
+
+**M4B Audiobook (chaptered):**
+- `audiobook.m4b` - AAC audiobook with embedded chapter markers
+- Chapters auto-detected from script headings, or per-chunk when toggled
+- Compatible with Audiobookshelf, Apple Books, VLC, Haruna, and most audiobook players
 
 ## API Reference
 

@@ -1,9 +1,11 @@
 import os
 import json
 import shutil
+import subprocess
 import threading
 import zipfile
 import io
+import re
 import time
 from tts import (
     TTSEngine,
@@ -497,6 +499,200 @@ class ProjectManager:
                 zf.writestr(f"{safe_name}.wav", wav_buffer.getvalue())
 
         return True, zip_path
+
+    def merge_m4b(self, per_chunk_chapters=False, metadata=None):
+        """Merge audio chunks into an M4B audiobook with chapter markers.
+
+        Args:
+            per_chunk_chapters: If True, each chunk is a chapter. If False,
+                detect chapter headings and group chunks into sections.
+            metadata: Optional dict with keys: title, author, narrator, year,
+                description, cover_path (absolute path to cover image).
+
+        Returns:
+            tuple: (success: bool, message: str)
+        """
+        metadata = metadata or {}
+        chunks = self.load_chunks()
+
+        # Phase 1 — Compute timeline (same logic as export_audacity)
+        timeline = []  # list of (chunk, segment, abs_start_ms)
+        prev_speaker = None
+        cursor_ms = 0
+
+        for chunk in chunks:
+            path = chunk.get("audio_path")
+            if not path:
+                continue
+            full_path = os.path.join(self.root_dir, path)
+            if not os.path.exists(full_path):
+                continue
+            try:
+                segment = AudioSegment.from_file(full_path)
+            except Exception as e:
+                print(f"Error loading audio for M4B export {path}: {e}")
+                continue
+
+            speaker = chunk["speaker"]
+            if prev_speaker is not None:
+                if speaker == prev_speaker:
+                    cursor_ms += SAME_SPEAKER_PAUSE_MS
+                else:
+                    cursor_ms += DEFAULT_PAUSE_MS
+
+            timeline.append((chunk, segment, cursor_ms))
+            cursor_ms += len(segment)
+            prev_speaker = speaker
+
+        if not timeline:
+            return False, "No audio segments found"
+
+        # Phase 2 — Build chapters
+        chapters = self._build_m4b_chapters(timeline, per_chunk_chapters)
+        print(f"  M4B: {len(chapters)} chapters")
+
+        # Phase 3 — Combine audio and export to temp WAV
+        audio_segments = [seg for _, seg, _ in timeline]
+        speakers = [chunk["speaker"] for chunk, _, _ in timeline]
+        final_audio = combine_audio_with_pauses(audio_segments, speakers)
+
+        temp_wav = os.path.join(self.root_dir, "temp_m4b_combined.wav")
+        meta_path = os.path.join(self.root_dir, "temp_m4b_meta.txt")
+        output_path = os.path.join(self.root_dir, "audiobook.m4b")
+
+        try:
+            final_audio.export(temp_wav, format="wav")
+
+            # Phase 4 — Write FFmpeg metadata file with book metadata
+            meta_lines = [";FFMETADATA1"]
+            meta_lines.append(f"title={self._escape_ffmeta(metadata.get('title') or 'Audiobook')}")
+            meta_lines.append(f"artist={self._escape_ffmeta(metadata.get('author') or '')}")
+            meta_lines.append(f"album_artist={self._escape_ffmeta(metadata.get('narrator') or '')}")
+            meta_lines.append(f"date={self._escape_ffmeta(metadata.get('year') or '')}")
+            meta_lines.append(f"comment={self._escape_ffmeta(metadata.get('description') or '')}")
+            meta_lines.append("genre=Audiobook")
+            meta_lines.append("")
+            for title, start_ms, end_ms in chapters:
+                safe_title = self._escape_ffmeta(title)
+                meta_lines.append("[CHAPTER]")
+                meta_lines.append("TIMEBASE=1/1000")
+                meta_lines.append(f"START={start_ms}")
+                meta_lines.append(f"END={end_ms}")
+                meta_lines.append(f"title={safe_title}")
+                meta_lines.append("")
+
+            with open(meta_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(meta_lines))
+
+            # Phase 5 — FFmpeg: WAV + chapters → M4B (AAC)
+            cover_path = metadata.get("cover_path") or ""
+            has_cover = cover_path and os.path.exists(cover_path)
+
+            cmd = ["ffmpeg", "-y", "-i", temp_wav]
+            if has_cover:
+                cmd += ["-i", cover_path]
+            cmd += ["-i", meta_path, "-map_metadata", "2" if has_cover else "1"]
+            # Map audio stream
+            cmd += ["-map", "0:a"]
+            if has_cover:
+                # Map cover as attached picture
+                cmd += ["-map", "1:v", "-c:v", "copy", "-disposition:v:0", "attached_pic"]
+            cmd += [
+                "-c:a", "aac",
+                "-b:a", "128k",
+                "-movflags", "+faststart",
+                output_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            if result.returncode != 0:
+                print(f"FFmpeg stderr: {result.stderr[-500:]}")
+                return False, f"FFmpeg failed (exit {result.returncode})"
+
+        finally:
+            for tmp in [temp_wav, meta_path]:
+                if os.path.exists(tmp):
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+
+        return True, "audiobook.m4b"
+
+    @staticmethod
+    def _escape_ffmeta(text):
+        """Escape special characters for FFmpeg metadata format."""
+        text = text.replace("\\", "\\\\")
+        text = text.replace("=", "\\=")
+        text = text.replace(";", "\\;")
+        text = text.replace("#", "\\#")
+        text = text.replace("\n", " ")
+        return text
+
+    # Regex for detecting chapter/section headings in chunk text
+    _HEADING_RE = re.compile(
+        r'^(chapter|part|book|volume|prologue|epilogue|introduction|conclusion|act|section)\b',
+        re.IGNORECASE
+    )
+
+    def _build_m4b_chapters(self, timeline, per_chunk_chapters):
+        """Build chapter list from timeline entries.
+
+        Returns:
+            list of (title, start_ms, end_ms) tuples
+        """
+        if per_chunk_chapters:
+            chapters = []
+            for chunk, segment, start_ms in timeline:
+                end_ms = start_ms + len(segment)
+                text_preview = chunk.get("text", "")[:80]
+                title = f"[{chunk['speaker']}] {text_preview}"
+                chapters.append((title, start_ms, end_ms))
+            return chapters
+
+        # Smart grouping: detect chapter headings
+        heading_indices = []
+        for i, (chunk, segment, start_ms) in enumerate(timeline):
+            text = chunk.get("text", "").strip()
+            # Short structural text (likely a heading) or starts with heading keyword
+            if self._HEADING_RE.match(text):
+                heading_indices.append(i)
+            elif len(text) < 80 and '"' not in text and text and self._HEADING_RE.search(text):
+                heading_indices.append(i)
+
+        # If no headings detected, fall back to per-chunk
+        if not heading_indices:
+            print("  M4B: No chapter headings detected, falling back to per-chunk chapters")
+            return self._build_m4b_chapters(timeline, per_chunk_chapters=True)
+
+        chapters = []
+
+        # Pre-heading chunks → "Introduction"
+        if heading_indices[0] > 0:
+            start_ms = timeline[0][2]
+            last_before = heading_indices[0] - 1
+            end_ms = timeline[last_before][2] + len(timeline[last_before][1])
+            chapters.append(("Introduction", start_ms, end_ms))
+
+        # Each heading starts a chapter that runs until the next heading
+        for idx, head_i in enumerate(heading_indices):
+            title = timeline[head_i][0].get("text", "").strip()
+            # Truncate long titles
+            if len(title) > 120:
+                title = title[:117] + "..."
+
+            start_ms = timeline[head_i][2]
+
+            # End = start of next heading, or end of last chunk
+            if idx + 1 < len(heading_indices):
+                next_head_i = heading_indices[idx + 1]
+                last_in_group = next_head_i - 1
+            else:
+                last_in_group = len(timeline) - 1
+
+            end_ms = timeline[last_in_group][2] + len(timeline[last_in_group][1])
+            chapters.append((title, start_ms, end_ms))
+
+        return chapters
 
     def generate_chunks_parallel(self, indices, max_workers=2, progress_callback=None,
                                   cancel_check=None):

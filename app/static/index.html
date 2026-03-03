@@ -764,6 +764,56 @@
                             <i class="fas fa-headphones me-2"></i>Export to Audacity
                         </button>
                         <span id="audacity-status" class="ms-2 mt-3 d-inline-block"></span>
+                        <div class="w-100 mt-3">
+                            <a class="text-decoration-none" data-bs-toggle="collapse" href="#m4b-options" role="button" aria-expanded="false">
+                                <i class="fas fa-book-reader me-1"></i>M4B Export Options <i class="fas fa-chevron-down fa-xs ms-1"></i>
+                            </a>
+                            <div class="collapse mt-2" id="m4b-options">
+                                <div class="border rounded p-3" style="background: var(--bs-light, #f8f9fa);">
+                                    <div class="row g-2">
+                                        <div class="col-md-6">
+                                            <label class="form-label small mb-1">Title</label>
+                                            <input type="text" class="form-control form-control-sm" id="m4b-title" placeholder="Book title">
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label small mb-1">Author</label>
+                                            <input type="text" class="form-control form-control-sm" id="m4b-author" placeholder="Author name">
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label class="form-label small mb-1">Narrator</label>
+                                            <input type="text" class="form-control form-control-sm" id="m4b-narrator" placeholder="Narrator name">
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Year</label>
+                                            <input type="text" class="form-control form-control-sm" id="m4b-year" placeholder="2025">
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label small mb-1">Description</label>
+                                            <input type="text" class="form-control form-control-sm" id="m4b-description" placeholder="Short description">
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label small mb-1">Cover Image</label>
+                                            <div class="d-flex align-items-center gap-2">
+                                                <input type="file" class="form-control form-control-sm" id="m4b-cover-input" accept="image/*">
+                                                <span id="m4b-cover-status" class="small text-muted"></span>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6 d-flex align-items-end">
+                                            <label class="form-check d-inline-flex align-items-center mb-0" title="Creates a chapter for every chunk instead of grouping by detected headings">
+                                                <input type="checkbox" class="form-check-input me-1" id="m4b-per-chunk">
+                                                <small class="text-muted">Per-chunk chapters</small>
+                                            </label>
+                                        </div>
+                                    </div>
+                                    <div class="mt-2">
+                                        <button class="btn btn-outline-success btn-sm" onclick="exportM4B()">
+                                            <i class="fas fa-book-reader me-1"></i>Export M4B
+                                        </button>
+                                        <span id="m4b-status" class="ms-2 d-inline-block"></span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -2079,6 +2129,68 @@
                                 const a = document.createElement('a');
                                 a.href = `/api/export_audacity?t=${Date.now()}`;
                                 a.download = 'audacity_export.zip';
+                                document.body.appendChild(a);
+                                a.click();
+                                document.body.removeChild(a);
+                                setTimeout(() => { statusEl.innerHTML = ''; }, 5000);
+                            } else {
+                                const lastLog = status.logs[status.logs.length - 1] || 'Unknown error';
+                                statusEl.innerHTML = `<span class="text-danger"><i class="fas fa-times me-1"></i>${lastLog}</span>`;
+                            }
+                        }
+                    } catch (e) {
+                        clearInterval(poll);
+                        statusEl.innerHTML = `<span class="text-danger">Poll error: ${e.message}</span>`;
+                    }
+                }, 1000);
+            } catch (e) {
+                statusEl.innerHTML = `<span class="text-danger"><i class="fas fa-times me-1"></i>${e.message}</span>`;
+            }
+        };
+
+        // Handle M4B cover image upload
+        document.getElementById('m4b-cover-input').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            const statusEl = document.getElementById('m4b-cover-status');
+            if (!file) return;
+            const formData = new FormData();
+            formData.append('file', file);
+            try {
+                const resp = await fetch('/api/m4b_cover', { method: 'POST', body: formData });
+                if (!resp.ok) throw new Error((await resp.json()).detail || resp.statusText);
+                statusEl.textContent = 'Uploaded';
+                statusEl.className = 'small text-success';
+            } catch (err) {
+                statusEl.textContent = err.message;
+                statusEl.className = 'small text-danger';
+            }
+        });
+
+        window.exportM4B = async () => {
+            const statusEl = document.getElementById('m4b-status');
+            const perChunk = document.getElementById('m4b-per-chunk').checked;
+            statusEl.innerHTML = '<span class="text-info"><i class="fas fa-spinner fa-spin me-1"></i>Exporting M4B...</span>';
+
+            try {
+                await API.post('/api/merge_m4b', {
+                    per_chunk_chapters: perChunk,
+                    title: document.getElementById('m4b-title').value,
+                    author: document.getElementById('m4b-author').value,
+                    narrator: document.getElementById('m4b-narrator').value,
+                    year: document.getElementById('m4b-year').value,
+                    description: document.getElementById('m4b-description').value
+                });
+
+                const poll = setInterval(async () => {
+                    try {
+                        const status = await API.get('/api/status/m4b_export');
+                        if (!status.running) {
+                            clearInterval(poll);
+                            if (status.logs.some(l => l.includes("complete"))) {
+                                statusEl.innerHTML = '<span class="text-success"><i class="fas fa-check me-1"></i>Done!</span>';
+                                const a = document.createElement('a');
+                                a.href = `/api/audiobook_m4b?t=${Date.now()}`;
+                                a.download = 'audiobook.m4b';
                                 document.body.appendChild(a);
                                 a.click();
                                 document.body.removeChild(a);
