@@ -525,11 +525,17 @@ class TTSEngine:
 
     # ── Clone prompt cache (local mode) ──────────────────────────
 
+    def clear_clone_prompt_cache(self, speaker=None):
+        if speaker is None:
+            self._clone_prompt_cache.clear()
+            return
+        self._clone_prompt_cache.pop(speaker, None)
+
     def _get_clone_prompt(self, speaker, voice_config):
         """Get or create a cached voice clone prompt for a speaker."""
         voice_data = voice_config.get(speaker, {})
         ref_audio_path = voice_data.get("ref_audio")
-        ref_text = voice_data.get("ref_text")
+        ref_text = voice_data.get("generated_ref_text") or voice_data.get("ref_text")
 
         if not ref_audio_path or not ref_text:
             raise ValueError(f"Clone voice for '{speaker}' missing ref_audio or ref_text")
@@ -1508,7 +1514,7 @@ class TTSEngine:
                 return False
 
             ref_audio = voice_data.get("ref_audio")
-            ref_text = voice_data.get("ref_text")
+            ref_text = voice_data.get("generated_ref_text") or voice_data.get("ref_text")
             seed = int(voice_data.get("seed", -1))
 
             if not ref_audio or not ref_text:

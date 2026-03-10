@@ -1,5 +1,6 @@
 import json
 import os
+from script_store import load_script_document
 
 def main():
     input_path = "../annotated_script.json"
@@ -9,8 +10,7 @@ def main():
         print(f"Error: {input_path} not found. Please generate the script first.")
         return
 
-    with open(input_path, 'r', encoding='utf-8') as f:
-        script_data = json.load(f)
+    script_data = load_script_document(input_path)["entries"]
 
     # Extract unique speakers (check both "speaker" and "type" fields)
     voices = set()

@@ -86,6 +86,7 @@
                     <li class="nav-item"><a class="nav-link nav-pipeline" data-tab="editor">4. Editor</a></li>
                     <li class="nav-item"><a class="nav-link nav-pipeline" data-tab="audio">5. Result</a></li>
                     <li class="nav-item ms-3 border-start border-secondary ps-3"><a class="nav-link nav-advanced" data-tab="designer">Designer</a></li>
+                    <li class="nav-item"><a class="nav-link nav-advanced" data-tab="dictionary">Dictionary</a></li>
                     <li class="nav-item"><a class="nav-link nav-advanced" data-tab="dataset-builder">Dataset</a></li>
                     <li class="nav-item"><a class="nav-link nav-advanced" data-tab="training">Training</a></li>
                 </ul>
@@ -368,7 +369,12 @@
             <div class="card mb-3">
                 <div class="card-header d-flex justify-content-between align-items-center">
                     <h4 class="m-0"><span class="step-indicator step-active">3</span>Voice Configuration</h4>
-                    <span id="voice-save-status" class="text-muted small"></span>
+                    <div class="d-flex align-items-center gap-2">
+                        <button id="generate-outstanding-voices-btn" class="btn btn-sm btn-outline-primary" onclick="generateOutstandingVoices()">
+                            Generate Outstanding Voices
+                        </button>
+                        <span id="voice-save-status" class="text-muted small"></span>
+                    </div>
                 </div>
                 <div class="card-body">
                     <p>Voices are detected from the generated script. Changes are saved automatically.</p>
@@ -380,6 +386,37 @@
                 <div class="card-header">Voice Parsing Logs</div>
                 <div class="card-body p-0">
                     <div id="voices-logs" class="log-window" style="height: 150px;"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Dictionary Tab -->
+        <div id="dictionary-tab" class="tab-content" style="display:none;">
+            <div class="card mb-3">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h4 class="m-0">Dictionary</h4>
+                    <span id="dictionary-save-status" class="text-muted small"></span>
+                </div>
+                <div class="card-body">
+                    <p class="mb-3">Dictionary entries replace source words only during synthesis. The editor and script still display the original text.</p>
+                    <div class="d-flex flex-wrap gap-2 mb-3">
+                        <button class="btn btn-outline-secondary btn-sm" onclick="triggerDictionaryImport()"><i class="fas fa-file-import me-1"></i>Import CSV</button>
+                        <button class="btn btn-outline-secondary btn-sm" onclick="exportDictionaryCsv()"><i class="fas fa-file-export me-1"></i>Export CSV</button>
+                        <button class="btn btn-primary btn-sm" onclick="saveDictionary()"><i class="fas fa-save me-1"></i>Save Dictionary</button>
+                    </div>
+                    <input type="file" id="dictionary-import-input" accept=".csv,.tsv,.txt" style="display:none;" onchange="handleDictionaryImport(this)">
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle">
+                            <thead>
+                                <tr>
+                                    <th style="width:40%">Source</th>
+                                    <th style="width:40%">Alias</th>
+                                    <th style="width:20%">Replacements</th>
+                                </tr>
+                            </thead>
+                            <tbody id="dictionary-table-body"></tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
         </div>
@@ -977,6 +1014,8 @@
                     ensureAudioQueuePolling();
                 } else if (e.target.dataset.tab === 'voices') {
                     loadVoices();
+                } else if (e.target.dataset.tab === 'dictionary') {
+                    loadDictionary();
                 } else if (e.target.dataset.tab === 'designer') {
                     loadDesignedVoices();
                 } else if (e.target.dataset.tab === 'training') {
@@ -1332,12 +1371,14 @@
 
         function createVoiceCard(voice, index) {
             const config = voice.config || {};
-            const voiceType = config.type || 'custom';
+            const voiceType = config.type || 'design';
             const safeName = escapeHtml(voice.name);
             const safeAlias = escapeHtml(config.alias || '');
+            const designSampleText = config.ref_text || voice.suggested_sample_text || '';
+            const designLoaded = Boolean((config.ref_audio || '').trim()) && !!voice.design_clone_loaded;
 
             return `
-                <div class="card voice-card mb-3" data-voice="${safeName}">
+                <div class="card voice-card mb-3" data-voice="${safeName}" data-suggested-sample="${escapeHtml(voice.suggested_sample_text || '')}">
                     <div class="card-body">
                         <div class="row">
                             <div class="col-md-3">
@@ -1467,8 +1508,21 @@
 
                                 <!-- Voice Design Options -->
                                 <div class="design-opts" style="display: ${voiceType === 'design' ? 'block' : 'none'}">
-                                    <input type="text" class="form-control design-description mb-1" placeholder="Base voice description (e.g. Young strong soldier)" value="${config.description || ''}">
-                                    <span class="text-muted small">Per-line instruct is appended to this description as delivery/emotion direction</span>
+                                    <div class="input-group mb-2">
+                                        <input type="text" class="form-control design-description" placeholder="Base voice description (e.g. Young strong soldier)" value="${config.description || ''}">
+                                        <button class="btn btn-sm ${designLoaded ? 'btn-warning' : 'btn-outline-primary'} design-generate-btn" onclick="generateVoiceDesignClone(this)">
+                                            ${designLoaded ? 'Retry' : 'Generate'}
+                                        </button>
+                                    </div>
+                                    <div class="input-group mb-1">
+                                        <input type="text" class="form-control design-sample-text" placeholder="Text sample used to create the reusable clone voice" value="${escapeHtml(designSampleText)}">
+                                        <button class="btn btn-sm btn-outline-secondary design-play-btn" onclick="playVoiceDesignClone(this)" ${designLoaded ? '' : 'disabled'}>
+                                            Play
+                                        </button>
+                                    </div>
+                                    <input type="hidden" class="design-ref-audio" value="${config.ref_audio || ''}">
+                                    <input type="hidden" class="design-generated-ref-text" value="${config.generated_ref_text || ''}">
+                                    <span class="text-muted small">Generated once, then reused as a clone voice for all character lines.</span>
                                 </div>
                             </div>
                         </div>
@@ -1484,6 +1538,13 @@
             card.querySelector('.clone-opts').style.display = radio.value === 'clone' ? 'block' : 'none';
             card.querySelector('.lora-opts').style.display = radio.value === 'lora' ? 'block' : 'none';
             card.querySelector('.design-opts').style.display = radio.value === 'design' ? 'block' : 'none';
+            if (radio.value === 'design') {
+                const voiceCard = radio.closest('.voice-card');
+                const sampleInput = card.querySelector('.design-sample-text');
+                if (sampleInput && !sampleInput.value.trim() && voiceCard?.dataset.suggestedSample) {
+                    sampleInput.value = voiceCard.dataset.suggestedSample;
+                }
+            }
             debouncedSaveVoices();
         };
 
@@ -1508,8 +1569,22 @@
             container.innerHTML = voices.map((v, i) => createVoiceCard(v, i)).join('');
             updateVoiceAliasStates();
 
+            let filledMissingDesignSample = false;
+            voices.forEach(voice => {
+                const config = voice.config || {};
+                const voiceType = config.type || 'design';
+                if (voiceType !== 'design') return;
+                if ((config.ref_text || '').trim()) return;
+                const card = Array.from(document.querySelectorAll('.voice-card')).find(el => el.dataset.voice === voice.name);
+                const sampleInput = card?.querySelector('.design-sample-text');
+                if (sampleInput && voice.suggested_sample_text) {
+                    sampleInput.value = voice.suggested_sample_text;
+                    filledMissingDesignSample = true;
+                }
+            });
+
             // If any voice has no saved config, save defaults immediately
-            if (voices.some(v => !v.config || Object.keys(v.config).length === 0)) {
+            if (filledMissingDesignSample || voices.some(v => !v.config || Object.keys(v.config).length === 0)) {
                 debouncedSaveVoices();
             }
         }
@@ -1536,6 +1611,7 @@
                         type: 'clone',
                         ref_text: card.querySelector('.ref-text').value,
                         ref_audio: card.querySelector('.ref-audio').value,
+                        generated_ref_text: '',
                         alias,
                         seed: "-1"
                     };
@@ -1565,6 +1641,9 @@
                     config[name] = {
                         type: 'design',
                         description: card.querySelector('.design-description').value,
+                        ref_text: card.querySelector('.design-sample-text').value,
+                        ref_audio: card.querySelector('.design-ref-audio').value,
+                        generated_ref_text: card.querySelector('.design-generated-ref-text').value,
                         alias,
                         seed: "-1"
                     };
@@ -1574,21 +1653,26 @@
         }
 
         let _voiceSaveTimer = null;
-        function debouncedSaveVoices() {
+        async function saveVoicesNow() {
+            const cards = document.querySelectorAll('.voice-card');
+            if (cards.length === 0) return;
             const statusEl = document.getElementById('voice-save-status');
             statusEl.innerHTML = '<i class="fas fa-circle text-warning" style="font-size:0.5em;"></i> unsaved';
+            try {
+                const config = collectVoiceConfig();
+                await API.post('/api/save_voice_config', config);
+                statusEl.innerHTML = '<i class="fas fa-check text-success me-1"></i>saved';
+                setTimeout(() => { statusEl.innerHTML = ''; }, 2000);
+            } catch (e) {
+                statusEl.innerHTML = '<i class="fas fa-times text-danger me-1"></i>save failed';
+                throw e;
+            }
+        }
+
+        function debouncedSaveVoices() {
             clearTimeout(_voiceSaveTimer);
-            _voiceSaveTimer = setTimeout(async () => {
-                const cards = document.querySelectorAll('.voice-card');
-                if (cards.length === 0) return;
-                try {
-                    const config = collectVoiceConfig();
-                    await API.post('/api/save_voice_config', config);
-                    statusEl.innerHTML = '<i class="fas fa-check text-success me-1"></i>saved';
-                    setTimeout(() => { statusEl.innerHTML = ''; }, 2000);
-                } catch (e) {
-                    statusEl.innerHTML = '<i class="fas fa-times text-danger me-1"></i>save failed';
-                }
+            _voiceSaveTimer = setTimeout(() => {
+                saveVoicesNow().catch(() => {});
             }, 800);
         }
 
@@ -1605,6 +1689,372 @@
             }
             debouncedSaveVoices();
         });
+
+        function syncDesignVoiceRow(card, { loaded = false, refAudio = '', generatedRefText = null } = {}) {
+            if (!card) return;
+            const generateBtn = card.querySelector('.design-generate-btn');
+            const playBtn = card.querySelector('.design-play-btn');
+            const refAudioInput = card.querySelector('.design-ref-audio');
+            const generatedRefTextInput = card.querySelector('.design-generated-ref-text');
+            if (refAudioInput && typeof refAudio === 'string') {
+                refAudioInput.value = refAudio;
+            }
+            if (generatedRefTextInput && typeof generatedRefText === 'string') {
+                generatedRefTextInput.value = generatedRefText;
+            }
+            if (generateBtn) {
+                generateBtn.className = `btn btn-sm ${loaded ? 'btn-warning' : 'btn-outline-primary'} design-generate-btn`;
+                generateBtn.textContent = loaded ? 'Retry' : 'Generate';
+                generateBtn.disabled = false;
+            }
+            if (playBtn) {
+                playBtn.disabled = !loaded;
+            }
+        }
+
+        window.generateVoiceDesignClone = async (btn) => {
+            const card = btn.closest('.card-body');
+            const speaker = card.closest('.voice-card')?.dataset.voice;
+            const description = card.querySelector('.design-description').value.trim();
+            const sampleTextInput = card.querySelector('.design-sample-text');
+            const sampleText = sampleTextInput.value.trim();
+            const loaded = Boolean((card.querySelector('.design-ref-audio')?.value || '').trim());
+
+            if (!description) {
+                showToast('Base voice description is required.', 'warning');
+                return;
+            }
+
+            btn.disabled = true;
+            btn.textContent = loaded ? 'Retrying...' : 'Generating...';
+            try {
+                if (!sampleText) {
+                    await loadVoices();
+                } else {
+                    await saveVoicesNow();
+                }
+                const refreshedVoiceCard = Array.from(document.querySelectorAll('.voice-card')).find(el => el.dataset.voice === speaker);
+                const refreshedCard = refreshedVoiceCard?.querySelector('.card-body');
+                const activeCard = refreshedCard || card;
+                const freshSampleInput = activeCard.querySelector('.design-sample-text');
+                const payload = {
+                    speaker,
+                    description: activeCard.querySelector('.design-description').value.trim(),
+                    sample_text: freshSampleInput.value.trim(),
+                    force: Boolean((activeCard.querySelector('.design-ref-audio')?.value || '').trim()),
+                };
+                const result = await API.post('/api/voices/design_generate', payload);
+                if (freshSampleInput) {
+                    freshSampleInput.value = result.ref_text || payload.sample_text;
+                }
+                syncDesignVoiceRow(activeCard, { loaded: true, refAudio: result.ref_audio, generatedRefText: result.generated_ref_text || '' });
+                window._cloneVoicesCache = await API.get('/api/clone_voices/list');
+                await saveVoicesNow();
+                showToast(`Generated voice for ${speaker}.`, 'success');
+            } catch (e) {
+                showToast(`Voice generation failed: ${e.message}`, 'error');
+                syncDesignVoiceRow(card, { loaded: loaded, refAudio: card.querySelector('.design-ref-audio')?.value || '' });
+            } finally {
+                const activeCard = btn.closest('.card-body');
+                const hasAudio = Boolean((activeCard.querySelector('.design-ref-audio')?.value || '').trim());
+                syncDesignVoiceRow(activeCard, { loaded: hasAudio, refAudio: activeCard.querySelector('.design-ref-audio')?.value || '' });
+            }
+        };
+
+        window.playVoiceDesignClone = (btn) => {
+            const card = btn.closest('.card-body');
+            const refAudio = card.querySelector('.design-ref-audio')?.value;
+            if (!refAudio) return;
+            const audio = new Audio(`/${refAudio}?t=${Date.now()}`);
+            audio.play();
+        };
+
+        window.generateOutstandingVoices = async () => {
+            const bulkBtn = document.getElementById('generate-outstanding-voices-btn');
+            const voiceCards = Array.from(document.querySelectorAll('.voice-card'));
+            const eligibleButtons = voiceCards
+                .filter(card => card.querySelector('.voice-type:checked')?.value === 'design')
+                .map(card => ({
+                    card,
+                    description: (card.querySelector('.design-description')?.value || '').trim(),
+                    sampleText: (card.querySelector('.design-sample-text')?.value || '').trim(),
+                    refAudio: (card.querySelector('.design-ref-audio')?.value || '').trim(),
+                    button: card.querySelector('.design-generate-btn'),
+                }))
+                .filter(item => item.button && item.description && item.sampleText && !item.refAudio);
+
+            if (eligibleButtons.length === 0) {
+                showToast('No outstanding design voices to generate.', 'info');
+                return;
+            }
+
+            bulkBtn.disabled = true;
+            const originalText = bulkBtn.textContent;
+            try {
+                for (let i = 0; i < eligibleButtons.length; i += 1) {
+                    const item = eligibleButtons[i];
+                    bulkBtn.textContent = `Generating ${i + 1}/${eligibleButtons.length}...`;
+                    await window.generateVoiceDesignClone(item.button);
+                }
+                showToast(`Generated ${eligibleButtons.length} outstanding voice${eligibleButtons.length === 1 ? '' : 's'}.`, 'success');
+            } finally {
+                bulkBtn.disabled = false;
+                bulkBtn.textContent = originalText;
+            }
+        };
+
+        // --- Dictionary Tab ---
+        let dictionaryEntries = [];
+        let dictionaryCounts = [];
+
+        function normalizeDictionaryRows(entries) {
+            if (!Array.isArray(entries)) return [];
+            return entries.map(entry => ({
+                source: (entry?.source || '').trim(),
+                alias: (entry?.alias || '').trim(),
+            }));
+        }
+
+        function getSavedDictionaryEntries() {
+            return normalizeDictionaryRows(dictionaryEntries).filter(entry => entry.source && entry.alias);
+        }
+
+        function getActiveDictionaryRows(entries = dictionaryEntries) {
+            return normalizeDictionaryRows(entries)
+                .map((entry, rowIndex) => ({ ...entry, rowIndex }))
+                .filter(entry => entry.source && entry.alias);
+        }
+
+        function ensureTrailingDictionaryRow(entries) {
+            const rows = normalizeDictionaryRows(entries);
+            const last = rows[rows.length - 1];
+            if (!last || last.source || last.alias) {
+                rows.push({ source: '', alias: '' });
+            }
+            return rows;
+        }
+
+        function escapeRegex(text) {
+            return (text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        }
+
+        function dictionaryPatternFor(source) {
+            const escaped = escapeRegex(source);
+            return /\w/.test(source)
+                ? new RegExp(`(?<!\\w)${escaped}(?!\\w)`, 'gi')
+                : new RegExp(escaped, 'gi');
+        }
+
+        function applyAliasCase(alias, matchedText) {
+            if (!matchedText) return alias;
+            if (matchedText === matchedText.toUpperCase()) return alias.toUpperCase();
+            if (matchedText === matchedText.toLowerCase()) return alias.toLowerCase();
+            const words = matchedText.match(/[A-Za-z]+/g) || [];
+            if (words.length > 0 && words.every(word => word[0] === word[0].toUpperCase() && word.slice(1) === word.slice(1).toLowerCase())) {
+                return alias.replace(/\b\w+/g, word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase());
+            }
+            if (matchedText.charAt(0) === matchedText.charAt(0).toUpperCase()) {
+                return alias.charAt(0).toUpperCase() + alias.slice(1);
+            }
+            return alias;
+        }
+
+        function applyDictionaryEntriesToText(text, entries) {
+            let currentText = text || '';
+            const counts = [];
+            const placeholders = new Map();
+            let placeholderIndex = 0;
+            getActiveDictionaryRows(entries).forEach(entry => {
+                    const pattern = dictionaryPatternFor(entry.source);
+                    let count = 0;
+                    currentText = currentText.replace(pattern, match => {
+                        count += 1;
+                        const token = `\uE000${placeholderIndex}\uE001`;
+                        placeholderIndex += 1;
+                        placeholders.set(token, applyAliasCase(entry.alias, match));
+                        return token;
+                    });
+                    counts.push(count);
+                });
+            placeholders.forEach((replacement, token) => {
+                currentText = currentText.split(token).join(replacement);
+            });
+            return { text: currentText, counts };
+        }
+
+        async function getDictionaryChunks() {
+            if (cachedChunks.length > 0) return cachedChunks;
+            try {
+                const chunks = await API.get('/api/chunks');
+                if (Array.isArray(chunks)) return chunks;
+            } catch (e) {
+                return [];
+            }
+            return [];
+        }
+
+        async function refreshDictionaryCounts(chunksOverride = null) {
+            const chunks = Array.isArray(chunksOverride) ? chunksOverride : await getDictionaryChunks();
+            const texts = chunks.map(chunk => chunk.text || '');
+            const activeEntries = getActiveDictionaryRows();
+            dictionaryCounts = new Array(dictionaryEntries.length).fill(0);
+
+            texts.forEach(text => {
+                const { counts } = applyDictionaryEntriesToText(text, activeEntries);
+                counts.forEach((count, index) => {
+                    const rowIndex = activeEntries[index]?.rowIndex;
+                    if (rowIndex != null) {
+                        dictionaryCounts[rowIndex] = (dictionaryCounts[rowIndex] || 0) + count;
+                    }
+                });
+            });
+
+            document.querySelectorAll('#dictionary-table-body .dictionary-count-cell').forEach(cell => {
+                const index = Number(cell.dataset.index || -1);
+                cell.textContent = Number.isInteger(index) && index >= 0 ? String(dictionaryCounts[index] || 0) : '0';
+            });
+        }
+
+        function renderDictionaryTable() {
+            const tbody = document.getElementById('dictionary-table-body');
+            if (!tbody) return;
+
+            dictionaryEntries = ensureTrailingDictionaryRow(dictionaryEntries);
+            tbody.innerHTML = dictionaryEntries.map((entry, index) => `
+                <tr>
+                    <td><input type="text" class="form-control form-control-sm" value="${escapeHtml(entry.source || '')}" oninput="updateDictionaryEntry(${index}, 'source', this.value)"></td>
+                    <td><input type="text" class="form-control form-control-sm" value="${escapeHtml(entry.alias || '')}" oninput="updateDictionaryEntry(${index}, 'alias', this.value)"></td>
+                    <td class="text-muted small dictionary-count-cell" data-index="${index}">${dictionaryCounts[index] || 0}</td>
+                </tr>
+            `).join('');
+        }
+
+        window.updateDictionaryEntry = async (index, field, value) => {
+            if (!dictionaryEntries[index]) {
+                dictionaryEntries[index] = { source: '', alias: '' };
+            }
+            dictionaryEntries[index][field] = value;
+            const beforeLength = dictionaryEntries.length;
+            dictionaryEntries = ensureTrailingDictionaryRow(dictionaryEntries);
+            if (dictionaryEntries.length !== beforeLength) {
+                renderDictionaryTable();
+            }
+            await refreshDictionaryCounts();
+            const statusEl = document.getElementById('dictionary-save-status');
+            if (statusEl) statusEl.textContent = 'Unsaved changes';
+        };
+
+        function parseDelimitedLine(line, delimiter) {
+            const cells = [];
+            let current = '';
+            let inQuotes = false;
+
+            for (let i = 0; i < line.length; i += 1) {
+                const char = line[i];
+                if (char === '"') {
+                    if (inQuotes && line[i + 1] === '"') {
+                        current += '"';
+                        i += 1;
+                    } else {
+                        inQuotes = !inQuotes;
+                    }
+                } else if (char === delimiter && !inQuotes) {
+                    cells.push(current);
+                    current = '';
+                } else {
+                    current += char;
+                }
+            }
+            cells.push(current);
+            return cells.map(cell => cell.trim());
+        }
+
+        function parseDictionaryFile(text) {
+            const lines = (text || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+            if (lines.length === 0) return [];
+            const delimiter = lines.some(line => line.includes('\t')) ? '\t' : ',';
+            let startIndex = 0;
+            const firstRow = parseDelimitedLine(lines[0], delimiter).map(cell => cell.toLowerCase());
+            if (firstRow.length >= 2 && firstRow[0] === 'source' && firstRow[1] === 'alias') {
+                startIndex = 1;
+            }
+
+            const entries = [];
+            for (let i = startIndex; i < lines.length; i += 1) {
+                const [source = '', alias = ''] = parseDelimitedLine(lines[i], delimiter);
+                if (source.trim() && alias.trim()) {
+                    entries.push({ source: source.trim(), alias: alias.trim() });
+                }
+            }
+            return entries;
+        }
+
+        window.triggerDictionaryImport = () => {
+            const input = document.getElementById('dictionary-import-input');
+            if (input) input.click();
+        };
+
+        window.handleDictionaryImport = async (input) => {
+            const [file] = input.files || [];
+            if (!file) return;
+            const text = await file.text();
+            const imported = parseDictionaryFile(text);
+            dictionaryEntries = ensureTrailingDictionaryRow(imported);
+            dictionaryCounts = new Array(dictionaryEntries.length).fill(0);
+            renderDictionaryTable();
+            await refreshDictionaryCounts();
+            const statusEl = document.getElementById('dictionary-save-status');
+            if (statusEl) statusEl.textContent = `Imported ${imported.length} entr${imported.length === 1 ? 'y' : 'ies'}; save to persist`;
+            input.value = '';
+        };
+
+        window.exportDictionaryCsv = () => {
+            const entries = getSavedDictionaryEntries();
+            const lines = ['source,alias', ...entries.map(entry => {
+                const source = `"${entry.source.replace(/"/g, '""')}"`;
+                const alias = `"${entry.alias.replace(/"/g, '""')}"`;
+                return `${source},${alias}`;
+            })];
+            const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = 'dictionary.csv';
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(url);
+        };
+
+        window.saveDictionary = async () => {
+            const statusEl = document.getElementById('dictionary-save-status');
+            try {
+                const payload = { entries: getSavedDictionaryEntries() };
+                const result = await API.post('/api/dictionary', payload);
+                dictionaryEntries = ensureTrailingDictionaryRow(result.entries || []);
+                dictionaryCounts = new Array(dictionaryEntries.length).fill(0);
+                renderDictionaryTable();
+                await refreshDictionaryCounts();
+                if (statusEl) statusEl.textContent = 'Saved';
+            } catch (e) {
+                if (statusEl) statusEl.textContent = 'Save failed';
+                showToast(`Dictionary save failed: ${e.message}`, 'error');
+            }
+        };
+
+        async function loadDictionary() {
+            try {
+                const result = await API.get('/api/dictionary');
+                dictionaryEntries = ensureTrailingDictionaryRow(result.entries || []);
+                dictionaryCounts = new Array(dictionaryEntries.length).fill(0);
+                renderDictionaryTable();
+                await refreshDictionaryCounts();
+                const statusEl = document.getElementById('dictionary-save-status');
+                if (statusEl) statusEl.textContent = '';
+            } catch (e) {
+                showToast(`Failed to load dictionary: ${e.message}`, 'error');
+            }
+        }
 
         // --- Editor Tab ---
         const WHOLE_PROJECT_CHAPTER_ID = '__whole_project__';
@@ -1904,6 +2354,7 @@
                     cachedChunks = [];
                     cachedVisibleChunkIds = [];
                     syncEditorChapterState([]);
+                    refreshDictionaryCounts([]);
                     return;
                 }
 
@@ -1926,6 +2377,7 @@
                     visibleChunks.forEach(chunk => updateChunkRow(chunk));
                     cachedChunks = chunks;
                     cachedVisibleChunkIds = visibleChunks.map(chunk => chunk.id);
+                    refreshDictionaryCounts(chunks);
 
                     // Continue polling if generating
                     if (chunks.some(c => c.status === 'generating')) {
@@ -1991,6 +2443,7 @@
 
                 cachedChunks = chunks;
                 cachedVisibleChunkIds = visibleChunks.map(chunk => chunk.id);
+                refreshDictionaryCounts(chunks);
 
                 // If any chunk is generating, poll (without full redraw)
                 if (chunks.some(c => c.status === 'generating')) {
@@ -2195,6 +2648,11 @@
                 const data = {};
                 data[field] = value;
                 await API.post(`/api/chunks/${id}`, data);
+                const cached = cachedChunks.find(chunk => chunk.id === id);
+                if (cached) {
+                    cached[field] = value;
+                    refreshDictionaryCounts(cachedChunks);
+                }
                 // Don't reload entire table to preserve focus, but maybe update status badge if needed
                 // For now, next loadChunks will show updated status (pending)
             } catch (e) {

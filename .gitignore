@@ -36,6 +36,7 @@ audiobook.mp3
 
 # Generated runtime files
 chunks.json
+audio_queue_state.json
 temp_batch_*.wav
 app/flash-attention/
 error_screenshot.png
@@ -68,4 +69,3 @@ builtin_lora/builtin_*/
 
 # Dataset builder working directory
 dataset_builder/
-

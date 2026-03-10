@@ -7,6 +7,7 @@ import zipfile
 import io
 import re
 import time
+import copy
 from tts import (
     TTSEngine,
     combine_audio_with_pauses,
@@ -16,6 +17,10 @@ from tts import (
 )
 from audio_validation import get_audio_duration_seconds, validate_audio_clip
 from pydub import AudioSegment
+from script_store import (
+    apply_dictionary_to_text,
+    load_script_document,
+)
 
 MAX_CHUNK_CHARS = 500
 MAX_AUTO_REGENERATE_BAD_CLIP_ATTEMPTS = 1
@@ -121,6 +126,220 @@ class ProjectManager:
         self.engine = None
         self._chunks_lock = threading.Lock()  # Thread-safe file writes
 
+    def _load_voice_config(self):
+        if os.path.exists(self.voice_config_path):
+            try:
+                with open(self.voice_config_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, ValueError):
+                return {}
+        return {}
+
+    def _save_voice_config(self, voice_config):
+        with open(self.voice_config_path, "w", encoding="utf-8") as f:
+            json.dump(voice_config, f, indent=2, ensure_ascii=False)
+
+    def _current_script_title(self):
+        state_path = os.path.join(self.root_dir, "state.json")
+        if os.path.exists(state_path):
+            try:
+                with open(state_path, "r", encoding="utf-8") as f:
+                    state = json.load(f)
+                input_path = state.get("input_file_path") or ""
+                if input_path:
+                    return os.path.splitext(os.path.basename(input_path))[0].strip()
+            except (json.JSONDecodeError, ValueError, OSError):
+                pass
+        return "Project"
+
+    @staticmethod
+    def _split_text_sentences(text):
+        parts = re.split(r'(?<=[.!?])\s+', (text or "").strip())
+        return [part.strip() for part in parts if part.strip()]
+
+    def suggest_design_sample_text(self, speaker, chunks=None):
+        chunks = chunks if chunks is not None else self.load_chunks()
+        speaker_key = self._normalize_speaker_name(speaker)
+        matching_texts = [
+            (chunk.get("text") or "").strip()
+            for chunk in chunks
+            if self._normalize_speaker_name(chunk.get("speaker")) == speaker_key and (chunk.get("text") or "").strip()
+        ]
+        if not matching_texts:
+            return ""
+
+        sorted_texts = sorted(matching_texts, key=lambda text: len(re.findall(r"\b\w+\b", text)), reverse=True)
+        base_sentences = self._split_text_sentences(sorted_texts[0]) or [sorted_texts[0]]
+        selected = list(base_sentences)
+
+        while len(re.findall(r"\b\w+\b", " ".join(selected))) > 50 and len(selected) > 1:
+            candidate_without_last = selected[:-1]
+            candidate_without_first = selected[1:]
+            first_words = len(re.findall(r"\b\w+\b", " ".join(candidate_without_first)))
+            last_words = len(re.findall(r"\b\w+\b", " ".join(candidate_without_last)))
+            selected = candidate_without_first if first_words >= last_words else candidate_without_last
+
+        used = {sentence.strip() for sentence in selected if sentence.strip()}
+        total_words = len(re.findall(r"\b\w+\b", " ".join(selected)))
+        if total_words >= 30:
+            return " ".join(selected).strip()
+
+        extra_sentences = []
+        for text in sorted_texts:
+            for sentence in self._split_text_sentences(text) or [text]:
+                sentence = sentence.strip()
+                if sentence and sentence not in used:
+                    extra_sentences.append(sentence)
+                    used.add(sentence)
+
+        for sentence in extra_sentences:
+            selected.append(sentence)
+            total_words = len(re.findall(r"\b\w+\b", " ".join(selected)))
+            if total_words >= 30:
+                break
+
+        return " ".join(selected).strip()
+
+    def _upsert_clone_manifest_entry(self, entry):
+        manifest_path = os.path.join(self.root_dir, "clone_voices", "manifest.json")
+        manifest = []
+        if os.path.exists(manifest_path):
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+            except (json.JSONDecodeError, ValueError):
+                manifest = []
+
+        replaced = False
+        for index, existing in enumerate(manifest):
+            if existing.get("id") == entry["id"]:
+                manifest[index] = entry
+                replaced = True
+                break
+        if not replaced:
+            manifest.append(entry)
+
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2, ensure_ascii=False)
+
+    def materialize_design_voice(self, speaker, description=None, sample_text=None, force=False, voice_config=None):
+        voice_config = copy.deepcopy(voice_config) if voice_config is not None else self._load_voice_config()
+        voice_data = voice_config.setdefault(speaker, {})
+        voice_data["type"] = "design"
+
+        description = (description if description is not None else voice_data.get("description") or "").strip()
+        if not description:
+            raise ValueError(f"Voice design for '{speaker}' is missing a base description")
+
+        chunks = self.load_chunks()
+        sample_text = (sample_text if sample_text is not None else voice_data.get("ref_text") or "").strip()
+        if not sample_text:
+            sample_text = self.suggest_design_sample_text(speaker, chunks)
+        if not sample_text:
+            raise ValueError(f"No sample text available for '{speaker}'")
+        generated_ref_text, _ = apply_dictionary_to_text(sample_text, self.load_dictionary_entries())
+
+        script_title = self._current_script_title()
+        display_name = f"{script_title}.{speaker}"
+        safe_name = sanitize_filename(f"{script_title}.{speaker}")
+        voice_id = safe_name or sanitize_filename(speaker) or "designed_clone"
+        filename = f"{voice_id}.wav"
+        rel_audio_path = f"clone_voices/{filename}"
+        abs_audio_path = os.path.join(self.root_dir, rel_audio_path)
+        os.makedirs(os.path.dirname(abs_audio_path), exist_ok=True)
+
+        audio_exists = os.path.exists(abs_audio_path)
+        if force or not audio_exists:
+            engine = self.get_engine()
+            if not engine:
+                raise RuntimeError("TTS engine not initialized")
+            wav_path, _ = engine.generate_voice_design(description=description, sample_text=generated_ref_text)
+            shutil.copy2(wav_path, abs_audio_path)
+            if hasattr(engine, "clear_clone_prompt_cache"):
+                engine.clear_clone_prompt_cache(speaker)
+
+        voice_data["description"] = description
+        voice_data["ref_text"] = sample_text
+        voice_data["generated_ref_text"] = generated_ref_text
+        voice_data["ref_audio"] = rel_audio_path
+        self._save_voice_config(voice_config)
+
+        self._upsert_clone_manifest_entry({
+            "id": voice_id,
+            "name": display_name,
+            "filename": filename,
+            "generated": True,
+            "speaker": speaker,
+            "script_title": script_title,
+            "sample_text": sample_text,
+            "description": description,
+        })
+
+        runtime_data = copy.deepcopy(voice_data)
+        runtime_data["type"] = "clone"
+        return {
+            "voice_config": voice_config,
+            "runtime_voice_data": runtime_data,
+            "voice_id": voice_id,
+            "display_name": display_name,
+            "filename": filename,
+            "ref_audio": rel_audio_path,
+            "ref_text": sample_text,
+            "generated_ref_text": generated_ref_text,
+        }
+
+    def prepare_runtime_voice_config(self, voice_config, speakers, force_design_refresh=False):
+        runtime_config = copy.deepcopy(voice_config)
+        normalized_lookup = {}
+        for name in runtime_config.keys():
+            normalized = self._normalize_speaker_name(name)
+            if normalized and normalized not in normalized_lookup:
+                normalized_lookup[normalized] = name
+
+        def ensure_runtime_voice(speaker, visiting=None):
+            visiting = visiting or set()
+            normalized = self._normalize_speaker_name(speaker)
+            actual_speaker = normalized_lookup.get(normalized, speaker)
+            if actual_speaker in visiting:
+                raise ValueError(f"Voice fallback loop detected for '{actual_speaker}'")
+            visiting = set(visiting)
+            visiting.add(actual_speaker)
+
+            voice_data = runtime_config.get(actual_speaker, {})
+            if voice_data.get("type") != "design":
+                return actual_speaker
+
+            try:
+                materialized = self.materialize_design_voice(
+                    actual_speaker,
+                    description=voice_data.get("description"),
+                    sample_text=voice_data.get("ref_text"),
+                    force=force_design_refresh or not voice_data.get("ref_audio"),
+                    voice_config=runtime_config,
+                )
+                runtime_config.update(materialized["voice_config"])
+                runtime_config[actual_speaker] = materialized["runtime_voice_data"]
+                return actual_speaker
+            except Exception:
+                if normalized == self._normalize_speaker_name("NARRATOR"):
+                    raise
+
+                narrator_name = normalized_lookup.get(self._normalize_speaker_name("NARRATOR"))
+                if not narrator_name:
+                    raise ValueError(f"Voice design for '{actual_speaker}' is unavailable and narrator has no voice configured")
+
+                ensure_runtime_voice(narrator_name, visiting)
+                narrator_runtime = runtime_config.get(narrator_name, {})
+                if narrator_runtime.get("type") == "design":
+                    raise ValueError("Narrator voice is unavailable; cannot fall back from design voice")
+                runtime_config[actual_speaker] = copy.deepcopy(narrator_runtime)
+                return actual_speaker
+
+        for speaker in speakers:
+            ensure_runtime_voice(speaker)
+
+        return runtime_config
+
     @staticmethod
     def _normalize_speaker_name(name):
         return re.sub(r"\s+", " ", (name or "").strip()).casefold()
@@ -194,8 +413,7 @@ class ProjectManager:
 
         # If no chunks (or corrupted), generate from script
         if os.path.exists(self.script_path):
-            with open(self.script_path, "r", encoding="utf-8") as f:
-                script = json.load(f)
+            script = load_script_document(self.script_path)["entries"]
             chunks = group_into_chunks(script)
 
             # Initialize chunk status
@@ -210,6 +428,14 @@ class ProjectManager:
             return chunks
 
         return []
+
+    def load_script_document(self):
+        if not os.path.exists(self.script_path):
+            return {"entries": [], "dictionary": []}
+        return load_script_document(self.script_path)
+
+    def load_dictionary_entries(self):
+        return self.load_script_document()["dictionary"]
 
     def _atomic_json_write(self, data, target_path, max_retries=5):
         """Atomically write JSON data with retry logic for Windows file locking."""
@@ -251,6 +477,103 @@ class ProjectManager:
             chunks[index].update(fields)
             self._atomic_json_write(chunks, self.chunks_path)
             return chunks[index]
+
+    def _claim_chunk_generation(self, index, generation_token=None):
+        with self._chunks_lock:
+            if not os.path.exists(self.chunks_path):
+                return None
+            with open(self.chunks_path, "r", encoding="utf-8") as f:
+                chunks = json.load(f)
+            if not (0 <= index < len(chunks)):
+                return None
+            chunks[index]["status"] = "generating"
+            if generation_token is not None:
+                chunks[index]["generation_token"] = generation_token
+            else:
+                chunks[index].pop("generation_token", None)
+            self._atomic_json_write(chunks, self.chunks_path)
+            return chunks[index]
+
+    def _claim_chunks_generation(self, indices, generation_token=None):
+        claimed = 0
+        with self._chunks_lock:
+            if not os.path.exists(self.chunks_path):
+                return claimed
+            with open(self.chunks_path, "r", encoding="utf-8") as f:
+                chunks = json.load(f)
+            for index in indices:
+                if not (0 <= index < len(chunks)):
+                    continue
+                chunks[index]["status"] = "generating"
+                if generation_token is not None:
+                    chunks[index]["generation_token"] = generation_token
+                else:
+                    chunks[index].pop("generation_token", None)
+                claimed += 1
+            self._atomic_json_write(chunks, self.chunks_path)
+        return claimed
+
+    def _chunk_token_matches(self, chunks, index, generation_token=None):
+        if generation_token is None:
+            return True
+        if not (0 <= index < len(chunks)):
+            return False
+        return chunks[index].get("generation_token") == generation_token
+
+    def chunk_has_generation_token(self, index, generation_token=None):
+        with self._chunks_lock:
+            if not os.path.exists(self.chunks_path):
+                return False
+            with open(self.chunks_path, "r", encoding="utf-8") as f:
+                chunks = json.load(f)
+            return self._chunk_token_matches(chunks, index, generation_token)
+
+    def _update_chunk_fields_if_token(self, index, expected_token=None, **fields):
+        with self._chunks_lock:
+            if not os.path.exists(self.chunks_path):
+                return None
+            with open(self.chunks_path, "r", encoding="utf-8") as f:
+                chunks = json.load(f)
+            if not (0 <= index < len(chunks)):
+                return None
+            if not self._chunk_token_matches(chunks, index, expected_token):
+                return None
+            for key, value in fields.items():
+                if key == "generation_token":
+                    if value is None:
+                        chunks[index].pop("generation_token", None)
+                    else:
+                        chunks[index]["generation_token"] = value
+                else:
+                    chunks[index][key] = value
+            if fields.get("status") != "generating" and "generation_token" not in fields:
+                chunks[index].pop("generation_token", None)
+            self._atomic_json_write(chunks, self.chunks_path)
+            return chunks[index]
+
+    def reset_generating_chunks(self, indices=None, generation_token=None, target_status="pending"):
+        reset_count = 0
+        with self._chunks_lock:
+            if not os.path.exists(self.chunks_path):
+                return reset_count
+            with open(self.chunks_path, "r", encoding="utf-8") as f:
+                chunks = json.load(f)
+            if indices is None:
+                index_iter = range(len(chunks))
+            else:
+                index_iter = [index for index in indices if 0 <= index < len(chunks)]
+            for index in index_iter:
+                chunk = chunks[index]
+                if chunk.get("status") != "generating":
+                    continue
+                if generation_token is not None and chunk.get("generation_token") != generation_token:
+                    continue
+                chunk["status"] = target_status
+                chunk.pop("generation_token", None)
+                reset_count += 1
+            if reset_count:
+                self._atomic_json_write(chunks, self.chunks_path)
+        return reset_count
 
     def insert_chunk(self, after_index):
         """Insert an empty chunk after the given index. Returns the new chunk list."""
@@ -433,13 +756,14 @@ class ProjectManager:
             "error": validation["error"],
         }
 
-    def generate_chunk_audio(self, index, attempt=0):
+    def generate_chunk_audio(self, index, attempt=0, generation_token=None):
         chunks = self.load_chunks()
         if not (0 <= index < len(chunks)):
             return False, "Invalid chunk index"
 
-        chunk = chunks[index]
-        self._update_chunk_fields(index, status="generating")
+        chunk = self._claim_chunk_generation(index, generation_token)
+        if not chunk:
+            return False, "Invalid chunk index"
 
         try:
             engine = self.get_engine()
@@ -447,59 +771,78 @@ class ProjectManager:
                 self._update_chunk_fields(index, status="error", audio_validation=None, auto_regen_count=attempt)
                 return False, "TTS engine not initialized"
 
-            # Load voice config
-            voice_config = {}
-            if os.path.exists(self.voice_config_path):
-                with open(self.voice_config_path, "r", encoding="utf-8") as f:
-                    voice_config = json.load(f)
-
             speaker = chunk["speaker"]
+            voice_config = self._load_voice_config()
             resolved_speaker = self.resolve_voice_speaker(speaker, voice_config)
+            voice_config = self.prepare_runtime_voice_config(voice_config, [resolved_speaker])
             text = chunk["text"]
+            transformed_text, _ = apply_dictionary_to_text(text, self.load_dictionary_entries())
             instruct = chunk.get("instruct", "")
             tts_settings = self._load_tts_settings()
             auto_regenerate_bad_clips = tts_settings.get("auto_regenerate_bad_clips", False)
 
             print(
                 f"Generating chunk {index}: speaker={speaker}, resolved_speaker={resolved_speaker}, "
-                f"instruct='{instruct}', text='{text[:50]}...'"
+                f"instruct='{instruct}', text='{transformed_text[:50]}...'"
             )
 
             # Generate to temp file (unique per chunk for parallel processing)
             temp_path = os.path.join(self.root_dir, f"temp_chunk_{index}.wav")
 
-            success = engine.generate_voice(text, instruct, resolved_speaker, voice_config, temp_path)
+            success = engine.generate_voice(transformed_text, instruct, resolved_speaker, voice_config, temp_path)
+
+            if generation_token is not None and not self.chunk_has_generation_token(index, generation_token):
+                self._cleanup_temp_file(temp_path)
+                return False, "Generation abandoned"
 
             if success:
-                result = self._finalize_generated_audio(index, speaker, text, temp_path, attempt=attempt)
+                result = self._finalize_generated_audio(index, speaker, transformed_text, temp_path, attempt=attempt)
                 if result["status"] == "error" and auto_regenerate_bad_clips and attempt < MAX_AUTO_REGENERATE_BAD_CLIP_ATTEMPTS:
-                    self._update_chunk_fields(
+                    self._update_chunk_fields_if_token(
                         index,
+                        generation_token,
                         status="pending",
                         audio_path=result["audio_path"],
                         audio_validation=result["audio_validation"],
                         auto_regen_count=attempt + 1,
+                        generation_token=None,
                     )
                     self._cleanup_temp_file(temp_path)
                     print(f"Chunk {index} failed sanity check; auto-regenerating attempt {attempt + 1}/{MAX_AUTO_REGENERATE_BAD_CLIP_ATTEMPTS}")
-                    return self.generate_chunk_audio(index, attempt=attempt + 1)
-                self._update_chunk_fields(
+                    return self.generate_chunk_audio(index, attempt=attempt + 1, generation_token=generation_token)
+                self._update_chunk_fields_if_token(
                     index,
+                    generation_token,
                     status=result["status"],
                     audio_path=result["audio_path"],
                     audio_validation=result["audio_validation"],
                     auto_regen_count=attempt,
+                    generation_token=None,
                 )
                 self._cleanup_temp_file(temp_path)
                 return result["status"] == "done", result["audio_path"] if result["status"] == "done" else result["error"]
             else:
-                self._update_chunk_fields(index, status="error", audio_validation=None, auto_regen_count=attempt)
+                self._update_chunk_fields_if_token(
+                    index,
+                    generation_token,
+                    status="error",
+                    audio_validation=None,
+                    auto_regen_count=attempt,
+                    generation_token=None,
+                )
                 self._cleanup_temp_file(temp_path)
                 return False, "Generation failed"
 
         except Exception as e:
             try:
-                self._update_chunk_fields(index, status="error", audio_validation=None, auto_regen_count=attempt)
+                self._update_chunk_fields_if_token(
+                    index,
+                    generation_token,
+                    status="error",
+                    audio_validation=None,
+                    auto_regen_count=attempt,
+                    generation_token=None,
+                )
             except Exception as update_err:
                 print(f"Warning: Failed to update chunk {index} status to error: {update_err}")
             self._cleanup_temp_file(os.path.join(self.root_dir, f"temp_chunk_{index}.wav"))
@@ -833,7 +1176,7 @@ class ProjectManager:
         return chapters
 
     def generate_chunks_parallel(self, indices, max_workers=2, progress_callback=None,
-                                  cancel_check=None, item_callback=None):
+                                  cancel_check=None, item_callback=None, generation_token=None):
         """Generate multiple chunks in parallel using ThreadPoolExecutor.
 
         Uses individual TTS API calls with per-speaker voice settings.
@@ -871,7 +1214,7 @@ class ProjectManager:
         def _timed_generate(idx):
             start = time.time()
             try:
-                success, msg = self.generate_chunk_audio(idx)
+                success, msg = self.generate_chunk_audio(idx, generation_token=generation_token)
                 return success, msg, time.time() - start
             except Exception as e:
                 return False, str(e), time.time() - start
@@ -913,6 +1256,7 @@ class ProjectManager:
                     for idx in indices:
                         if idx not in done_indices and 0 <= idx < len(chunks) and chunks[idx].get("status") == "generating":
                             chunks[idx]["status"] = "pending"
+                            chunks[idx].pop("generation_token", None)
                             results["cancelled"] += 1
                     self.save_chunks(chunks)
 
@@ -964,7 +1308,7 @@ class ProjectManager:
         return reordered
 
     def generate_chunks_batch(self, indices, batch_seed=-1, batch_size=4, progress_callback=None,
-                               batch_group_by_type=False, cancel_check=None, item_callback=None):
+                               batch_group_by_type=False, cancel_check=None, item_callback=None, generation_token=None):
         """Generate multiple chunks using batch TTS API with a single seed.
 
         Args:
@@ -1001,9 +1345,13 @@ class ProjectManager:
             for idx in indices if 0 <= idx < len(chunks)
         }
         voice_config = {}
-        if os.path.exists(self.voice_config_path):
-            with open(self.voice_config_path, "r", encoding="utf-8") as f:
-                voice_config = json.load(f)
+        voice_config = self._load_voice_config()
+        resolved_speakers = {
+            self.resolve_voice_speaker(chunks[idx].get("speaker", ""), voice_config)
+            for idx in indices if 0 <= idx < len(chunks)
+        }
+        voice_config = self.prepare_runtime_voice_config(voice_config, resolved_speakers)
+        dictionary_entries = self.load_dictionary_entries()
         tts_settings = self._load_tts_settings()
         auto_regenerate_bad_clips = tts_settings.get("auto_regenerate_bad_clips", False)
 
@@ -1014,11 +1362,7 @@ class ProjectManager:
                 results["failed"].append((idx, "TTS engine not initialized"))
             return results
 
-        # Mark all chunks as generating
-        for idx in indices:
-            if 0 <= idx < len(chunks):
-                chunks[idx]["status"] = "generating"
-        self.save_chunks(chunks)
+        self._claim_chunks_generation(indices, generation_token)
 
         # Optionally reorder indices so same voice-type chunks are contiguous.
         # This produces larger homogeneous batches (e.g. all custom voices
@@ -1041,12 +1385,15 @@ class ProjectManager:
 
             # Build batch request data
             batch_chunks = []
+            transformed_texts = {}
             for idx in batch_indices:
                 if 0 <= idx < len(chunks):
                     chunk = chunks[idx]
+                    transformed_text, _ = apply_dictionary_to_text(chunk.get("text", ""), dictionary_entries)
+                    transformed_texts[idx] = transformed_text
                     batch_chunks.append({
                         "index": idx,
-                        "text": chunk.get("text", ""),
+                        "text": transformed_text,
                         "instruct": chunk.get("instruct", ""),
                         "speaker": self.resolve_voice_speaker(chunk.get("speaker", ""), voice_config)
                     })
@@ -1071,28 +1418,52 @@ class ProjectManager:
 
                 if not os.path.exists(temp_path):
                     results["failed"].append((idx, "Temp audio file not found"))
-                    chunks[idx]["status"] = "error"
+                    self._update_chunk_fields_if_token(
+                        idx,
+                        generation_token,
+                        status="error",
+                        audio_validation=None,
+                        generation_token=None,
+                    )
                     continue
 
                 try:
+                    if generation_token is not None and not self.chunk_has_generation_token(idx, generation_token):
+                        self._cleanup_temp_file(temp_path)
+                        continue
                     chunk = chunks[idx]
                     speaker = chunk.get("speaker", "unknown")
-                    result = self._finalize_generated_audio(idx, speaker, chunk.get("text", ""), temp_path, attempt=0)
-                    chunks[idx]["audio_path"] = result["audio_path"]
-                    chunks[idx]["audio_validation"] = result["audio_validation"]
-                    chunks[idx]["status"] = "pending" if (result["status"] == "error" and auto_regenerate_bad_clips) else result["status"]
-                    chunks[idx]["auto_regen_count"] = 0
-                    self.save_chunks(chunks)
+                    result = self._finalize_generated_audio(
+                        idx,
+                        speaker,
+                        transformed_texts.get(idx, chunk.get("text", "")),
+                        temp_path,
+                        attempt=0,
+                    )
+                    updated_status = "pending" if (result["status"] == "error" and auto_regenerate_bad_clips) else result["status"]
+                    updated_chunk = self._update_chunk_fields_if_token(
+                        idx,
+                        generation_token,
+                        audio_path=result["audio_path"],
+                        audio_validation=result["audio_validation"],
+                        status=updated_status,
+                        auto_regen_count=0,
+                        generation_token=None if updated_status != "pending" else generation_token,
+                    )
+                    if updated_chunk is None:
+                        self._cleanup_temp_file(temp_path)
+                        continue
+                    chunks = self.load_chunks()
 
                     if result["status"] == "done":
                         results["completed"].append(idx)
-                        print(f"Chunk {idx} completed: {chunks[idx]['audio_path']}")
+                        print(f"Chunk {idx} completed: {updated_chunk['audio_path']}")
                         if item_callback:
                             item_callback(idx, True, shared_elapsed, word_counts.get(idx, 0), word_counts.get(idx, 0))
                     elif auto_regenerate_bad_clips:
                         print(f"Chunk {idx} failed validation in batch; retrying immediately at the front of the queue")
                         retry_start = time.time()
-                        retry_success, retry_msg = self.generate_chunk_audio(idx, attempt=1)
+                        retry_success, retry_msg = self.generate_chunk_audio(idx, attempt=1, generation_token=generation_token)
                         retry_elapsed = time.time() - retry_start
                         chunks = self.load_chunks()
                         if retry_success:
@@ -1116,21 +1487,31 @@ class ProjectManager:
                 except Exception as e:
                     print(f"Error processing chunk {idx}: {e}")
                     results["failed"].append((idx, str(e)))
-                    chunks[idx]["status"] = "error"
-                    chunks[idx]["audio_validation"] = None
+                    self._update_chunk_fields_if_token(
+                        idx,
+                        generation_token,
+                        status="error",
+                        audio_validation=None,
+                        generation_token=None,
+                    )
                     self._cleanup_temp_file(temp_path)
                     if item_callback:
                         item_callback(idx, False, shared_elapsed, word_counts.get(idx, 0), 0)
 
             for idx, error in batch_results["failed"]:
                 if 0 <= idx < len(chunks):
-                    chunks[idx]["status"] = "error"
-                    chunks[idx]["audio_validation"] = None
+                    self._update_chunk_fields_if_token(
+                        idx,
+                        generation_token,
+                        status="error",
+                        audio_validation=None,
+                        generation_token=None,
+                    )
                 results["failed"].append((idx, error))
                 if item_callback:
                     item_callback(idx, False, shared_elapsed, word_counts.get(idx, 0), 0)
 
-            self.save_chunks(chunks)
+            chunks = self.load_chunks()
 
             if progress_callback:
                 progress_callback(len(results["completed"]), len(results["failed"]), total)
@@ -1142,6 +1523,7 @@ class ProjectManager:
             for idx in indices:
                 if idx not in done_indices and 0 <= idx < len(chunks) and chunks[idx].get("status") == "generating":
                     chunks[idx]["status"] = "pending"
+                    chunks[idx].pop("generation_token", None)
                     results["cancelled"] += 1
             if results["cancelled"]:
                 self.save_chunks(chunks)

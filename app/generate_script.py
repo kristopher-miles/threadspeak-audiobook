@@ -4,6 +4,7 @@ import json
 import re
 from openai import OpenAI
 from default_prompts import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT
+from script_store import load_script_document, save_script_document
 
 def clean_json_string(text):
     """Clean and extract valid JSON array from LLM response."""
@@ -444,8 +445,13 @@ def main():
 
     # Save as JSON
     output_path = os.path.join("..", "annotated_script.json")
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(all_entries, f, indent=2, ensure_ascii=False)
+    existing_dictionary = []
+    if os.path.exists(output_path):
+        try:
+            existing_dictionary = load_script_document(output_path)["dictionary"]
+        except Exception:
+            existing_dictionary = []
+    save_script_document(output_path, entries=all_entries, dictionary=existing_dictionary)
 
     # Delete old chunks.json so editor regenerates from new script
     chunks_path = os.path.join("..", "chunks.json")

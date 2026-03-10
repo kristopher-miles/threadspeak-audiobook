@@ -16,12 +16,14 @@ import threading
 import zipfile
 import subprocess
 import aiofiles
+import uuid
 
 # Import ProjectManager
 from project import ProjectManager
 from default_prompts import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT, load_default_prompts
 from review_prompts import load_review_prompts
 from hf_utils import fetch_builtin_manifest, download_builtin_adapter, is_adapter_downloaded
+from script_store import apply_dictionary_to_text, clean_dictionary_entries, load_script_document, save_script_document
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -41,6 +43,7 @@ M4B_PATH = os.path.join(ROOT_DIR, "audiobook.m4b")
 UPLOADS_DIR = os.path.join(BASE_DIR, "uploads")
 SCRIPTS_DIR = os.path.join(ROOT_DIR, "scripts")
 CHUNKS_PATH = os.path.join(ROOT_DIR, "chunks.json")
+AUDIO_QUEUE_STATE_PATH = os.path.join(ROOT_DIR, "audio_queue_state.json")
 DESIGNED_VOICES_DIR = os.path.join(ROOT_DIR, "designed_voices")
 CLONE_VOICES_DIR = os.path.join(ROOT_DIR, "clone_voices")
 LORA_MODELS_DIR = os.path.join(ROOT_DIR, "lora_models")
@@ -56,6 +59,20 @@ os.makedirs(CLONE_VOICES_DIR, exist_ok=True)
 os.makedirs(LORA_MODELS_DIR, exist_ok=True)
 os.makedirs(LORA_DATASETS_DIR, exist_ok=True)
 os.makedirs(DATASET_BUILDER_DIR, exist_ok=True)
+
+
+def _load_project_script_document():
+    if not os.path.exists(SCRIPT_PATH):
+        return {"entries": [], "dictionary": []}
+    return load_script_document(SCRIPT_PATH)
+
+
+def _load_project_dictionary_entries():
+    return _load_project_script_document()["dictionary"]
+
+
+def _apply_project_dictionary(text):
+    return apply_dictionary_to_text(text, _load_project_dictionary_entries())[0]
 
 # Mount static files with absolute path
 STATIC_DIR = os.path.join(BASE_DIR, "static")
@@ -162,6 +179,7 @@ class VoiceConfigItem(BaseModel):
     seed: Optional[str] = "-1"
     ref_audio: Optional[str] = None
     ref_text: Optional[str] = None
+    generated_ref_text: Optional[str] = None
     adapter_id: Optional[str] = None
     adapter_path: Optional[str] = None
     description: Optional[str] = ""  # voice description (for design type)
@@ -175,6 +193,22 @@ class BatchGenerateRequest(BaseModel):
     indices: List[int]
     label: Optional[str] = None
     scope: Optional[str] = None
+
+
+class DictionaryEntry(BaseModel):
+    source: str = ""
+    alias: str = ""
+
+
+class DictionarySaveRequest(BaseModel):
+    entries: List[DictionaryEntry]
+
+
+class VoiceDesignGenerateRequest(BaseModel):
+    speaker: str
+    description: str
+    sample_text: Optional[str] = None
+    force: bool = False
 
 class VoiceDesignPreviewRequest(BaseModel):
     description: str
@@ -246,12 +280,24 @@ class DatasetBuilderUpdateRowsRequest(BaseModel):
 
 # Global state for process tracking
 ROLLING_AUDIO_SAMPLE_LIMIT = 50
+AUDIO_HEARTBEAT_INTERVAL_SECONDS = 600
+AUDIO_RECOVERY_POLL_SECONDS = 5
 
 
 process_state = {
     "script": {"running": False, "logs": []},
     "voices": {"running": False, "logs": []},
-    "audio": {"running": False, "logs": [], "cancel": False, "queue": [], "current_job": None, "recent_jobs": [], "merge_running": False, "metrics": {}},
+    "audio": {
+        "running": False,
+        "logs": [],
+        "cancel": False,
+        "queue": [],
+        "current_job": None,
+        "recent_jobs": [],
+        "merge_running": False,
+        "metrics": {},
+        "heartbeat": {},
+    },
     "audacity_export": {"running": False, "logs": []},
     "m4b_export": {"running": False, "logs": []},
     "review": {"running": False, "logs": []},
@@ -265,6 +311,7 @@ audio_queue_condition = threading.Condition(audio_queue_lock)
 audio_queue = []
 audio_current_job = None
 audio_job_counter = 0
+audio_recovery_request = None
 
 
 def _trim_logs(logs, limit=1000):
@@ -299,6 +346,20 @@ def _new_audio_metrics():
 process_state["audio"]["metrics"] = _new_audio_metrics()
 
 
+def _new_audio_heartbeat_state():
+    return {
+        "interval_seconds": AUDIO_HEARTBEAT_INTERVAL_SECONDS,
+        "last_check_at": None,
+        "last_output_at": None,
+        "last_recovery_at": None,
+        "recovery_count": 0,
+        "last_recovery_reason": None,
+    }
+
+
+process_state["audio"]["heartbeat"] = _new_audio_heartbeat_state()
+
+
 def _format_audio_metrics_locked():
     metrics = process_state["audio"]["metrics"]
     return {
@@ -316,6 +377,18 @@ def _format_audio_metrics_locked():
         "estimated_remaining_seconds": metrics["estimated_remaining_seconds"],
         "words_per_minute": metrics["words_per_minute"],
         "error_rate": metrics["error_rate"],
+    }
+
+
+def _format_audio_heartbeat_locked():
+    heartbeat = process_state["audio"]["heartbeat"]
+    return {
+        "interval_seconds": heartbeat["interval_seconds"],
+        "last_check_at": heartbeat["last_check_at"],
+        "last_output_at": heartbeat["last_output_at"],
+        "last_recovery_at": heartbeat["last_recovery_at"],
+        "recovery_count": heartbeat["recovery_count"],
+        "last_recovery_reason": heartbeat["last_recovery_reason"],
     }
 
 
@@ -352,17 +425,41 @@ def _serialize_audio_job(job):
         "remaining_words": job.get("remaining_words", 0),
         "processed_clips": job.get("processed_clips", 0),
         "error_clips": job.get("error_clips", 0),
+        "pending_indices": list(job.get("pending_indices", [])),
+        "recovery_count": job.get("recovery_count", 0),
         "queued_at": job["queued_at"],
         "started_at": job.get("started_at"),
         "finished_at": job.get("finished_at"),
+        "last_output_at": job.get("last_output_at"),
     }
 
 
-def _refresh_audio_process_state_locked():
+def _atomic_json_write(path, data):
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    os.replace(tmp_path, path)
+
+
+def _persist_audio_queue_state_locked():
+    payload = {
+        "job_counter": audio_job_counter,
+        "queue": [_serialize_audio_job(job) | {"word_counts": job.get("word_counts", {})} for job in audio_queue],
+        "current_job": (_serialize_audio_job(audio_current_job) | {"word_counts": audio_current_job.get("word_counts", {})}) if audio_current_job else None,
+        "heartbeat": _format_audio_heartbeat_locked(),
+        "updated_at": time.time(),
+    }
+    _atomic_json_write(AUDIO_QUEUE_STATE_PATH, payload)
+
+
+def _refresh_audio_process_state_locked(persist=False):
     process_state["audio"]["queue"] = [_serialize_audio_job(job) for job in audio_queue]
     process_state["audio"]["current_job"] = _serialize_audio_job(audio_current_job) if audio_current_job else None
     process_state["audio"]["running"] = audio_current_job is not None or process_state["audio"].get("merge_running", False)
     process_state["audio"]["metrics"] = _format_audio_metrics_locked()
+    process_state["audio"]["heartbeat"] = _format_audio_heartbeat_locked()
+    if persist:
+        _persist_audio_queue_state_locked()
 
 
 def _append_audio_log(message):
@@ -382,6 +479,7 @@ def _record_audio_recent_job_locked(job):
 
 def _record_audio_sample_locked(job, chunk_index, elapsed_seconds, input_words, output_words, success):
     metrics = process_state["audio"]["metrics"]
+    now = time.time()
     sample = {
         "job_id": job["id"],
         "chunk_index": chunk_index,
@@ -410,9 +508,13 @@ def _record_audio_sample_locked(job, chunk_index, elapsed_seconds, input_words, 
         metrics["error_clips"] += 1
 
     job["processed_clips"] = job.get("processed_clips", 0) + 1
+    if chunk_index in job.get("pending_indices", []):
+        job["pending_indices"].remove(chunk_index)
     if not success:
         job["error_clips"] = job.get("error_clips", 0) + 1
     job["remaining_words"] = max(0, job.get("remaining_words", 0) - sample["input_words"])
+    job["last_output_at"] = now
+    process_state["audio"]["heartbeat"]["last_output_at"] = now
     _recompute_audio_metrics_locked()
 
 
@@ -470,24 +572,28 @@ def _enqueue_audio_job(kind, indices, label=None, scope=None):
             "id": audio_job_counter,
             "kind": kind,
             "indices": valid_indices,
+            "pending_indices": list(valid_indices),
             "word_counts": word_counts,
             "total_chunks": len(valid_indices),
             "total_words": sum(word_counts.values()),
             "remaining_words": sum(word_counts.values()),
             "processed_clips": 0,
             "error_clips": 0,
+            "recovery_count": 0,
             "label": label or f"Audio Job {audio_job_counter}",
             "scope": scope or "custom",
             "status": "queued",
             "queued_at": time.time(),
             "started_at": None,
             "finished_at": None,
+            "last_output_at": None,
+            "run_token": None,
         }
         audio_queue.append(job)
         _append_audio_log_locked(
             f"[QUEUE] Job #{job['id']} queued: {job['label']} ({job['total_chunks']} chunks, scope={job['scope']})"
         )
-        _refresh_audio_process_state_locked()
+        _refresh_audio_process_state_locked(persist=True)
         queue_position = len(audio_queue)
         audio_queue_condition.notify()
         return {
@@ -502,99 +608,358 @@ def _enqueue_audio_job(kind, indices, label=None, scope=None):
         }
 
 
+def _clone_audio_job_for_retry(job, pending_indices, reason):
+    global audio_job_counter
+
+    pending_indices = [idx for idx in pending_indices if idx in job.get("word_counts", {})]
+    if not pending_indices:
+        return None
+
+    audio_job_counter += 1
+    word_counts = {idx: job["word_counts"][idx] for idx in pending_indices if idx in job["word_counts"]}
+    retry_count = job.get("recovery_count", 0) + 1
+    return {
+        "id": audio_job_counter,
+        "kind": job["kind"],
+        "indices": list(pending_indices),
+        "pending_indices": list(pending_indices),
+        "word_counts": word_counts,
+        "total_chunks": len(pending_indices),
+        "total_words": sum(word_counts.values()),
+        "remaining_words": sum(word_counts.values()),
+        "processed_clips": 0,
+        "error_clips": 0,
+        "recovery_count": retry_count,
+        "label": f"{job['label']} (resume {retry_count})",
+        "scope": job["scope"],
+        "status": "queued",
+        "queued_at": time.time(),
+        "started_at": None,
+        "finished_at": None,
+        "last_output_at": None,
+        "run_token": None,
+        "resume_of": job["id"],
+        "resume_reason": reason,
+    }
+
+
+def _restore_audio_queue_state():
+    global audio_job_counter
+
+    if not os.path.exists(AUDIO_QUEUE_STATE_PATH):
+        return
+
+    try:
+        with open(AUDIO_QUEUE_STATE_PATH, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        logger.warning(f"Failed to restore audio queue state: {e}")
+        return
+
+    with audio_queue_condition:
+        project_manager.reset_generating_chunks()
+        process_state["audio"]["metrics"] = _new_audio_metrics()
+        process_state["audio"]["heartbeat"] = _new_audio_heartbeat_state()
+        process_state["audio"]["logs"] = []
+        process_state["audio"]["recent_jobs"] = []
+        audio_job_counter = max(audio_job_counter, int(payload.get("job_counter", 0) or 0))
+
+        restored_jobs = []
+        for raw_job in payload.get("queue", []):
+            pending_indices = [int(idx) for idx in raw_job.get("pending_indices", raw_job.get("indices", []))]
+            if not pending_indices:
+                continue
+            restored_jobs.append({
+                "id": int(raw_job.get("id", 0) or 0),
+                "kind": raw_job.get("kind", "parallel"),
+                "indices": pending_indices,
+                "pending_indices": pending_indices,
+                "word_counts": {int(k): int(v) for k, v in (raw_job.get("word_counts") or {}).items()},
+                "total_chunks": len(pending_indices),
+                "total_words": int(raw_job.get("total_words", 0) or 0),
+                "remaining_words": int(raw_job.get("remaining_words", 0) or 0),
+                "processed_clips": 0,
+                "error_clips": 0,
+                "recovery_count": int(raw_job.get("recovery_count", 0) or 0),
+                "label": raw_job.get("label", "Recovered audio job"),
+                "scope": raw_job.get("scope", "custom"),
+                "status": "queued",
+                "queued_at": time.time(),
+                "started_at": None,
+                "finished_at": None,
+                "last_output_at": None,
+                "run_token": None,
+            })
+
+        raw_current = payload.get("current_job")
+        if raw_current:
+            pending_indices = [int(idx) for idx in raw_current.get("pending_indices", raw_current.get("indices", []))]
+            if pending_indices:
+                resumed_job = {
+                    "id": int(raw_current.get("id", 0) or 0),
+                    "kind": raw_current.get("kind", "parallel"),
+                    "indices": pending_indices,
+                    "pending_indices": pending_indices,
+                    "word_counts": {int(k): int(v) for k, v in (raw_current.get("word_counts") or {}).items()},
+                    "total_chunks": len(pending_indices),
+                    "total_words": int(raw_current.get("total_words", 0) or 0),
+                    "remaining_words": int(raw_current.get("remaining_words", 0) or 0),
+                    "processed_clips": 0,
+                    "error_clips": 0,
+                    "recovery_count": int(raw_current.get("recovery_count", 0) or 0) + 1,
+                    "label": f"{raw_current.get('label', 'Recovered audio job')} (resumed after restart)",
+                    "scope": raw_current.get("scope", "custom"),
+                    "status": "queued",
+                    "queued_at": time.time(),
+                    "started_at": None,
+                    "finished_at": None,
+                    "last_output_at": None,
+                    "run_token": None,
+                }
+                restored_jobs.insert(0, resumed_job)
+                _append_audio_log_locked(
+                    f"[RECOVER] Restored interrupted job from disk with {len(pending_indices)} pending chunk(s)"
+                )
+
+        audio_queue[:] = restored_jobs
+        if restored_jobs:
+            _refresh_audio_process_state_locked(persist=True)
+            audio_queue_condition.notify_all()
+
+
+def _request_audio_recovery_locked(reason):
+    global audio_recovery_request
+    if audio_current_job is None:
+        return False
+    if audio_recovery_request is not None:
+        return False
+    audio_recovery_request = {
+        "job_id": audio_current_job["id"],
+        "run_token": audio_current_job.get("run_token"),
+        "reason": reason,
+        "requested_at": time.time(),
+    }
+    _append_audio_log_locked(f"[WATCHDOG] {reason}")
+    _refresh_audio_process_state_locked(persist=True)
+    audio_queue_condition.notify_all()
+    return True
+
+
+def _perform_audio_recovery_locked(job, run_token, reason):
+    global audio_current_job, audio_recovery_request
+
+    if audio_current_job is None:
+        return False
+    if audio_current_job["id"] != job["id"] or audio_current_job.get("run_token") != run_token:
+        return False
+
+    pending_indices = list(job.get("pending_indices", []))
+    project_manager.reset_generating_chunks(indices=job.get("indices"), generation_token=run_token)
+
+    job["status"] = "stalled"
+    job["finished_at"] = time.time()
+    _record_audio_recent_job_locked(job)
+
+    heartbeat = process_state["audio"]["heartbeat"]
+    heartbeat["last_recovery_at"] = job["finished_at"]
+    heartbeat["last_recovery_reason"] = reason
+    heartbeat["recovery_count"] += 1
+
+    retry_job = _clone_audio_job_for_retry(job, pending_indices, reason)
+    if retry_job is not None:
+        audio_queue.insert(0, retry_job)
+        _append_audio_log_locked(
+            f"[RECOVER] Re-queued {len(retry_job['indices'])} stalled chunk(s) from job #{job['id']} to the front of the queue"
+        )
+    else:
+        _append_audio_log_locked(f"[RECOVER] No remaining chunks to re-queue for job #{job['id']}")
+
+    audio_current_job = None
+    process_state["audio"]["cancel"] = False
+    audio_recovery_request = None
+    _refresh_audio_process_state_locked(persist=True)
+    audio_queue_condition.notify_all()
+    return True
+
+
+def _audio_job_runner(job, settings, run_token, result_holder, done_event):
+    job_prefix = f"[JOB {job['id']}]"
+
+    def is_active():
+        with audio_queue_lock:
+            return (
+                audio_current_job is not None
+                and audio_current_job["id"] == job["id"]
+                and audio_current_job.get("run_token") == run_token
+            )
+
+    def progress_callback(completed, failed, total):
+        if is_active():
+            _append_audio_log(
+                f"{job_prefix} Progress: {completed + failed}/{total} ({completed} done, {failed} failed)"
+            )
+
+    def item_callback(idx, success, elapsed_seconds, input_words, output_words):
+        with audio_queue_lock:
+            if not is_active():
+                return
+            _record_audio_sample_locked(job, idx, elapsed_seconds, input_words, output_words, success)
+            _refresh_audio_process_state_locked(persist=True)
+
+    def cancel_check():
+        with audio_queue_lock:
+            if not is_active():
+                return True
+            return process_state["audio"]["cancel"]
+
+    try:
+        if job["kind"] == "parallel":
+            result_holder["results"] = project_manager.generate_chunks_parallel(
+                job["indices"],
+                settings["workers"],
+                progress_callback,
+                cancel_check=cancel_check,
+                item_callback=item_callback,
+                generation_token=run_token,
+            )
+        else:
+            result_holder["results"] = project_manager.generate_chunks_batch(
+                job["indices"],
+                settings["batch_seed"],
+                settings["batch_size"],
+                progress_callback,
+                batch_group_by_type=settings["batch_group_by_type"],
+                cancel_check=cancel_check,
+                item_callback=item_callback,
+                generation_token=run_token,
+            )
+    except Exception as e:
+        result_holder["error"] = str(e)
+    finally:
+        done_event.set()
+
+
 def _audio_queue_worker():
-    global audio_current_job
+    global audio_current_job, audio_recovery_request
 
     while True:
         with audio_queue_condition:
             while not audio_queue:
                 audio_current_job = None
                 process_state["audio"]["cancel"] = False
-                _refresh_audio_process_state_locked()
+                audio_recovery_request = None
+                _refresh_audio_process_state_locked(persist=True)
                 audio_queue_condition.wait()
 
             job = audio_queue.pop(0)
             audio_current_job = job
             job["status"] = "running"
             job["started_at"] = time.time()
+            job["run_token"] = uuid.uuid4().hex
             process_state["audio"]["cancel"] = False
-            _refresh_audio_process_state_locked()
+            audio_recovery_request = None
+            _refresh_audio_process_state_locked(persist=True)
 
         settings = _load_audio_worker_settings()
         job_prefix = f"[JOB {job['id']}]"
-
-        def progress_callback(completed, failed, total):
-            _append_audio_log(
-                f"{job_prefix} Progress: {completed + failed}/{total} ({completed} done, {failed} failed)"
-            )
-
-        def item_callback(idx, success, elapsed_seconds, input_words, output_words):
-            with audio_queue_lock:
-                _record_audio_sample_locked(job, idx, elapsed_seconds, input_words, output_words, success)
-                _refresh_audio_process_state_locked()
-
-        def cancel_check():
-            with audio_queue_lock:
-                return process_state["audio"]["cancel"]
 
         _append_audio_log(
             f"{job_prefix} Starting {job['kind']} generation for {job['total_chunks']} chunks ({job['label']})"
         )
 
-        try:
-            if job["kind"] == "parallel":
-                results = project_manager.generate_chunks_parallel(
-                    job["indices"],
-                    settings["workers"],
-                    progress_callback,
-                    cancel_check=cancel_check,
-                    item_callback=item_callback,
-                )
-            else:
-                results = project_manager.generate_chunks_batch(
-                    job["indices"],
-                    settings["batch_seed"],
-                    settings["batch_size"],
-                    progress_callback,
-                    batch_group_by_type=settings["batch_group_by_type"],
-                    cancel_check=cancel_check,
-                    item_callback=item_callback,
-                )
+        result_holder = {}
+        done_event = threading.Event()
+        runner = threading.Thread(
+            target=_audio_job_runner,
+            args=(job, settings, job["run_token"], result_holder, done_event),
+            daemon=True,
+            name=f"audio-job-{job['id']}",
+        )
+        runner.start()
 
-            completed = len(results["completed"])
-            failed = len(results["failed"])
-            cancelled = results.get("cancelled", 0)
-
-            if cancelled:
-                job["status"] = "cancelled"
-            elif failed:
-                job["status"] = "completed_with_errors"
-            else:
-                job["status"] = "completed"
-
-            msg = f"{job_prefix} Complete: {completed} succeeded, {failed} failed"
-            if cancelled:
-                msg += f", {cancelled} cancelled"
-            _append_audio_log(msg)
-            if results["failed"]:
-                for idx, err in results["failed"]:
-                    _append_audio_log(f"{job_prefix} Chunk {idx} failed: {err}")
-        except Exception as e:
-            logger.error(f"Audio queue job error: {e}")
-            job["status"] = "failed"
-            _append_audio_log(f"{job_prefix} Batch generation error: {e}")
-        finally:
+        abandoned = False
+        while not done_event.wait(AUDIO_RECOVERY_POLL_SECONDS):
             with audio_queue_condition:
-                job["finished_at"] = time.time()
-                _record_audio_recent_job_locked(job)
-                audio_current_job = None
-                process_state["audio"]["cancel"] = False
-                _refresh_audio_process_state_locked()
-                audio_queue_condition.notify_all()
+                if (
+                    audio_recovery_request is not None
+                    and audio_recovery_request.get("job_id") == job["id"]
+                    and audio_recovery_request.get("run_token") == job.get("run_token")
+                ):
+                    abandoned = _perform_audio_recovery_locked(job, job.get("run_token"), audio_recovery_request["reason"])
+                    if abandoned:
+                        break
+
+        if abandoned:
+            continue
+
+        with audio_queue_condition:
+            if audio_current_job is None or audio_current_job["id"] != job["id"] or audio_current_job.get("run_token") != job.get("run_token"):
+                continue
+
+            if "error" in result_holder:
+                logger.error(f"Audio queue job error: {result_holder['error']}")
+                job["status"] = "failed"
+                _append_audio_log_locked(f"{job_prefix} Batch generation error: {result_holder['error']}")
+            else:
+                results = result_holder.get("results", {"completed": [], "failed": [], "cancelled": 0})
+                completed = len(results["completed"])
+                failed = len(results["failed"])
+                cancelled = results.get("cancelled", 0)
+
+                if cancelled:
+                    job["status"] = "cancelled"
+                elif failed:
+                    job["status"] = "completed_with_errors"
+                else:
+                    job["status"] = "completed"
+
+                msg = f"{job_prefix} Complete: {completed} succeeded, {failed} failed"
+                if cancelled:
+                    msg += f", {cancelled} cancelled"
+                _append_audio_log_locked(msg)
+                if results["failed"]:
+                    for idx, err in results["failed"]:
+                        _append_audio_log_locked(f"{job_prefix} Chunk {idx} failed: {err}")
+
+            job["finished_at"] = time.time()
+            _record_audio_recent_job_locked(job)
+            audio_current_job = None
+            audio_recovery_request = None
+            process_state["audio"]["cancel"] = False
+            _refresh_audio_process_state_locked(persist=True)
+            audio_queue_condition.notify_all()
 
 
 audio_worker_thread = threading.Thread(target=_audio_queue_worker, daemon=True, name="audio-queue-worker")
 audio_worker_thread.start()
+
+
+def _audio_heartbeat_daemon():
+    while True:
+        time.sleep(AUDIO_HEARTBEAT_INTERVAL_SECONDS)
+        with audio_queue_condition:
+            heartbeat = process_state["audio"]["heartbeat"]
+            heartbeat["last_check_at"] = time.time()
+            current = audio_current_job
+            if current is None:
+                _refresh_audio_process_state_locked(persist=True)
+                continue
+            last_activity_at = current.get("last_output_at") or current.get("started_at")
+            if last_activity_at is None:
+                _refresh_audio_process_state_locked(persist=True)
+                continue
+            idle_seconds = time.time() - last_activity_at
+            if idle_seconds >= AUDIO_HEARTBEAT_INTERVAL_SECONDS:
+                _request_audio_recovery_locked(
+                    f"Job #{current['id']} produced no audio for {int(idle_seconds)}s; scheduling automatic recovery"
+                )
+            else:
+                _refresh_audio_process_state_locked(persist=True)
+
+
+audio_heartbeat_thread = threading.Thread(target=_audio_heartbeat_daemon, daemon=True, name="audio-heartbeat")
+audio_heartbeat_thread.start()
+_restore_audio_queue_state()
 
 def run_process(command: List[str], task_name: str):
     """Run a subprocess and capture logs."""
@@ -814,8 +1179,7 @@ async def get_annotated_script():
     """Return the current working annotated_script.json."""
     if not os.path.exists(SCRIPT_PATH):
         raise HTTPException(status_code=404, detail="No annotated script found")
-    with open(SCRIPT_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return _load_project_script_document()
 
 @app.get("/api/status/{task_name}")
 async def get_status(task_name: str):
@@ -832,8 +1196,7 @@ async def get_voices():
     voices_list = []
     if os.path.exists(SCRIPT_PATH):
         try:
-            with open(SCRIPT_PATH, "r", encoding="utf-8") as f:
-                script_data = json.load(f)
+            script_data = _load_project_script_document()["entries"]
             voices_set = set()
             for entry in script_data:
                 speaker = (entry.get("speaker") or entry.get("type") or "").strip()
@@ -856,11 +1219,18 @@ async def get_voices():
             voice_config = json.load(f)
 
     result = []
+    chunks = project_manager.load_chunks()
     for voice_name in voices_list:
         config = voice_config.get(voice_name, {})
+        sample_suggestion = project_manager.suggest_design_sample_text(voice_name, chunks)
+        ref_audio = (config.get("ref_audio") or "").strip()
+        ref_audio_path = os.path.join(ROOT_DIR, ref_audio) if ref_audio and not os.path.isabs(ref_audio) else ref_audio
+        design_clone_loaded = bool(ref_audio and ref_audio_path and os.path.exists(ref_audio_path))
         result.append({
             "name": voice_name,
-            "config": config
+            "config": config,
+            "suggested_sample_text": sample_suggestion,
+            "design_clone_loaded": design_clone_loaded,
         })
     return result
 
@@ -871,6 +1241,20 @@ async def parse_voices(background_tasks: BackgroundTasks):
 
     background_tasks.add_task(run_process, [sys.executable, "-u", "parse_voices.py"], "voices")
     return {"status": "started"}
+
+
+@app.get("/api/dictionary")
+async def get_dictionary():
+    return {"entries": _load_project_dictionary_entries()}
+
+
+@app.post("/api/dictionary")
+async def save_dictionary(request: DictionarySaveRequest):
+    document = save_script_document(
+        SCRIPT_PATH,
+        dictionary=clean_dictionary_entries([entry.model_dump() for entry in request.entries]),
+    )
+    return {"status": "saved", "entries": document["dictionary"]}
 
 @app.post("/api/save_voice_config")
 async def save_voice_config(config_data: Dict[str, VoiceConfigItem]):
@@ -894,6 +1278,35 @@ async def save_voice_config(config_data: Dict[str, VoiceConfigItem]):
         json.dump(current_config, f, indent=2, ensure_ascii=False)
 
     return {"status": "saved"}
+
+
+@app.post("/api/voices/design_generate")
+async def generate_voice_design_clone(request: VoiceDesignGenerateRequest):
+    speaker = (request.speaker or "").strip()
+    if not speaker:
+        raise HTTPException(status_code=400, detail="Speaker is required")
+
+    try:
+        result = project_manager.materialize_design_voice(
+            speaker=speaker,
+            description=request.description,
+            sample_text=request.sample_text,
+            force=bool(request.force),
+        )
+        return {
+            "status": "ok",
+            "speaker": speaker,
+            "voice_id": result["voice_id"],
+            "name": result["display_name"],
+            "filename": result["filename"],
+            "audio_url": f"/{result['ref_audio']}?t={int(time.time())}",
+            "ref_audio": result["ref_audio"],
+            "ref_text": result["ref_text"],
+            "generated_ref_text": result["generated_ref_text"],
+        }
+    except Exception as e:
+        logger.error(f"Voice design clone generation failed for {speaker}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/audiobook")
 async def get_audiobook():
@@ -1117,6 +1530,7 @@ async def generate_batch_fast_endpoint(request: BatchGenerateRequest, background
 @app.post("/api/cancel_audio")
 async def cancel_audio():
     """Cancel the current audio job and clear any queued jobs."""
+    global audio_recovery_request
     with audio_queue_condition:
         cleared = len(audio_queue)
         now = time.time()
@@ -1128,28 +1542,22 @@ async def cancel_audio():
 
         if audio_current_job is not None:
             process_state["audio"]["cancel"] = True
+            audio_recovery_request = None
             _append_audio_log_locked(f"[CANCEL] Cancellation requested for job #{audio_current_job['id']}")
             if cleared:
                 _append_audio_log_locked(f"[CANCEL] Cleared {cleared} queued job(s)")
-            _refresh_audio_process_state_locked()
+            _refresh_audio_process_state_locked(persist=True)
             return {"status": "cancelling", "cleared_queued_jobs": cleared}
 
         if cleared:
+            audio_recovery_request = None
             _append_audio_log_locked(f"[CANCEL] Cleared {cleared} queued job(s)")
-            _refresh_audio_process_state_locked()
+            _refresh_audio_process_state_locked(persist=True)
             return {"status": "cancelled", "cleared_queued_jobs": cleared}
 
     # Not running — still reset any stuck "generating" chunks (e.g. from a crash)
-    chunks = project_manager.load_chunks()
-    if chunks:
-        reset_count = 0
-        for chunk in chunks:
-            if chunk.get("status") == "generating":
-                chunk["status"] = "pending"
-                reset_count += 1
-        if reset_count:
-            project_manager.save_chunks(chunks)
-    return {"status": "not_running", "reset_chunks": reset_count if chunks else 0}
+    reset_count = project_manager.reset_generating_chunks()
+    return {"status": "not_running", "reset_chunks": reset_count}
 
 ## ── Saved Scripts ──────────────────────────────────────────────
 
@@ -1268,7 +1676,7 @@ async def voice_design_preview(request: VoiceDesignPreviewRequest):
     try:
         wav_path, sr = engine.generate_voice_design(
             description=request.description,
-            sample_text=request.sample_text,
+            sample_text=_apply_project_dictionary(request.sample_text),
             language=request.language,
         )
         # Return relative URL for the static mount
@@ -1538,7 +1946,7 @@ async def lora_generate_dataset(request: LoraGenerateDatasetRequest, background_
                 try:
                     wav_path, sr = engine.generate_voice_design(
                         description=description,
-                        sample_text=text,
+                        sample_text=_apply_project_dictionary(text),
                         language=request.language,
                     )
                     # Copy to dataset dir with sequential name
@@ -1794,7 +2202,7 @@ async def lora_test_model(request: LoraTestRequest):
         }
         voice_config = {"_lora_test_": voice_data}
         engine.generate_voice(
-            text=request.text,
+            text=_apply_project_dictionary(request.text),
             instruct_text=request.instruct or "",
             speaker="_lora_test_",
             voice_config=voice_config,
@@ -1857,7 +2265,7 @@ async def lora_preview(adapter_id: str):
         }
         voice_config = {"_lora_preview_": voice_data}
         engine.generate_voice(
-            text=LORA_PREVIEW_TEXT,
+            text=_apply_project_dictionary(LORA_PREVIEW_TEXT),
             instruct_text="",
             speaker="_lora_preview_",
             voice_config=voice_config,
@@ -1979,7 +2387,7 @@ async def dataset_builder_generate_sample(request: DatasetSampleGenRequest):
     try:
         wav_path, sr = engine.generate_voice_design(
             description=request.description,
-            sample_text=request.text,
+            sample_text=_apply_project_dictionary(request.text),
             seed=request.seed,
         )
 
@@ -2099,7 +2507,7 @@ async def dataset_builder_generate_batch(request: DatasetBatchGenRequest):
 
                 wav_path, sr = engine.generate_voice_design(
                     description=description,
-                    sample_text=text,
+                    sample_text=_apply_project_dictionary(text),
                     seed=seed,
                 )
                 dest_filename = f"sample_{idx:03d}.wav"

@@ -6,6 +6,7 @@ import argparse
 from openai import OpenAI
 from review_prompts import REVIEW_SYSTEM_PROMPT, REVIEW_USER_PROMPT
 from generate_script import clean_json_string, repair_json_array, salvage_json_entries
+from script_store import load_script_document, save_script_document
 
 
 def _is_section_break(text):
@@ -261,8 +262,8 @@ def main():
         print("Error: annotated_script.json not found. Generate a script first.")
         sys.exit(1)
 
-    with open(script_path, "r", encoding="utf-8") as f:
-        entries = json.load(f)
+    script_document = load_script_document(script_path)
+    entries = script_document["entries"]
 
     print(f"Loaded {len(entries)} script entries for review")
 
@@ -413,8 +414,7 @@ def main():
         print("\nNarrator merging: disabled (enable in Setup > Advanced)")
 
     # Write corrected script
-    with open(script_path, "w", encoding="utf-8") as f:
-        json.dump(all_corrected, f, indent=2, ensure_ascii=False)
+    save_script_document(script_path, entries=all_corrected, dictionary=script_document["dictionary"])
 
     # Delete chunks.json so editor regenerates
     chunks_path = os.path.join(os.path.dirname(__file__), "..", "chunks.json")
