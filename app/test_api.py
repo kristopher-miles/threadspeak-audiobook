@@ -319,6 +319,7 @@ def test_save_voice_config():
             "type": "custom",
             "voice": "Ryan",
             "character_style": "",
+            "alias": f"{TEST_PREFIX}alias",
             "seed": "-1"
         }
     })

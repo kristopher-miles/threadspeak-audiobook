@@ -120,6 +120,7 @@ class TTSConfig(BaseModel):
     device: str = "auto"  # local mode: "auto", "cuda:0", "cpu", etc.
     language: str = "English"  # TTS language
     parallel_workers: int = 2  # concurrent TTS workers
+    auto_regenerate_bad_clips: bool = False  # retry invalid clips once immediately
     batch_seed: Optional[int] = None  # Single seed for batch mode, None/-1 = random
     compile_codec: bool = False  # torch.compile the codec for ~3-4x batch throughput (slow first run)
     sub_batch_enabled: bool = True  # split batch by text length to reduce padding waste
@@ -157,6 +158,7 @@ class VoiceConfigItem(BaseModel):
     voice: Optional[str] = "Ryan"
     character_style: Optional[str] = ""
     default_style: Optional[str] = ""  # backward compat, prefer character_style
+    alias: Optional[str] = ""
     seed: Optional[str] = "-1"
     ref_audio: Optional[str] = None
     ref_text: Optional[str] = None
@@ -323,7 +325,8 @@ async def get_config():
         "tts": {
             "mode": "local",
             "url": "http://127.0.0.1:7860",
-            "device": "auto"
+            "device": "auto",
+            "auto_regenerate_bad_clips": False
         },
         "prompts": {
             "system_prompt": "",
@@ -798,6 +801,7 @@ async def generate_batch_fast_endpoint(request: BatchGenerateRequest, background
     batch_seed = -1
     batch_size = 4
     batch_group_by_type = False
+    tts_cfg = {}
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -826,7 +830,7 @@ async def generate_batch_fast_endpoint(request: BatchGenerateRequest, background
         process_state["audio"]["running"] = True
         process_state["audio"]["cancel"] = False
         process_state["audio"]["logs"] = [
-            f"Starting batch generation of {total} chunks (batch_size={batch_size}, seed={batch_seed})..."
+            f"Starting batch generation of {total} chunks (batch_size={batch_size}, seed={batch_seed}, auto_regen_bad_clips={tts_cfg.get('auto_regenerate_bad_clips', False)})..."
         ]
         try:
             results = project_manager.generate_chunks_batch(

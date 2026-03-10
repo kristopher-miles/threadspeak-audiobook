@@ -14,9 +14,15 @@ from tts import (
     DEFAULT_PAUSE_MS,
     SAME_SPEAKER_PAUSE_MS
 )
+from audio_validation import get_audio_duration_seconds, validate_audio_clip
 from pydub import AudioSegment
 
 MAX_CHUNK_CHARS = 500
+MAX_AUTO_REGENERATE_BAD_CLIP_ATTEMPTS = 1
+CHAPTER_HEADING_RE = re.compile(
+    r'^(chapter|part|book|volume|prologue|epilogue|introduction|conclusion|act|section)\b',
+    re.IGNORECASE,
+)
 
 def get_speaker(entry):
     """Get speaker from entry, checking both 'speaker' and 'type' fields."""
@@ -34,6 +40,29 @@ def _is_structural_text(text):
     return False
 
 
+def _extract_chapter_name(entry):
+    chapter = (entry.get("chapter") or "").strip()
+    if chapter:
+        return chapter
+
+    text = (entry.get("text") or "").strip()
+    if text and CHAPTER_HEADING_RE.match(text):
+        return text
+
+    return None
+
+
+def _build_chunk(speaker, text, instruct, chapter=None):
+    chunk = {
+        "speaker": speaker,
+        "text": text,
+        "instruct": instruct,
+    }
+    if chapter:
+        chunk["chapter"] = chapter
+    return chunk
+
+
 def group_into_chunks(script_entries, max_chars=MAX_CHUNK_CHARS):
     """Group consecutive entries by same speaker into chunks up to max_chars"""
     if not script_entries:
@@ -43,43 +72,37 @@ def group_into_chunks(script_entries, max_chars=MAX_CHUNK_CHARS):
     current_speaker = get_speaker(script_entries[0])
     current_text = script_entries[0].get("text", "")
     current_instruct = script_entries[0].get("instruct", "")
+    current_chapter = _extract_chapter_name(script_entries[0])
 
     for entry in script_entries[1:]:
         speaker = get_speaker(entry)
         text = entry.get("text", "")
         instruct = entry.get("instruct", "")
+        entry_chapter = _extract_chapter_name(entry)
+        effective_chapter = entry_chapter or current_chapter
 
         # Don't merge structural text (titles, chapter headings, dedications)
         if (speaker == current_speaker and instruct == current_instruct
+                and effective_chapter == current_chapter
                 and not _is_structural_text(current_text)
                 and not _is_structural_text(text)):
             combined = current_text + " " + text
             if len(combined) <= max_chars:
                 current_text = combined
             else:
-                chunks.append({
-                    "speaker": current_speaker,
-                    "text": current_text,
-                    "instruct": current_instruct,
-                })
+                chunks.append(_build_chunk(current_speaker, current_text, current_instruct, current_chapter))
                 current_text = text
                 current_instruct = instruct
+                current_chapter = effective_chapter
         else:
-            chunks.append({
-                "speaker": current_speaker,
-                "text": current_text,
-                "instruct": current_instruct,
-            })
+            chunks.append(_build_chunk(current_speaker, current_text, current_instruct, current_chapter))
             current_speaker = speaker
             current_text = text
             current_instruct = instruct
+            current_chapter = effective_chapter
 
     # Don't forget the last chunk
-    chunks.append({
-        "speaker": current_speaker,
-        "text": current_text,
-        "instruct": current_instruct,
-    })
+    chunks.append(_build_chunk(current_speaker, current_text, current_instruct, current_chapter))
 
     return chunks
 
@@ -97,6 +120,48 @@ class ProjectManager:
 
         self.engine = None
         self._chunks_lock = threading.Lock()  # Thread-safe file writes
+
+    @staticmethod
+    def _normalize_speaker_name(name):
+        return re.sub(r"\s+", " ", (name or "").strip()).casefold()
+
+    def resolve_voice_speaker(self, speaker, voice_config):
+        """Resolve a speaker alias to a configured target speaker.
+
+        Aliases are case-insensitive and can chain, but any invalid target,
+        self-alias, or loop falls back to the original speaker.
+        """
+        original = speaker or ""
+        current = original
+        if not current:
+            return original
+
+        lookup = {}
+        for name in voice_config.keys():
+            normalized = self._normalize_speaker_name(name)
+            if normalized and normalized not in lookup:
+                lookup[normalized] = name
+
+        seen = {self._normalize_speaker_name(original)}
+        while current:
+            voice_data = voice_config.get(current, {})
+            alias = (voice_data.get("alias") or "").strip()
+            if not alias:
+                return current
+
+            target = lookup.get(self._normalize_speaker_name(alias))
+            if not target or self._normalize_speaker_name(target) == self._normalize_speaker_name(current):
+                return current
+
+            target_key = self._normalize_speaker_name(target)
+            if target_key in seen:
+                print(f"Alias loop detected for speaker '{original}'. Falling back to original speaker.")
+                return original
+
+            seen.add(target_key)
+            current = target
+
+        return original
 
     def get_engine(self):
         if self.engine:
@@ -138,6 +203,8 @@ class ProjectManager:
                 chunk["id"] = i
                 chunk["status"] = "pending" # pending, generating, done, error
                 chunk["audio_path"] = None
+                chunk["audio_validation"] = None
+                chunk["auto_regen_count"] = 0
 
             self.save_chunks(chunks)
             return chunks
@@ -205,6 +272,8 @@ class ProjectManager:
                 "status": "pending",
                 "audio_path": None
             }
+            if source.get("chapter"):
+                new_chunk["chapter"] = source["chapter"]
             chunks.insert(after_index + 1, new_chunk)
 
             # Re-number all IDs
@@ -265,13 +334,106 @@ class ProjectManager:
             # If text/instruct/speaker changed, reset status (but keep old audio until regen)
             if "text" in data or "instruct" in data or "speaker" in data:
                 chunk["status"] = "pending"
+                chunk["audio_validation"] = None
+                chunk["auto_regen_count"] = 0
 
             print(f"update_chunk({index}): instruct='{chunk.get('instruct', '')}', speaker='{chunk.get('speaker', '')}'")
             self.save_chunks(chunks)
             return chunk
         return None
 
-    def generate_chunk_audio(self, index):
+    def _load_tts_settings(self):
+        config = {}
+        if os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        return config.get("tts", {})
+
+    @staticmethod
+    def _cleanup_temp_file(temp_path):
+        if os.path.exists(temp_path):
+            for attempt in range(3):
+                try:
+                    os.remove(temp_path)
+                    break
+                except OSError:
+                    if attempt < 2:
+                        time.sleep(0.1 * (attempt + 1))
+                    else:
+                        print(f"Warning: Could not delete temp file {temp_path}")
+
+    def _store_generated_audio(self, temp_path, filename_base):
+        audio_path = None
+
+        try:
+            segment = AudioSegment.from_file(temp_path)
+            if len(segment) == 0:
+                raise RuntimeError("Generated audio has 0 duration")
+
+            mp3_filename = f"{filename_base}.mp3"
+            mp3_filepath = os.path.join(self.voicelines_dir, mp3_filename)
+            segment.export(mp3_filepath, format="mp3")
+
+            mp3_size = os.path.getsize(mp3_filepath) if os.path.exists(mp3_filepath) else 0
+            if mp3_size < 1024:
+                print(f"MP3 export produced invalid file ({mp3_size} bytes) — ffmpeg likely lacks MP3 encoder (libmp3lame). Falling back to WAV.")
+                os.remove(mp3_filepath)
+                raise RuntimeError("MP3 export produced invalid file")
+
+            audio_path = f"voicelines/{mp3_filename}"
+
+        except Exception as e:
+            if "invalid file" not in str(e).lower():
+                print(f"MP3 conversion failed (ffmpeg missing?): {e}")
+            wav_filename = f"{filename_base}.wav"
+            wav_filepath = os.path.join(self.voicelines_dir, wav_filename)
+            shutil.copy(temp_path, wav_filepath)
+            audio_path = f"voicelines/{wav_filename}"
+
+        return audio_path
+
+    def _finalize_generated_audio(self, index, speaker, text, temp_path, attempt=0):
+        if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
+            return {
+                "status": "error",
+                "audio_path": None,
+                "audio_validation": None,
+                "error": "Generated audio file is missing or empty",
+            }
+
+        print(f"Generated WAV size: {os.path.getsize(temp_path)} bytes")
+
+        filename_base = f"voiceline_{index+1:04d}_{sanitize_filename(speaker)}"
+        if attempt > 0:
+            filename_base = f"{filename_base}_retry{attempt}"
+        audio_path = self._store_generated_audio(temp_path, filename_base)
+        full_audio_path = os.path.join(self.root_dir, audio_path)
+        validation = validate_audio_clip(
+            text=text,
+            actual_duration_sec=get_audio_duration_seconds(temp_path),
+            file_size_bytes=os.path.getsize(full_audio_path),
+        ).to_dict()
+
+        if validation["is_valid"]:
+            return {
+                "status": "done",
+                "audio_path": audio_path,
+                "audio_validation": validation,
+                "error": None,
+            }
+
+        print(f"Chunk {index} failed audio sanity check: {validation['error']}")
+        return {
+            "status": "error",
+            "audio_path": audio_path,
+            "audio_validation": validation,
+            "error": validation["error"],
+        }
+
+    def generate_chunk_audio(self, index, attempt=0):
         chunks = self.load_chunks()
         if not (0 <= index < len(chunks)):
             return False, "Invalid chunk index"
@@ -282,7 +444,7 @@ class ProjectManager:
         try:
             engine = self.get_engine()
             if not engine:
-                self._update_chunk_fields(index, status="error")
+                self._update_chunk_fields(index, status="error", audio_validation=None, auto_regen_count=attempt)
                 return False, "TTS engine not initialized"
 
             # Load voice config
@@ -292,85 +454,55 @@ class ProjectManager:
                     voice_config = json.load(f)
 
             speaker = chunk["speaker"]
+            resolved_speaker = self.resolve_voice_speaker(speaker, voice_config)
             text = chunk["text"]
             instruct = chunk.get("instruct", "")
+            tts_settings = self._load_tts_settings()
+            auto_regenerate_bad_clips = tts_settings.get("auto_regenerate_bad_clips", False)
 
-            print(f"Generating chunk {index}: speaker={speaker}, instruct='{instruct}', text='{text[:50]}...'")
+            print(
+                f"Generating chunk {index}: speaker={speaker}, resolved_speaker={resolved_speaker}, "
+                f"instruct='{instruct}', text='{text[:50]}...'"
+            )
 
             # Generate to temp file (unique per chunk for parallel processing)
             temp_path = os.path.join(self.root_dir, f"temp_chunk_{index}.wav")
 
-            success = engine.generate_voice(text, instruct, speaker, voice_config, temp_path)
+            success = engine.generate_voice(text, instruct, resolved_speaker, voice_config, temp_path)
 
             if success:
-                # Check file size
-                if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
-                     self._update_chunk_fields(index, status="error")
-                     return False, "Generated audio file is missing or empty"
-
-                print(f"Generated WAV size: {os.path.getsize(temp_path)} bytes")
-
-                # Try to convert to mp3, fallback to wav if ffmpeg missing
-                filename_base = f"voiceline_{index+1:04d}_{sanitize_filename(speaker)}"
-                audio_path = None
-
-                try:
-                    segment = AudioSegment.from_wav(temp_path)
-
-                    if len(segment) == 0:
-                         self._update_chunk_fields(index, status="error")
-                         return False, "Generated audio has 0 duration"
-
-                    mp3_filename = f"{filename_base}.mp3"
-                    mp3_filepath = os.path.join(self.voicelines_dir, mp3_filename)
-
-                    # This might fail if ffmpeg is missing or lacks MP3 encoder
-                    segment.export(mp3_filepath, format="mp3")
-
-                    # Validate: conda ffmpeg often lacks libmp3lame, producing
-                    # a tiny (~428 byte) header-only file without raising an error
-                    mp3_size = os.path.getsize(mp3_filepath) if os.path.exists(mp3_filepath) else 0
-                    if mp3_size < 1024:
-                        print(f"MP3 export produced invalid file ({mp3_size} bytes) — ffmpeg likely lacks MP3 encoder (libmp3lame). Falling back to WAV.")
-                        os.remove(mp3_filepath)
-                        raise RuntimeError("MP3 export produced invalid file")
-
-                    audio_path = f"voicelines/{mp3_filename}"
-
-                except Exception as e:
-                    if "invalid file" not in str(e).lower():
-                        print(f"MP3 conversion failed (ffmpeg missing?): {e}")
-                    # Fallback: copy WAV
-                    wav_filename = f"{filename_base}.wav"
-                    wav_filepath = os.path.join(self.voicelines_dir, wav_filename)
-                    shutil.copy(temp_path, wav_filepath)
-
-                    audio_path = f"voicelines/{wav_filename}"
-
-                self._update_chunk_fields(index, status="done", audio_path=audio_path)
-
-                # Cleanup with retry (may be locked by pydub/ffmpeg on Windows)
-                if os.path.exists(temp_path):
-                    for attempt in range(3):
-                        try:
-                            os.remove(temp_path)
-                            break
-                        except OSError:
-                            if attempt < 2:
-                                time.sleep(0.1 * (attempt + 1))
-                            else:
-                                print(f"Warning: Could not delete temp file {temp_path}")
-
-                return True, audio_path
+                result = self._finalize_generated_audio(index, speaker, text, temp_path, attempt=attempt)
+                if result["status"] == "error" and auto_regenerate_bad_clips and attempt < MAX_AUTO_REGENERATE_BAD_CLIP_ATTEMPTS:
+                    self._update_chunk_fields(
+                        index,
+                        status="pending",
+                        audio_path=result["audio_path"],
+                        audio_validation=result["audio_validation"],
+                        auto_regen_count=attempt + 1,
+                    )
+                    self._cleanup_temp_file(temp_path)
+                    print(f"Chunk {index} failed sanity check; auto-regenerating attempt {attempt + 1}/{MAX_AUTO_REGENERATE_BAD_CLIP_ATTEMPTS}")
+                    return self.generate_chunk_audio(index, attempt=attempt + 1)
+                self._update_chunk_fields(
+                    index,
+                    status=result["status"],
+                    audio_path=result["audio_path"],
+                    audio_validation=result["audio_validation"],
+                    auto_regen_count=attempt,
+                )
+                self._cleanup_temp_file(temp_path)
+                return result["status"] == "done", result["audio_path"] if result["status"] == "done" else result["error"]
             else:
-                self._update_chunk_fields(index, status="error")
+                self._update_chunk_fields(index, status="error", audio_validation=None, auto_regen_count=attempt)
+                self._cleanup_temp_file(temp_path)
                 return False, "Generation failed"
 
         except Exception as e:
             try:
-                self._update_chunk_fields(index, status="error")
+                self._update_chunk_fields(index, status="error", audio_validation=None, auto_regen_count=attempt)
             except Exception as update_err:
                 print(f"Warning: Failed to update chunk {index} status to error: {update_err}")
+            self._cleanup_temp_file(os.path.join(self.root_dir, f"temp_chunk_{index}.wav"))
             return False, str(e)
 
     def merge_audio(self):
@@ -379,6 +511,8 @@ class ProjectManager:
         speakers = []
 
         for chunk in chunks:
+            if chunk.get("status") != "done":
+                continue
             path = chunk.get("audio_path")
             if path:
                 full_path = os.path.join(self.root_dir, path)
@@ -412,6 +546,8 @@ class ProjectManager:
         cursor_ms = 0
 
         for chunk in chunks:
+            if chunk.get("status") != "done":
+                continue
             path = chunk.get("audio_path")
             if not path:
                 continue
@@ -521,6 +657,8 @@ class ProjectManager:
         cursor_ms = 0
 
         for chunk in chunks:
+            if chunk.get("status") != "done":
+                continue
             path = chunk.get("audio_path")
             if not path:
                 continue
@@ -790,6 +928,7 @@ class ProjectManager:
                 continue
 
             speaker = chunks[idx].get("speaker", "")
+            speaker = self.resolve_voice_speaker(speaker, voice_config)
             voice_data = voice_config.get(speaker, {})
             voice_type = voice_data.get("type", "custom")
 
@@ -848,6 +987,8 @@ class ProjectManager:
         if os.path.exists(self.voice_config_path):
             with open(self.voice_config_path, "r", encoding="utf-8") as f:
                 voice_config = json.load(f)
+        tts_settings = self._load_tts_settings()
+        auto_regenerate_bad_clips = tts_settings.get("auto_regenerate_bad_clips", False)
 
         # Get TTS engine
         engine = self.get_engine()
@@ -890,7 +1031,7 @@ class ProjectManager:
                         "index": idx,
                         "text": chunk.get("text", ""),
                         "instruct": chunk.get("instruct", ""),
-                        "speaker": chunk.get("speaker", "")
+                        "speaker": self.resolve_voice_speaker(chunk.get("speaker", ""), voice_config)
                     })
 
             # Call batch TTS with single seed
@@ -915,60 +1056,43 @@ class ProjectManager:
                 try:
                     chunk = chunks[idx]
                     speaker = chunk.get("speaker", "unknown")
-                    filename_base = f"voiceline_{idx+1:04d}_{sanitize_filename(speaker)}"
+                    result = self._finalize_generated_audio(idx, speaker, chunk.get("text", ""), temp_path, attempt=0)
+                    chunks[idx]["audio_path"] = result["audio_path"]
+                    chunks[idx]["audio_validation"] = result["audio_validation"]
+                    chunks[idx]["status"] = "pending" if (result["status"] == "error" and auto_regenerate_bad_clips) else result["status"]
+                    chunks[idx]["auto_regen_count"] = 0
+                    self.save_chunks(chunks)
 
-                    try:
-                        segment = AudioSegment.from_file(temp_path)
-                        if len(segment) == 0:
-                            results["failed"].append((idx, "Audio has 0 duration"))
-                            chunks[idx]["status"] = "error"
-                            continue
+                    if result["status"] == "done":
+                        results["completed"].append(idx)
+                        print(f"Chunk {idx} completed: {chunks[idx]['audio_path']}")
+                    elif auto_regenerate_bad_clips:
+                        print(f"Chunk {idx} failed validation in batch; retrying immediately at the front of the queue")
+                        retry_success, retry_msg = self.generate_chunk_audio(idx, attempt=1)
+                        chunks = self.load_chunks()
+                        if retry_success:
+                            results["completed"].append(idx)
+                            print(f"Chunk {idx} completed after auto-regeneration: {retry_msg}")
+                        else:
+                            results["failed"].append((idx, retry_msg))
+                            print(f"Chunk {idx} failed after auto-regeneration: {retry_msg}")
+                    else:
+                        results["failed"].append((idx, result["error"]))
+                        print(f"Chunk {idx} failed validation: {result['error']}")
 
-                        mp3_filename = f"{filename_base}.mp3"
-                        mp3_filepath = os.path.join(self.voicelines_dir, mp3_filename)
-                        segment.export(mp3_filepath, format="mp3")
-
-                        # Validate: conda ffmpeg often lacks libmp3lame, producing
-                        # a tiny (~428 byte) header-only file without raising an error
-                        mp3_size = os.path.getsize(mp3_filepath) if os.path.exists(mp3_filepath) else 0
-                        if mp3_size < 1024:
-                            print(f"MP3 export produced invalid file ({mp3_size} bytes) for chunk {idx} — ffmpeg likely lacks MP3 encoder (libmp3lame). Falling back to WAV.")
-                            os.remove(mp3_filepath)
-                            raise RuntimeError("MP3 export produced invalid file")
-
-                        chunks[idx]["audio_path"] = f"voicelines/{mp3_filename}"
-
-                    except Exception as e:
-                        if "invalid file" not in str(e).lower():
-                            print(f"MP3 conversion failed for chunk {idx}: {e}")
-                        wav_filename = f"{filename_base}.wav"
-                        wav_filepath = os.path.join(self.voicelines_dir, wav_filename)
-                        shutil.copy(temp_path, wav_filepath)
-                        chunks[idx]["audio_path"] = f"voicelines/{wav_filename}"
-
-                    chunks[idx]["status"] = "done"
-                    results["completed"].append(idx)
-                    print(f"Chunk {idx} completed: {chunks[idx]['audio_path']}")
-
-                    if os.path.exists(temp_path):
-                        for attempt in range(3):
-                            try:
-                                os.remove(temp_path)
-                                break
-                            except OSError:
-                                if attempt < 2:
-                                    time.sleep(0.1 * (attempt + 1))
-                                else:
-                                    print(f"Warning: Could not delete temp file {temp_path}")
+                    self._cleanup_temp_file(temp_path)
 
                 except Exception as e:
                     print(f"Error processing chunk {idx}: {e}")
                     results["failed"].append((idx, str(e)))
                     chunks[idx]["status"] = "error"
+                    chunks[idx]["audio_validation"] = None
+                    self._cleanup_temp_file(temp_path)
 
             for idx, error in batch_results["failed"]:
                 if 0 <= idx < len(chunks):
                     chunks[idx]["status"] = "error"
+                    chunks[idx]["audio_validation"] = None
                 results["failed"].append((idx, error))
 
             self.save_chunks(chunks)

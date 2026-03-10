@@ -35,6 +35,19 @@
         }
         .step-active { background-color: #0d6efd; color: white; }
         .voice-card { border-left: 4px solid #0d6efd; }
+        .voice-card.alias-active {
+            border-left-color: #6c757d;
+            background: #f1f3f5;
+        }
+        .voice-card.alias-active .voice-primary-content {
+            opacity: 0.45;
+            filter: grayscale(1);
+        }
+        .voice-card .voice-alias-box {
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: 0.5rem;
+            padding: 0.5rem;
+        }
         /* Editor row expand/collapse */
         .chunk-expand-btn {
             border: none;
@@ -156,6 +169,13 @@
                                 <label class="form-label">Batch Seed</label>
                                 <input type="number" class="form-control" id="batch-seed" placeholder="-1 (random)">
                                 <div class="form-text">Seed for reproducibility</div>
+                            </div>
+                            <div class="col-md-2">
+                                <div class="form-check form-switch mt-4">
+                                    <input class="form-check-input" type="checkbox" id="auto-regenerate-bad-clips">
+                                    <label class="form-check-label" for="auto-regenerate-bad-clips">Auto-Regenerate Bad Clips</label>
+                                </div>
+                                <div class="form-text">Retry invalid clips once immediately before continuing</div>
                             </div>
                         </div>
                         <div class="row mb-3" id="tts-local-options" style="display:none;">
@@ -706,11 +726,11 @@
                             <td class="text-center align-top" style="min-width:100px;"><button class="btn btn-warning btn-sm w-100" id="btn-merge"><i class="fas fa-file-audio me-1"></i>Merge All</button></td>
                         </tr>
                         <tr>
-                            <td class="text-center text-muted" style="font-size:0.7rem;">Preview generated audio</td>
+                            <td class="text-center text-muted" style="font-size:0.7rem;">Preview generated audio in the current view</td>
                             <td></td>
-                            <td class="text-center text-muted" style="font-size:0.7rem;">Generate audio for all unrendered chunks</td>
+                            <td class="text-center text-muted" style="font-size:0.7rem;">Generate audio for pending segments in the active scope</td>
                             <td></td>
-                            <td class="text-center text-muted" style="font-size:0.7rem;">Re-render everything from scratch</td>
+                            <td class="text-center text-muted" style="font-size:0.7rem;">Re-render segments in the active scope from scratch</td>
                             <td></td>
                             <td></td>
                             <td class="text-center text-muted" style="font-size:0.7rem;">Combine all chunks into final audiobook</td>
@@ -721,6 +741,22 @@
                      <!-- Full Progress Bar -->
                      <div class="progress mb-3" style="height: 25px;">
                          <div id="full-progress-bar" class="progress-bar progress-bar-striped bg-success" role="progressbar" style="width: 0%">0%</div>
+                     </div>
+
+                     <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                         <div class="d-flex flex-wrap align-items-center gap-3">
+                             <div class="d-flex align-items-center gap-2">
+                                 <label for="editor-chapter-select" class="form-label mb-0 fw-semibold">Chapter</label>
+                                 <select id="editor-chapter-select" class="form-select form-select-sm" style="min-width: 260px;" onchange="changeEditorChapter(this.value)">
+                                     <option value="__whole_project__">Whole Project</option>
+                                 </select>
+                             </div>
+                             <div class="form-check form-switch mb-0">
+                                 <input class="form-check-input" type="checkbox" id="editor-chapter-only" checked onchange="changeEditorScope()">
+                                 <label class="form-check-label fw-semibold" for="editor-chapter-only">Chapter Only</label>
+                             </div>
+                         </div>
+                         <div id="editor-chapter-summary" class="text-muted small">Showing all segments.</div>
                      </div>
 
                      <div class="table-responsive">
@@ -989,6 +1025,7 @@
                 document.getElementById('compile-codec').checked = !!config.tts.compile_codec;
                 document.getElementById('batch-group-by-type').checked = !!config.tts.batch_group_by_type;
                 document.getElementById('sub-batch-enabled').checked = config.tts.sub_batch_enabled !== false;
+                document.getElementById('auto-regenerate-bad-clips').checked = !!config.tts.auto_regenerate_bad_clips;
                 if (config.tts.sub_batch_min_size != null) {
                     document.getElementById('sub-batch-min-size').value = config.tts.sub_batch_min_size;
                 }
@@ -1134,6 +1171,7 @@
                     compile_codec: document.getElementById('compile-codec').checked,
                     batch_group_by_type: document.getElementById('batch-group-by-type').checked,
                     sub_batch_enabled: document.getElementById('sub-batch-enabled').checked,
+                    auto_regenerate_bad_clips: document.getElementById('auto-regenerate-bad-clips').checked,
                     sub_batch_min_size: parseInt(document.getElementById('sub-batch-min-size').value) || 4,
                     sub_batch_ratio: parseFloat(document.getElementById('sub-batch-ratio').value) || 5,
                     sub_batch_max_chars: parseInt(document.getElementById('sub-batch-max-chars').value) || 3000,
@@ -1219,18 +1257,72 @@
         // --- Voices Tab ---
         const AVAILABLE_VOICES = ["Aiden", "Dylan", "Eric", "Ono_anna", "Ryan", "Serena", "Sohee", "Uncle_fu", "Vivian"];
 
+        function normalizeVoiceName(value) {
+            return (value || '').trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+        }
+
+        function getVoiceAliasTarget(card, nameMap) {
+            const aliasInput = card.querySelector('.voice-alias-input');
+            if (!aliasInput) return '';
+
+            const alias = normalizeVoiceName(aliasInput.value);
+            if (!alias) return '';
+
+            const target = nameMap.get(alias);
+            if (!target) return '';
+
+            return normalizeVoiceName(target) === normalizeVoiceName(card.dataset.voice) ? '' : target;
+        }
+
+        function updateVoiceAliasStates() {
+            const cards = Array.from(document.querySelectorAll('.voice-card'));
+            const nameMap = new Map(cards.map(card => [normalizeVoiceName(card.dataset.voice), card.dataset.voice]));
+
+            cards.forEach(card => {
+                const target = getVoiceAliasTarget(card, nameMap);
+                const disabled = Boolean(target);
+
+                card.classList.toggle('alias-active', disabled);
+                card.querySelectorAll('input, select, textarea, button').forEach(control => {
+                    if (control.classList.contains('voice-alias-input')) {
+                        control.disabled = false;
+                        return;
+                    }
+                    control.disabled = disabled;
+                });
+
+                const status = card.querySelector('.voice-alias-status');
+                if (status) {
+                    status.textContent = disabled
+                        ? `Aliased to ${target}. Generation will use that character's voice settings.`
+                        : 'Match another visible character name here to disable this row and reuse that voice.';
+                }
+            });
+        }
+
         function createVoiceCard(voice, index) {
             const config = voice.config || {};
             const voiceType = config.type || 'custom';
+            const safeName = escapeHtml(voice.name);
+            const safeAlias = escapeHtml(config.alias || '');
 
             return `
-                <div class="card voice-card mb-3" data-voice="${voice.name}">
+                <div class="card voice-card mb-3" data-voice="${safeName}">
                     <div class="card-body">
                         <div class="row">
                             <div class="col-md-3">
-                                <h5 class="card-title">${voice.name}</h5>
+                                <h5 class="card-title voice-primary-content">${safeName}</h5>
+                                <div class="voice-alias-box mt-2">
+                                    <label class="form-label small text-muted mb-1">AKA</label>
+                                    <input
+                                        type="text"
+                                        class="form-control form-control-sm voice-alias-input"
+                                        value="${safeAlias}"
+                                    >
+                                    <div class="voice-alias-status form-text mb-0">Match another visible character name here to disable this row and reuse that voice.</div>
+                                </div>
                             </div>
-                            <div class="col-md-9">
+                            <div class="col-md-9 voice-primary-content">
                                 <div class="mb-2">
                                     <div class="form-check form-check-inline">
                                         <input class="form-check-input voice-type" type="radio" name="type_${index}" value="custom" ${voiceType === 'custom' ? 'checked' : ''} onchange="toggleVoiceType(this)">
@@ -1384,6 +1476,7 @@
                 return;
             }
             container.innerHTML = voices.map((v, i) => createVoiceCard(v, i)).join('');
+            updateVoiceAliasStates();
 
             // If any voice has no saved config, save defaults immediately
             if (voices.some(v => !v.config || Object.keys(v.config).length === 0)) {
@@ -1398,12 +1491,14 @@
             cards.forEach(card => {
                 const name = card.dataset.voice;
                 const type = card.querySelector('.voice-type:checked').value;
+                const alias = (card.querySelector('.voice-alias-input')?.value || '').trim();
 
                 if (type === 'custom') {
                     config[name] = {
                         type: 'custom',
                         voice: card.querySelector('.voice-select').value,
                         character_style: card.querySelector('.character-style').value,
+                        alias,
                         seed: "-1"
                     };
                 } else if (type === 'clone') {
@@ -1411,6 +1506,7 @@
                         type: 'clone',
                         ref_text: card.querySelector('.ref-text').value,
                         ref_audio: card.querySelector('.ref-audio').value,
+                        alias,
                         seed: "-1"
                     };
                 } else if (type === 'builtin_lora') {
@@ -1421,6 +1517,7 @@
                         adapter_id: adapterId,
                         adapter_path: adapterEntry?.adapter_path || '',
                         character_style: card.querySelector('.builtin-lora-style').value,
+                        alias,
                         seed: "-1"
                     };
                 } else if (type === 'lora') {
@@ -1431,12 +1528,14 @@
                         adapter_id: adapterId,
                         adapter_path: adapterEntry?.adapter_path || (adapterId ? `lora_models/${adapterId}` : ''),
                         character_style: card.querySelector('.lora-character-style').value,
+                        alias,
                         seed: "-1"
                     };
                 } else if (type === 'design') {
                     config[name] = {
                         type: 'design',
                         description: card.querySelector('.design-description').value,
+                        alias,
                         seed: "-1"
                     };
                 }
@@ -1464,17 +1563,26 @@
         }
 
         // Auto-save on any change inside the voices list
-        document.getElementById('voices-list').addEventListener('change', () => {
+        document.getElementById('voices-list').addEventListener('change', (event) => {
+            if (event.target.classList.contains('voice-alias-input')) {
+                updateVoiceAliasStates();
+            }
             debouncedSaveVoices();
         });
-        document.getElementById('voices-list').addEventListener('input', () => {
+        document.getElementById('voices-list').addEventListener('input', (event) => {
+            if (event.target.classList.contains('voice-alias-input')) {
+                updateVoiceAliasStates();
+            }
             debouncedSaveVoices();
         });
 
         // --- Editor Tab ---
+        const WHOLE_PROJECT_CHAPTER_ID = '__whole_project__';
         let isPlayingSequence = false;
         let isRenderingAll = false;
         let cachedChunks = []; // Cache to track changes
+        let cachedVisibleChunkIds = [];
+        let selectedEditorChapter = WHOLE_PROJECT_CHAPTER_ID;
 
         // Check if any audio is currently playing
         function isAudioPlaying() {
@@ -1486,19 +1594,120 @@
         }
 
         // Update only changed rows instead of full redraw
+        function escapeHtml(value) {
+            return (value || '').replace(/[&<>"']/g, ch => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;'
+            }[ch]));
+        }
+
+        function getChunkStatusMeta(chunk) {
+            const validationError = chunk.audio_validation && chunk.audio_validation.error;
+            const statusColor = chunk.status === 'done' ? 'success' :
+                              chunk.status === 'generating' ? 'warning' :
+                              chunk.status === 'error' ? 'danger' : 'secondary';
+            const statusDetail = validationError
+                ? `<div class="small text-danger mt-1" title="${escapeHtml(validationError)}">${escapeHtml(validationError)}</div>`
+                : '';
+            return { statusColor, statusDetail };
+        }
+
+        function getChunkChapterName(chunk) {
+            if (!chunk || typeof chunk.chapter !== 'string') return '';
+            return chunk.chapter.trim();
+        }
+
+        function buildEditorChapterOptions(chunks) {
+            const options = [{
+                id: WHOLE_PROJECT_CHAPTER_ID,
+                label: 'Whole Project',
+                count: chunks.length
+            }];
+            const counts = new Map();
+
+            chunks.forEach(chunk => {
+                const chapter = getChunkChapterName(chunk);
+                if (!chapter) return;
+                counts.set(chapter, (counts.get(chapter) || 0) + 1);
+            });
+
+            counts.forEach((count, chapter) => {
+                options.push({
+                    id: chapter,
+                    label: chapter,
+                    count
+                });
+            });
+
+            return options;
+        }
+
+        function getVisibleChunks(chunks) {
+            if (selectedEditorChapter === WHOLE_PROJECT_CHAPTER_ID) {
+                return chunks;
+            }
+            return chunks.filter(chunk => getChunkChapterName(chunk) === selectedEditorChapter);
+        }
+
+        function isChapterOnlyEnabled() {
+            const toggle = document.getElementById('editor-chapter-only');
+            return !toggle || toggle.checked;
+        }
+
+        function getActionTargetChunks(chunks) {
+            return isChapterOnlyEnabled() ? getVisibleChunks(chunks) : chunks;
+        }
+
+        function getActionScopeLabel() {
+            if (!isChapterOnlyEnabled()) {
+                return 'the entire book';
+            }
+            if (selectedEditorChapter === WHOLE_PROJECT_CHAPTER_ID) {
+                return 'the whole project';
+            }
+            return `chapter "${selectedEditorChapter}"`;
+        }
+
+        function syncEditorChapterState(chunks) {
+            const select = document.getElementById('editor-chapter-select');
+            const summary = document.getElementById('editor-chapter-summary');
+            if (!select || !summary) return;
+
+            const options = buildEditorChapterOptions(chunks);
+            if (!options.some(option => option.id === selectedEditorChapter)) {
+                selectedEditorChapter = WHOLE_PROJECT_CHAPTER_ID;
+            }
+
+            select.innerHTML = options.map(option => `
+                <option value="${escapeHtml(option.id)}"${option.id === selectedEditorChapter ? ' selected' : ''}>
+                    ${escapeHtml(option.label)} (${option.count})
+                </option>
+            `).join('');
+
+            const visibleCount = getVisibleChunks(chunks).length;
+            const viewLabel = selectedEditorChapter === WHOLE_PROJECT_CHAPTER_ID
+                ? `Showing all ${visibleCount} segments.`
+                : `Showing ${visibleCount} segments from ${selectedEditorChapter}.`;
+            const scopeLabel = isChapterOnlyEnabled() ? `Batch actions target ${getActionScopeLabel()}.` : 'Batch actions target the entire book.';
+            summary.textContent = `${viewLabel} ${scopeLabel}`;
+        }
+
         function updateChunkRow(chunk) {
             const tr = document.querySelector(`tr[data-id="${chunk.id}"]`);
             if (!tr) return false;
 
-            const statusColor = chunk.status === 'done' ? 'success' :
-                              chunk.status === 'generating' ? 'warning' :
-                              chunk.status === 'error' ? 'danger' : 'secondary';
+            const { statusColor, statusDetail } = getChunkStatusMeta(chunk);
 
             // Update status badge
-            const badge = tr.querySelector('.badge');
-            if (badge) {
+            const statusCell = tr.querySelector('.chunk-status-cell');
+            const badge = statusCell ? statusCell.querySelector('.badge') : tr.querySelector('.badge');
+            if (badge && statusCell) {
                 badge.className = `badge bg-${statusColor}`;
                 badge.innerText = chunk.status;
+                statusCell.innerHTML = `<span class="badge bg-${statusColor}">${chunk.status}</span>${statusDetail}`;
             }
 
             // Update action area (button/progress)
@@ -1526,8 +1735,8 @@
                     }
                 }
 
-                // Update audio player when status is done - always refresh src to bust cache
-                if (chunk.status === 'done' && chunk.audio_path) {
+                // Update audio player whenever an audio file exists - invalid clips stay playable for debugging.
+                if (chunk.audio_path) {
                     const existingAudio = actionContainer.querySelector('audio');
                     const existingNoAudio = actionContainer.querySelector('.text-muted');
                     const newSrc = `/${chunk.audio_path}?t=${Date.now()}`;
@@ -1547,6 +1756,16 @@
             return true;
         }
 
+        window.changeEditorChapter = async (chapterId) => {
+            selectedEditorChapter = chapterId || WHOLE_PROJECT_CHAPTER_ID;
+            stopSequence();
+            await loadChunks(true);
+        };
+
+        window.changeEditorScope = () => {
+            syncEditorChapterState(cachedChunks);
+        };
+
         async function loadChunks(forceFullRedraw = false) {
             const tbody = document.getElementById('chunks-table-body');
 
@@ -1561,8 +1780,13 @@
                 if (chunks.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="6" class="text-center">No chunks found. Please generate script first.</td></tr>';
                     cachedChunks = [];
+                    cachedVisibleChunkIds = [];
+                    syncEditorChapterState([]);
                     return;
                 }
+
+                syncEditorChapterState(chunks);
+                const visibleChunks = getVisibleChunks(chunks);
 
                 // Update Full Progress Bar
                 const completed = chunks.filter(c => c.status === 'done').length;
@@ -1577,8 +1801,9 @@
                 // Skip redraw if playing audio (unless forced)
                 if (!forceFullRedraw && (isPlayingSequence || isAudioPlaying())) {
                     // Only update status badges and progress indicators
-                    chunks.forEach(chunk => updateChunkRow(chunk));
+                    visibleChunks.forEach(chunk => updateChunkRow(chunk));
                     cachedChunks = chunks;
+                    cachedVisibleChunkIds = visibleChunks.map(chunk => chunk.id);
 
                     // Continue polling if generating
                     if (chunks.some(c => c.status === 'generating')) {
@@ -1590,22 +1815,27 @@
                 // Check if we can do incremental update
                 const canIncrement = !forceFullRedraw &&
                                     cachedChunks.length === chunks.length &&
-                                    tbody.children.length === chunks.length;
+                                    tbody.children.length === visibleChunks.length &&
+                                    cachedVisibleChunkIds.length === visibleChunks.length &&
+                                    cachedVisibleChunkIds.every((id, index) => id === visibleChunks[index].id);
 
                 if (canIncrement) {
                     // Incremental update - only update changed rows
-                    chunks.forEach((chunk, i) => {
+                    visibleChunks.forEach(chunk => {
+                        const i = chunk.id;
                         const cached = cachedChunks[i];
-                        if (!cached || cached.status !== chunk.status || cached.audio_path !== chunk.audio_path) {
+                        const cachedError = cached && cached.audio_validation ? cached.audio_validation.error : null;
+                        const nextError = chunk.audio_validation ? chunk.audio_validation.error : null;
+                        if (!cached || cached.status !== chunk.status || cached.audio_path !== chunk.audio_path || cachedError !== nextError) {
                             updateChunkRow(chunk);
                         }
                     });
                 } else {
                     // Full redraw needed
-                    tbody.innerHTML = chunks.map(chunk => {
-                        const statusColor = chunk.status === 'done' ? 'success' :
-                                          chunk.status === 'generating' ? 'warning' :
-                                          chunk.status === 'error' ? 'danger' : 'secondary';
+                    tbody.innerHTML = visibleChunks.length === 0
+                        ? '<tr><td colspan="6" class="text-center text-muted">No segments in this chapter yet.</td></tr>'
+                        : visibleChunks.map(chunk => {
+                        const { statusColor, statusDetail } = getChunkStatusMeta(chunk);
 
                         const audioPlayer = chunk.audio_path ?
                             `<audio class="chunk-audio" data-id="${chunk.id}" controls src="/${chunk.audio_path}?t=${Date.now()}" style="width: 200px; height: 30px;" onplay="stopOthers(${chunk.id})"></audio>` :
@@ -1625,7 +1855,7 @@
                                 <td><input type="text" class="form-control form-control-sm" value="${chunk.speaker}" onchange="updateChunk(${chunk.id}, 'speaker', this.value)"></td>
                                 <td><textarea class="form-control form-control-sm chunk-text" rows="2" onchange="updateChunk(${chunk.id}, 'text', this.value)">${chunk.text}</textarea></td>
                                 <td><textarea class="form-control form-control-sm chunk-instruct" rows="2" onchange="updateChunk(${chunk.id}, 'instruct', this.value)" title="Short TTS direction (3-8 words)">${chunk.instruct || ''}</textarea></td>
-                                <td><span class="badge bg-${statusColor}">${chunk.status}</span></td>
+                                <td class="chunk-status-cell"><span class="badge bg-${statusColor}">${chunk.status}</span>${statusDetail}</td>
                                 <td>
                                     <div class="d-flex align-items-center gap-2">
                                         ${actionArea}
@@ -1638,6 +1868,7 @@
                 }
 
                 cachedChunks = chunks;
+                cachedVisibleChunkIds = visibleChunks.map(chunk => chunk.id);
 
                 // If any chunk is generating, poll (without full redraw)
                 if (chunks.some(c => c.status === 'generating')) {
@@ -1951,16 +2182,17 @@
 
             try {
                 const chunks = await API.get('/api/chunks');
-                const toProcess = (regenerateAll ? chunks : chunks.filter(c => c.status !== 'done'))
+                const targetChunks = getActionTargetChunks(chunks);
+                const toProcess = (regenerateAll ? targetChunks : targetChunks.filter(c => c.status !== 'done'))
                     .filter(c => c.text && c.text.trim());
 
                 if (toProcess.length === 0) {
-                    showToast("No non-empty chunks to render!", 'warning');
+                    showToast(`No non-empty segments to render in ${getActionScopeLabel()}.`, 'warning');
                     cancelRender(true);
                     return;
                 }
 
-                if (regenerateAll && !await showConfirm(`Regenerate all ${toProcess.length} non-empty chunks? This will replace existing audio.`)) {
+                if (regenerateAll && !await showConfirm(`Regenerate all ${toProcess.length} non-empty segments in ${getActionScopeLabel()}? This will replace existing audio.`)) {
                     cancelRender(true);
                     return;
                 }
@@ -2031,11 +2263,12 @@
 
             try {
                 const chunks = await API.get('/api/chunks');
-                const toProcess = (regenerateAll ? chunks : chunks.filter(c => c.status !== 'done'))
+                const targetChunks = getActionTargetChunks(chunks);
+                const toProcess = (regenerateAll ? targetChunks : targetChunks.filter(c => c.status !== 'done'))
                     .filter(c => c.text && c.text.trim());
 
                 if (toProcess.length === 0) {
-                    showToast("No non-empty chunks to render!", 'warning');
+                    showToast(`No non-empty segments to render in ${getActionScopeLabel()}.`, 'warning');
                     cancelRender(true);
                     return;
                 }
