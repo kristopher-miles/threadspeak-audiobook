@@ -280,6 +280,11 @@
                                 <label class="form-check-label" for="merge-narrators">Merge consecutive narrator lines</label>
                                 <div class="form-text">During script review, combine adjacent NARRATOR entries that share the same instruct into a single longer entry. Disable for better per-line voice direction control.</div>
                             </div>
+                            <div class="mb-3 form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="orphaned-text-to-narrator-on-repair" checked>
+                                <label class="form-check-label" for="orphaned-text-to-narrator-on-repair">Orphaned text becomes Narrator Text on Repair</label>
+                                <div class="form-text">Enabled by default. When missing text is outside dialogue and fails the attribution test, repair inserts it directly as NARRATOR text instead of trying to regenerate character dialogue.</div>
+                            </div>
                             <hr>
                             <h6 class="mb-3">Prompt Customization</h6>
                             <div class="mb-3">
@@ -304,12 +309,29 @@
                                 <textarea class="form-control font-monospace" id="review-user-prompt" rows="4" style="font-size: 0.85em;"></textarea>
                                 <div class="form-text">Template for each review batch. Use <code>{context}</code> for batch context and <code>{batch}</code> for the script entries.</div>
                             </div>
+                            <hr>
+                            <h6 class="mb-3">Attribution Check Prompt Customization</h6>
+                            <div class="mb-3">
+                                <label class="form-label">Attribution Check System Prompt</label>
+                                <textarea class="form-control font-monospace" id="attribution-system-prompt" rows="8" style="font-size: 0.85em;"></textarea>
+                                <div class="form-text">Used during Sanity Check to decide whether a short omitted phrase is only dialogue attribution and can be ignored.</div>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">Attribution Check User Prompt Template</label>
+                                <textarea class="form-control font-monospace" id="attribution-user-prompt" rows="6" style="font-size: 0.85em;"></textarea>
+                                <div class="form-text">Use <code>{chapter}</code>, <code>{left_context}</code>, <code>{missing_text}</code>, and <code>{right_context}</code>.</div>
+                            </div>
                             <button type="button" class="btn btn-outline-secondary btn-sm mb-3" onclick="resetPrompts()">
                                 <i class="fas fa-undo me-1"></i>Reset to Defaults
                             </button>
                         </div>
 
-                        <button type="submit" class="btn btn-primary"><i class="fas fa-save me-2"></i>Save Configuration</button>
+                        <div class="d-flex flex-wrap gap-2">
+                            <button type="submit" class="btn btn-primary"><i class="fas fa-save me-2"></i>Save Configuration</button>
+                            <button type="button" class="btn btn-outline-danger" id="btn-reset-project">
+                                <i class="fas fa-trash-alt me-2"></i>Reset Project
+                            </button>
+                        </div>
                     </form>
                 </div>
             </div>
@@ -324,7 +346,12 @@
                 <div class="card-body">
                     <div class="mb-4">
                         <label class="form-label">Select Book/Novel (Text or EPUB)</label>
-                        <input type="file" class="form-control" id="file-upload" accept=".txt,.md,.epub">
+                        <div class="d-flex flex-wrap gap-2 align-items-start">
+                            <input type="file" class="form-control flex-grow-1" id="file-upload" accept=".txt,.md,.epub">
+                            <button class="btn btn-outline-primary btn-sm" id="btn-process-script">
+                                <i class="fas fa-play-circle me-1"></i>Process Script
+                            </button>
+                        </div>
                         <div id="upload-status" class="mt-2"></div>
                     </div>
 
@@ -337,6 +364,14 @@
                             <i class="fas fa-check-double me-2"></i>Review Script (Optional)
                         </button>
                         <small class="text-muted">Runs a second LLM pass to fix speaker misattributions or formatting issues. Only needed if the generated script has problems.</small>
+                        <button class="btn btn-outline-warning btn-lg" id="btn-script-sanity">
+                            <i class="fas fa-ruler-combined me-2"></i>Sanity Check
+                        </button>
+                        <small class="text-muted">Compares the finished script to the original uploaded source, ignores punctuation/case/spacing, and records only the invalid text spans that need regeneration.</small>
+                        <button class="btn btn-outline-danger btn-lg" id="btn-replace-missing-chunks">
+                            <i class="fas fa-wrench me-2"></i>Replace Missing Chunks
+                        </button>
+                        <small class="text-muted">Regenerates each invalid block from the original source, patches the live script, then reruns the sanity check to confirm parity or report what remains.</small>
                     </div>
                 </div>
             </div>
@@ -1123,10 +1158,21 @@
                     if (config.prompts.review_user_prompt) {
                         document.getElementById('review-user-prompt').value = config.prompts.review_user_prompt;
                     }
+                    if (config.prompts.attribution_system_prompt) {
+                        document.getElementById('attribution-system-prompt').value = config.prompts.attribution_system_prompt;
+                    }
+                    if (config.prompts.attribution_user_prompt) {
+                        document.getElementById('attribution-user-prompt').value = config.prompts.attribution_user_prompt;
+                    }
                 }
 
-                // If review prompts are still empty, fetch defaults
-                if (!document.getElementById('review-system-prompt').value || !document.getElementById('review-user-prompt').value) {
+                // If review/attribution prompts are still empty, fetch defaults
+                if (
+                    !document.getElementById('review-system-prompt').value ||
+                    !document.getElementById('review-user-prompt').value ||
+                    !document.getElementById('attribution-system-prompt').value ||
+                    !document.getElementById('attribution-user-prompt').value
+                ) {
                     try {
                         const defaults = await API.get('/api/default_prompts');
                         if (!document.getElementById('review-system-prompt').value && defaults.review_system_prompt) {
@@ -1135,8 +1181,14 @@
                         if (!document.getElementById('review-user-prompt').value && defaults.review_user_prompt) {
                             document.getElementById('review-user-prompt').value = defaults.review_user_prompt;
                         }
+                        if (!document.getElementById('attribution-system-prompt').value && defaults.attribution_system_prompt) {
+                            document.getElementById('attribution-system-prompt').value = defaults.attribution_system_prompt;
+                        }
+                        if (!document.getElementById('attribution-user-prompt').value && defaults.attribution_user_prompt) {
+                            document.getElementById('attribution-user-prompt').value = defaults.attribution_user_prompt;
+                        }
                     } catch (e) {
-                        console.warn("Could not fetch default review prompts", e);
+                        console.warn("Could not fetch default review/attribution prompts", e);
                     }
                 }
 
@@ -1167,6 +1219,8 @@
                         document.getElementById('banned-tokens').value = config.generation.banned_tokens.join(', ');
                     }
                     document.getElementById('merge-narrators').checked = !!config.generation.merge_narrators;
+                    document.getElementById('orphaned-text-to-narrator-on-repair').checked =
+                        config.generation.orphaned_text_to_narrator_on_repair !== false;
                 }
 
                 // Show previously loaded file
@@ -1191,6 +1245,12 @@
                 if (defaults.review_user_prompt) {
                     document.getElementById('review-user-prompt').value = defaults.review_user_prompt;
                 }
+                if (defaults.attribution_system_prompt) {
+                    document.getElementById('attribution-system-prompt').value = defaults.attribution_system_prompt;
+                }
+                if (defaults.attribution_user_prompt) {
+                    document.getElementById('attribution-user-prompt').value = defaults.attribution_user_prompt;
+                }
             } catch (e) {
                 console.error("Failed to fetch default prompts", e);
                 showToast("Failed to load default prompts from server.", 'error');
@@ -1204,6 +1264,7 @@
             document.getElementById('presence-penalty').value = 0;
             document.getElementById('banned-tokens').value = '';
             document.getElementById('merge-narrators').checked = false;
+            document.getElementById('orphaned-text-to-narrator-on-repair').checked = true;
         };
 
         // Toggle chevron on collapse
@@ -1250,7 +1311,9 @@
                     system_prompt: document.getElementById('system-prompt').value,
                     user_prompt: document.getElementById('user-prompt').value,
                     review_system_prompt: document.getElementById('review-system-prompt').value,
-                    review_user_prompt: document.getElementById('review-user-prompt').value
+                    review_user_prompt: document.getElementById('review-user-prompt').value,
+                    attribution_system_prompt: document.getElementById('attribution-system-prompt').value,
+                    attribution_user_prompt: document.getElementById('attribution-user-prompt').value
                 },
                 generation: {
                     chunk_size: chunkSize,
@@ -1263,7 +1326,8 @@
                     banned_tokens: document.getElementById('banned-tokens').value
                         ? document.getElementById('banned-tokens').value.split(',').map(t => t.trim()).filter(t => t)
                         : [],
-                    merge_narrators: document.getElementById('merge-narrators').checked
+                    merge_narrators: document.getElementById('merge-narrators').checked,
+                    orphaned_text_to_narrator_on_repair: document.getElementById('orphaned-text-to-narrator-on-repair').checked
                 }
             };
             try {
@@ -1271,6 +1335,19 @@
                 showToast('Configuration Saved!', 'success');
             } catch (e) {
                 showToast('Error saving config: ' + e.message, 'error');
+            }
+        });
+
+        document.getElementById('btn-reset-project').addEventListener('click', async () => {
+            const confirmed = await showConfirm('Reset the current project? This will delete the loaded source, generated script, detected characters, chunk audio, final audiobook files, and sanity/repair state. Global settings and prompt configuration will be kept.');
+            if (!confirmed) return;
+
+            try {
+                await API.post('/api/reset_project', {});
+                showToast('Project reset. Reloading...', 'success', 1500);
+                setTimeout(() => window.location.reload(), 500);
+            } catch (e) {
+                showToast('Failed to reset project: ' + e.message, 'error');
             }
         });
 
@@ -1292,7 +1369,7 @@
             }
         });
 
-        document.getElementById('btn-gen-script').addEventListener('click', async () => {
+        async function startGenerateScript() {
             const fileInput = document.getElementById('file-upload');
             const statusEl = document.getElementById('upload-status');
 
@@ -1301,12 +1378,17 @@
 
             if (!hasLoadedFile && fileInput.files.length === 0) {
                 statusEl.innerHTML = '<span class="text-danger"><i class="fas fa-exclamation-triangle me-1"></i>Please select a text or EPUB file first using the file picker above.</span>';
-                return;
+                throw new Error('No input file selected');
             }
 
+            await API.post('/api/generate_script', {});
+            return pollLogs('script', 'script-logs');
+        }
+
+        document.getElementById('btn-gen-script').addEventListener('click', async () => {
+            const statusEl = document.getElementById('upload-status');
             try {
-                await API.post('/api/generate_script', {});
-                pollLogs('script', 'script-logs');
+                await startGenerateScript();
             } catch (e) {
                 const detail = e.message || 'Unknown error';
                 if (detail.includes('No input file')) {
@@ -1317,12 +1399,62 @@
             }
         });
 
+        async function startReviewScript() {
+            await API.post('/api/review_script', {});
+            return pollLogs('review', 'script-logs');
+        }
+
         document.getElementById('btn-review-script').addEventListener('click', async () => {
             try {
-                await API.post('/api/review_script', {});
-                pollLogs('review', 'script-logs');
+                await startReviewScript();
             } catch (e) {
                 showToast("Failed to start review: " + e.message, 'error');
+            }
+        });
+
+        async function startScriptSanity() {
+            await API.post('/api/script_sanity_check', {});
+            return pollLogs('sanity', 'script-logs');
+        }
+
+        document.getElementById('btn-script-sanity').addEventListener('click', async () => {
+            try {
+                await startScriptSanity();
+            } catch (e) {
+                showToast("Failed to run sanity check: " + e.message, 'error');
+            }
+        });
+
+        async function startReplaceMissingChunks() {
+            await API.post('/api/replace_missing_chunks', {});
+            return pollLogs('repair', 'script-logs');
+        }
+
+        document.getElementById('btn-replace-missing-chunks').addEventListener('click', async () => {
+            try {
+                await startReplaceMissingChunks();
+            } catch (e) {
+                showToast("Failed to replace missing chunks: " + e.message, 'error');
+            }
+        });
+
+        document.getElementById('btn-process-script').addEventListener('click', async () => {
+            const button = document.getElementById('btn-process-script');
+            const originalHtml = button.innerHTML;
+            button.disabled = true;
+            button.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Processing...';
+
+            try {
+                await startGenerateScript();
+                await startReviewScript();
+                await startScriptSanity();
+                await startReplaceMissingChunks();
+                showToast('Process Script completed successfully.', 'success');
+            } catch (e) {
+                showToast('Process Script failed: ' + e.message, 'error');
+            } finally {
+                button.disabled = false;
+                button.innerHTML = originalHtml;
             }
         });
 
@@ -2958,39 +3090,43 @@
         };
 
         // --- Polling Logic ---
+        function finalizeTaskStatus(taskName, status) {
+            if (taskName === 'audio' && status.logs.some(l => l.includes("complete"))) {
+                const audio = document.getElementById('main-audio');
+                audio.src = `/api/audiobook?t=${new Date().getTime()}`;
+                document.getElementById('audio-player-container').style.display = 'block';
+                document.getElementById('download-link').href = audio.src;
+            }
+            if ((taskName === 'script' || taskName === 'review') && status.logs.some(l => l.includes("completed successfully"))) {
+                const tbody = document.getElementById('chunks-table-body');
+                if (tbody) tbody.innerHTML = '';
+                if (document.getElementById('editor-tab').style.display !== 'none') {
+                    loadChunks();
+                }
+            }
+        }
+
         async function pollLogs(taskName, elementId) {
             const el = document.getElementById(elementId);
-            const interval = setInterval(async () => {
-                try {
-                    const status = await API.get(`/api/status/${taskName}`);
-                    el.innerText = status.logs.join('\n');
-                    el.scrollTop = el.scrollHeight;
+            return new Promise((resolve, reject) => {
+                const interval = setInterval(async () => {
+                    try {
+                        const status = await API.get(`/api/status/${taskName}`);
+                        el.innerText = status.logs.join('\n');
+                        el.scrollTop = el.scrollHeight;
 
-                    if (!status.running) {
+                        if (!status.running) {
+                            clearInterval(interval);
+                            finalizeTaskStatus(taskName, status);
+                            resolve(status);
+                        }
+                    } catch (e) {
+                        console.error("Poll error", e);
                         clearInterval(interval);
-                        if (taskName === 'audio' && status.logs.some(l => l.includes("complete"))) {
-                            // Load audio player
-                            const audio = document.getElementById('main-audio');
-                            audio.src = `/api/audiobook?t=${new Date().getTime()}`;
-                            document.getElementById('audio-player-container').style.display = 'block';
-                            document.getElementById('download-link').href = audio.src;
-                        }
-                        // Refresh editor chunks when script generation or review completes
-                        if ((taskName === 'script' || taskName === 'review') && status.logs.some(l => l.includes("completed successfully"))) {
-                            // Clear cached chunks table so next load shows fresh data
-                            const tbody = document.getElementById('chunks-table-body');
-                            if (tbody) tbody.innerHTML = '';
-                            // If editor tab is visible, refresh immediately
-                            if (document.getElementById('editor-tab').style.display !== 'none') {
-                                loadChunks();
-                            }
-                        }
+                        reject(e);
                     }
-                } catch (e) {
-                    console.error("Poll error", e);
-                    clearInterval(interval);
-                }
-            }, 1000);
+                }, 1000);
+            });
         }
 
         // ── Saved Scripts ──────────────────────────────────────

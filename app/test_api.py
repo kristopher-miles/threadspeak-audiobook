@@ -159,6 +159,9 @@ def test_save_config_roundtrip():
     if original.get("prompts", {}).get("review_system_prompt"):
         if not readback_prompts.get("review_system_prompt"):
             raise TestFailure("Config round-trip failed: review_system_prompt dropped")
+    if original.get("prompts", {}).get("attribution_system_prompt"):
+        if not readback_prompts.get("attribution_system_prompt"):
+            raise TestFailure("Config round-trip failed: attribution_system_prompt dropped")
 
     # Restore original
     restore = {
@@ -210,6 +213,42 @@ def test_save_review_prompts_roundtrip():
     post("/api/config", json=restore)
 
 
+def test_save_attribution_prompts_roundtrip():
+    r = get("/api/config")
+    assert_status(r, 200)
+    original = r.json()
+
+    test_config = {
+        "llm": original["llm"],
+        "tts": original.get("tts", {"mode": "local", "url": "http://127.0.0.1:7860", "device": "auto"}),
+        "prompts": {
+            **(original.get("prompts") or {}),
+            "attribution_system_prompt": f"{TEST_PREFIX}attr_sys",
+            "attribution_user_prompt": f"{TEST_PREFIX}attr_usr",
+        },
+        "generation": original.get("generation"),
+    }
+    r = post("/api/config", json=test_config)
+    assert_status(r, 200)
+
+    r = get("/api/config")
+    assert_status(r, 200)
+    readback = r.json()
+    prompts = readback.get("prompts", {})
+    if prompts.get("attribution_system_prompt") != f"{TEST_PREFIX}attr_sys":
+        raise TestFailure(f"attribution_system_prompt not persisted: {prompts.get('attribution_system_prompt')}")
+    if prompts.get("attribution_user_prompt") != f"{TEST_PREFIX}attr_usr":
+        raise TestFailure(f"attribution_user_prompt not persisted: {prompts.get('attribution_user_prompt')}")
+
+    restore = {
+        "llm": original["llm"],
+        "tts": original.get("tts", {"mode": "local", "url": "http://127.0.0.1:7860", "device": "auto"}),
+        "prompts": original.get("prompts"),
+        "generation": original.get("generation"),
+    }
+    post("/api/config", json=restore)
+
+
 def test_get_default_prompts():
     r = get("/api/default_prompts")
     assert_status(r, 200)
@@ -220,10 +259,16 @@ def test_get_default_prompts():
         raise TestFailure("system_prompt is empty")
     assert_key(data, "review_system_prompt")
     assert_key(data, "review_user_prompt")
+    assert_key(data, "attribution_system_prompt")
+    assert_key(data, "attribution_user_prompt")
     if not data["review_system_prompt"]:
         raise TestFailure("review_system_prompt is empty")
     if not data["review_user_prompt"]:
         raise TestFailure("review_user_prompt is empty")
+    if not data["attribution_system_prompt"]:
+        raise TestFailure("attribution_system_prompt is empty")
+    if not data["attribution_user_prompt"]:
+        raise TestFailure("attribution_user_prompt is empty")
 
 
 # ── Section 3: Upload ───────────────────────────────────────
@@ -920,6 +965,7 @@ def run_all_tests():
     run_test("get_config", test_get_config)
     run_test("save_config_roundtrip", test_save_config_roundtrip)
     run_test("save_review_prompts_roundtrip", test_save_review_prompts_roundtrip)
+    run_test("save_attribution_prompts_roundtrip", test_save_attribution_prompts_roundtrip)
     run_test("get_default_prompts", test_get_default_prompts)
 
     section("Upload")

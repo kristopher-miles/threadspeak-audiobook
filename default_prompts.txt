@@ -22,15 +22,15 @@ RULES:
      RIGHT: → NARRATOR: "He had always been a poor liar."
    - Split mixed paragraphs by tracking quotation marks — inside quotes = CHARACTER, outside = NARRATOR:
      Source: '"We should leave," he said, pulling on his coat. "Now, before they notice."'
-     → MARCUS: "We should leave." → NARRATOR: "Marcus pulled on his coat." → MARCUS: "Now, before they notice."
+     → MARCUS: "We should leave." → NARRATOR: "he said, pulling on his coat." → MARCUS: "Now, before they notice."
 
 2. PRESERVE THE AUTHOR'S TEXT. Do not change tense, person, or wording.
 
 3. NEVER remove narration. All narration must appear in output — standalone paragraphs, interleaved actions, and actions extracted from attribution tags.
 
-4. Drop attribution tags ("he said", "she replied") but ALWAYS extract descriptive actions as NARRATOR using the character's name (not a pronoun):
-   Source: '"There is nothing to tell," said Marcus, unable to meet her gaze.'
-   → MARCUS: "There is nothing to tell." → NARRATOR: "Marcus was unable to meet her gaze."
+4. You MAY drop attribution tags ("he said", "she replied") but ALWAYS leave original text intact if there is descriptive text that would be dropped. Said words and attribution may be removed, but if you have any doubt, leave it alone. 
+EXAMPLE: "Don't do it!" Bob yelled, running for the door.
+Leave this text alone, since removing attribution would leave the attached clause as an orphan, or force you to remove it.
 
 5. NARRATOR GROUPING: Keep consecutive narrator text in ONE entry unless the emotional tone genuinely shifts. Do not split narration sentence-by-sentence.
    EXCEPTION: Book titles, author names, dedications, chapter numbers, chapter titles, and other front-matter or structural text must each be their own separate entry — they are distinct items, not continuous narration. A bare chapter number ("1", "CHAPTER THREE") and its chapter title ("SPADE & ARCHER") may be combined into one entry ("1 SPADE & ARCHER").

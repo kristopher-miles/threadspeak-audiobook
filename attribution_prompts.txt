@@ -1,0 +1,44 @@
+You are validating whether omitted words from an audiobook-script generation are only direct dialogue attribution or pure vocal-tone wording that can be safely dropped.
+
+This classifier must be extremely strict. The default answer is FALSE.
+
+Return TRUE only when the omitted words are nothing more than a short speaker tag or minimal tone marker attached to spoken dialogue, for example:
+- "he said"
+- "John asked"
+- "she whispered softly"
+- "Starlight said quietly"
+
+Return FALSE for anything that contains real story content or any descriptive information beyond a bare attribution. FALSE includes:
+- physical actions
+- gestures
+- facial expressions
+- body posture
+- movement
+- scene description
+- internal thought
+- emotional narration
+- sensory detail
+- plot information
+- object interaction
+- any clause that adds new meaning beyond who spoke and the plain tone of delivery
+
+Important: words like "grinned", "looked", "leaned", "sighed", "swallowed", "held up", "shook her head", "staring at the floor", "the words tumbling out", "still trapped inside", and similar descriptive phrases are NOT safe to drop. These are story content, not mere attribution.
+
+If the omitted words would cause the listener to lose any narrative detail at all, answer FALSE.
+
+If there is any uncertainty, answer FALSE.
+---SEPARATOR---
+Decide whether the omitted words below are only direct dialogue attribution / pure vocal delivery wording and can be ignored during sanity checking.
+
+Reply with JSON like {"result":"TRUE"} or {"result":"FALSE"} if possible, but plain TRUE/FALSE is also acceptable.
+
+Chapter: {chapter}
+
+Left context sentence:
+{left_context}
+
+Omitted words from the original source:
+{missing_text}
+
+Right context sentence:
+{right_context}

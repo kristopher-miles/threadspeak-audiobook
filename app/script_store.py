@@ -4,6 +4,7 @@ import re
 
 
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
+_SCRIPT_METADATA_KEYS = ("sanity_cache",)
 
 
 def _clean_string(value):
@@ -32,18 +33,28 @@ def normalize_script_document(data):
         return {
             "entries": data,
             "dictionary": [],
+            "sanity_cache": {"phrase_decisions": {}},
         }
 
     if isinstance(data, dict):
         entries = data.get("entries")
         if not isinstance(entries, list):
             entries = []
+        sanity_cache = data.get("sanity_cache")
+        if not isinstance(sanity_cache, dict):
+            sanity_cache = {}
+        phrase_decisions = sanity_cache.get("phrase_decisions")
+        if not isinstance(phrase_decisions, dict):
+            phrase_decisions = {}
         return {
             "entries": entries,
             "dictionary": clean_dictionary_entries(data.get("dictionary", [])),
+            "sanity_cache": {
+                "phrase_decisions": phrase_decisions,
+            },
         }
 
-    return {"entries": [], "dictionary": []}
+    return {"entries": [], "dictionary": [], "sanity_cache": {"phrase_decisions": {}}}
 
 
 def load_script_document(path):
@@ -51,15 +62,23 @@ def load_script_document(path):
         return normalize_script_document(json.load(f))
 
 
-def save_script_document(path, entries=None, dictionary=None):
+def save_script_document(path, entries=None, dictionary=None, sanity_cache=None):
     try:
         current = load_script_document(path)
     except FileNotFoundError:
-        current = {"entries": [], "dictionary": []}
+        current = {"entries": [], "dictionary": [], "sanity_cache": {"phrase_decisions": {}}}
+
+    resolved_sanity_cache = current.get("sanity_cache", {"phrase_decisions": {}})
+    if isinstance(sanity_cache, dict):
+        phrase_decisions = sanity_cache.get("phrase_decisions")
+        resolved_sanity_cache = {
+            "phrase_decisions": phrase_decisions if isinstance(phrase_decisions, dict) else {},
+        }
 
     document = {
         "entries": current["entries"] if entries is None else entries,
         "dictionary": current["dictionary"] if dictionary is None else clean_dictionary_entries(dictionary),
+        "sanity_cache": resolved_sanity_cache,
     }
 
     with open(path, "w", encoding="utf-8") as f:

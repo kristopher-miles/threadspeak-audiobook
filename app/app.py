@@ -17,14 +17,18 @@ import zipfile
 import subprocess
 import aiofiles
 import uuid
+from openai import OpenAI
 
 # Import ProjectManager
 from project import ProjectManager
 from default_prompts import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT, load_default_prompts
 from review_prompts import load_review_prompts
+from attribution_prompts import load_attribution_prompts
 from hf_utils import fetch_builtin_manifest, download_builtin_adapter, is_adapter_downloaded
 from script_store import apply_dictionary_to_text, clean_dictionary_entries, load_script_document, save_script_document
 from source_document import load_source_document
+from script_sanity import build_attribution_classifier, run_script_sanity_check
+from script_repair import repair_invalid_chunks
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -45,6 +49,7 @@ UPLOADS_DIR = os.path.join(BASE_DIR, "uploads")
 SCRIPTS_DIR = os.path.join(ROOT_DIR, "scripts")
 CHUNKS_PATH = os.path.join(ROOT_DIR, "chunks.json")
 AUDIO_QUEUE_STATE_PATH = os.path.join(ROOT_DIR, "audio_queue_state.json")
+SCRIPT_SANITY_PATH = os.path.join(ROOT_DIR, "script_sanity_check.json")
 DESIGNED_VOICES_DIR = os.path.join(ROOT_DIR, "designed_voices")
 CLONE_VOICES_DIR = os.path.join(ROOT_DIR, "clone_voices")
 LORA_MODELS_DIR = os.path.join(ROOT_DIR, "lora_models")
@@ -74,6 +79,16 @@ def _load_project_dictionary_entries():
 
 def _apply_project_dictionary(text):
     return apply_dictionary_to_text(text, _load_project_dictionary_entries())[0]
+
+
+def _any_project_task_running():
+    for name, state in process_state.items():
+        if bool(state.get("running")):
+            return name
+    with audio_queue_lock:
+        if audio_queue or audio_current_job is not None:
+            return "audio"
+    return None
 
 # Mount static files with absolute path
 STATIC_DIR = os.path.join(BASE_DIR, "static")
@@ -155,12 +170,15 @@ class GenerationConfig(BaseModel):
     presence_penalty: float = 0.0
     banned_tokens: List[str] = []
     merge_narrators: bool = False
+    orphaned_text_to_narrator_on_repair: bool = True
 
 class PromptConfig(BaseModel):
     system_prompt: Optional[str] = None
     user_prompt: Optional[str] = None
     review_system_prompt: Optional[str] = None
     review_user_prompt: Optional[str] = None
+    attribution_system_prompt: Optional[str] = None
+    attribution_user_prompt: Optional[str] = None
 
 class AppConfig(BaseModel):
     llm: LLMConfig
@@ -299,6 +317,8 @@ process_state = {
     "audacity_export": {"running": False, "logs": []},
     "m4b_export": {"running": False, "logs": []},
     "review": {"running": False, "logs": []},
+    "sanity": {"running": False, "logs": []},
+    "repair": {"running": False, "logs": []},
     "lora_training": {"running": False, "logs": []},
     "dataset_gen": {"running": False, "logs": []},
     "dataset_builder": {"running": False, "logs": [], "cancel": False}
@@ -1089,6 +1109,170 @@ def run_process(command: List[str], task_name: str):
     finally:
         process_state[task_name]["running"] = False
 
+
+def run_script_sanity_task():
+    process_state["sanity"]["running"] = True
+    process_state["sanity"]["logs"] = []
+
+    def log(message: str):
+        process_state["sanity"]["logs"].append(message)
+        _trim_logs(process_state["sanity"]["logs"])
+
+    try:
+        if os.path.exists(SCRIPT_SANITY_PATH):
+            os.remove(SCRIPT_SANITY_PATH)
+
+        if not os.path.exists(SCRIPT_PATH):
+            raise FileNotFoundError("No annotated script found. Generate a script first.")
+
+        state_path = os.path.join(ROOT_DIR, "state.json")
+        if not os.path.exists(state_path):
+            raise FileNotFoundError("No source file selected.")
+
+        with open(state_path, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        input_file = state.get("input_file_path")
+        if not input_file or not os.path.exists(input_file):
+            raise FileNotFoundError("Original uploaded source could not be found.")
+
+        config = {}
+        if os.path.exists(CONFIG_PATH):
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        chunk_size = int(config.get("generation", {}).get("chunk_size", 3000))
+        llm_config = config.get("llm", {})
+        prompts_config = config.get("prompts", {})
+        if not prompts_config.get("attribution_system_prompt") or not prompts_config.get("attribution_user_prompt"):
+            try:
+                attr_sys, attr_usr = load_attribution_prompts()
+                prompts_config = {
+                    **prompts_config,
+                    "attribution_system_prompt": prompts_config.get("attribution_system_prompt") or attr_sys,
+                    "attribution_user_prompt": prompts_config.get("attribution_user_prompt") or attr_usr,
+                }
+            except RuntimeError:
+                pass
+
+        log(f"Loading source document: {os.path.basename(input_file)}")
+        source_document = load_source_document(input_file)
+        script_document = _load_project_script_document()
+        log(
+            f"Comparing {len(source_document.get('chapters', []))} source chapter(s) "
+            f"against {len(script_document.get('entries', []))} script entr{'y' if len(script_document.get('entries', [])) == 1 else 'ies'}"
+        )
+
+        attribution_resolver = None
+        attribution_system_prompt = prompts_config.get("attribution_system_prompt")
+        attribution_user_prompt = prompts_config.get("attribution_user_prompt")
+        if attribution_system_prompt and attribution_user_prompt:
+            client = OpenAI(
+                base_url=llm_config.get("base_url", "http://localhost:11434/v1"),
+                api_key=llm_config.get("api_key", "local"),
+                timeout=float(llm_config.get("timeout", 600)),
+            )
+            attribution_resolver = build_attribution_classifier(
+                client,
+                llm_config.get("model_name", "local-model"),
+                attribution_system_prompt,
+                attribution_user_prompt,
+            )
+
+        result = run_script_sanity_check(
+            source_document,
+            script_document,
+            chunk_size,
+            attribution_resolver=attribution_resolver,
+            known_phrase_decisions=(script_document.get("sanity_cache") or {}).get("phrase_decisions"),
+        )
+
+        updated_sanity_cache = {
+            "phrase_decisions": result.get("attribution_phrase_decisions", {}),
+        }
+        save_script_document(
+            SCRIPT_PATH,
+            entries=script_document.get("entries"),
+            dictionary=script_document.get("dictionary", []),
+            sanity_cache=updated_sanity_cache,
+        )
+
+        with open(SCRIPT_SANITY_PATH, "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
+
+        mismatched = [chapter for chapter in result["chapters"] if chapter["missing_words"] or chapter["inserted_words"]]
+        if not mismatched:
+            log("All chapters match the original source after normalization.")
+        else:
+            for chapter in mismatched:
+                title = chapter.get("chapter_title") or chapter.get("source_title") or chapter.get("script_title") or f"Chapter {chapter.get('chapter_index')}"
+                log(
+                    f'Chapter "{title}": missing_words={chapter["missing_words"]}, '
+                    f'inserted_words={chapter["inserted_words"]}, '
+                    f'invalid_sections={len(chapter["invalid_sections"])}, '
+                    f'invalid_chunks={chapter["invalid_chunk_count"]}'
+                )
+
+        log(f"Dialogue-attribution candidates: {result['attribution_candidates']}")
+        log(f"Dialogue-attribution cache hits: {result['attribution_cache_hits']}")
+        log(f"Dialogue-attribution model queries: {result['attribution_model_queries']}")
+        log(f"Dialogue-attribution sections pruned: {result['attribution_pruned_sections']}")
+        log(f"Dialogue-attribution words pruned: {result['attribution_pruned_words']}")
+        for decision in result.get("attribution_decisions") or []:
+            if decision.get("decision") == "rejected":
+                phrase = decision.get("source_text") or ""
+                log(f'Confirmed genuine deletion: "{phrase}"')
+
+        log(f"Missing words total: {result['missing_words']}")
+        log(f"Inserted words total: {result['inserted_words']}")
+        log(f"Invalid sections total: {result['invalid_section_count']}")
+        log(f"Invalid chunks total: {result['invalid_chunk_count']}")
+        log("Task sanity completed successfully.")
+    except Exception as e:
+        logger.error(f"Error running script sanity check: {e}")
+        log(f"Error: {str(e)}")
+    finally:
+        process_state["sanity"]["running"] = False
+
+
+def run_script_repair_task():
+    process_state["repair"]["running"] = True
+    process_state["repair"]["logs"] = []
+
+    def log(message: str):
+        process_state["repair"]["logs"].append(message)
+        _trim_logs(process_state["repair"]["logs"])
+
+    try:
+        if os.path.exists(SCRIPT_SANITY_PATH):
+            os.remove(SCRIPT_SANITY_PATH)
+
+        result = repair_invalid_chunks(ROOT_DIR, log)
+        final_sanity = result["final_sanity"]
+
+        with open(SCRIPT_SANITY_PATH, "w", encoding="utf-8") as f:
+            json.dump(final_sanity, f, indent=2, ensure_ascii=False)
+
+        log(f"Initial invalid chunks: {result['initial_invalid_chunks']}")
+        log(f"Initial missing words: {result['initial_missing_words']}")
+        log(f"Initial inserted words: {result['initial_inserted_words']}")
+        log(f"Repair passes completed: {result['repaired_targets']}")
+
+        if final_sanity["invalid_chunk_count"] == 0:
+            log("Parity guarantee succeeded: script matches the source input.")
+        else:
+            log(
+                "Parity guarantee incomplete: "
+                f"outstanding_invalid_chunks={final_sanity['invalid_chunk_count']}, "
+                f"missing_words={final_sanity['missing_words']}, "
+                f"inserted_words={final_sanity['inserted_words']}"
+            )
+
+        log("Task repair completed successfully.")
+    except Exception as e:
+        logger.error(f"Error running script repair: {e}")
+        log(f"Error: {str(e)}")
+    finally:
+        process_state["repair"]["running"] = False
+
 # Endpoints
 
 @app.get("/")
@@ -1135,6 +1319,12 @@ async def get_config():
             default_config["prompts"]["review_user_prompt"] = rev_usr
         except RuntimeError:
             pass
+        try:
+            attr_sys, attr_usr = load_attribution_prompts()
+            default_config["prompts"]["attribution_system_prompt"] = attr_sys
+            default_config["prompts"]["attribution_user_prompt"] = attr_usr
+        except RuntimeError:
+            pass
         config = default_config
     else:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -1148,6 +1338,12 @@ async def get_config():
             rev_sys, rev_usr = load_review_prompts()
             prompts["review_system_prompt"] = rev_sys
             prompts["review_user_prompt"] = rev_usr
+        except RuntimeError:
+            pass
+        try:
+            attr_sys, attr_usr = load_attribution_prompts()
+            prompts["attribution_system_prompt"] = attr_sys
+            prompts["attribution_user_prompt"] = attr_usr
         except RuntimeError:
             pass
         config["prompts"] = prompts
@@ -1167,6 +1363,15 @@ async def get_config():
                     config["prompts"]["review_user_prompt"] = rev_usr
             except RuntimeError:
                 pass  # review_prompts.txt missing or malformed — leave fields empty
+        if not config["prompts"].get("attribution_system_prompt") or not config["prompts"].get("attribution_user_prompt"):
+            try:
+                attr_sys, attr_usr = load_attribution_prompts()
+                if not config["prompts"].get("attribution_system_prompt"):
+                    config["prompts"]["attribution_system_prompt"] = attr_sys
+                if not config["prompts"].get("attribution_user_prompt"):
+                    config["prompts"]["attribution_user_prompt"] = attr_usr
+            except RuntimeError:
+                pass
 
     # Include current input file info if available
     state_path = os.path.join(ROOT_DIR, "state.json")
@@ -1193,6 +1398,12 @@ async def get_default_prompts():
         review_sys, review_usr = load_review_prompts()
         result["review_system_prompt"] = review_sys
         result["review_user_prompt"] = review_usr
+    except RuntimeError:
+        pass
+    try:
+        attribution_sys, attribution_usr = load_attribution_prompts()
+        result["attribution_system_prompt"] = attribution_sys
+        result["attribution_user_prompt"] = attribution_usr
     except RuntimeError:
         pass
     return result
@@ -1243,6 +1454,89 @@ async def upload_file(file: UploadFile = File(...)):
         "chapter_count": chapter_count,
     }
 
+
+@app.post("/api/reset_project")
+async def reset_project():
+    running_task = _any_project_task_running()
+    if running_task:
+        raise HTTPException(status_code=409, detail=f"Cannot reset while '{running_task}' is running.")
+
+    removed = []
+    state_path = os.path.join(ROOT_DIR, "state.json")
+    state_data = {}
+    if os.path.exists(state_path):
+        try:
+            with open(state_path, "r", encoding="utf-8") as f:
+                state_data = json.load(f)
+        except (json.JSONDecodeError, ValueError, OSError):
+            state_data = {}
+
+    input_file_path = state_data.get("input_file_path") or ""
+    if input_file_path:
+        try:
+            if os.path.commonpath([os.path.abspath(input_file_path), os.path.abspath(UPLOADS_DIR)]) == os.path.abspath(UPLOADS_DIR) and os.path.exists(input_file_path):
+                os.remove(input_file_path)
+                removed.append(os.path.basename(input_file_path))
+        except ValueError:
+            pass
+
+    files_to_remove = [
+        state_path,
+        SCRIPT_PATH,
+        VOICES_PATH,
+        VOICE_CONFIG_PATH,
+        CHUNKS_PATH,
+        AUDIOBOOK_PATH,
+        M4B_PATH,
+        AUDIO_QUEUE_STATE_PATH,
+        SCRIPT_SANITY_PATH,
+        os.path.join(ROOT_DIR, "audacity_export.zip"),
+        os.path.join(ROOT_DIR, "m4b_cover.jpg"),
+    ]
+
+    for path in files_to_remove:
+        if os.path.exists(path):
+            os.remove(path)
+            removed.append(os.path.basename(path))
+
+    if os.path.isdir(VOICELINES_DIR):
+        for entry in os.listdir(VOICELINES_DIR):
+            entry_path = os.path.join(VOICELINES_DIR, entry)
+            if os.path.isdir(entry_path):
+                shutil.rmtree(entry_path)
+            else:
+                os.remove(entry_path)
+    os.makedirs(VOICELINES_DIR, exist_ok=True)
+
+    if os.path.isdir(UPLOADS_DIR):
+        for entry in os.listdir(UPLOADS_DIR):
+            entry_path = os.path.join(UPLOADS_DIR, entry)
+            if os.path.isdir(entry_path):
+                shutil.rmtree(entry_path)
+            else:
+                os.remove(entry_path)
+
+    with audio_queue_condition:
+        audio_queue.clear()
+        process_state["audio"]["cancel"] = False
+        process_state["audio"]["queue"] = []
+        process_state["audio"]["current_job"] = None
+        process_state["audio"]["recent_jobs"] = []
+        process_state["audio"]["logs"] = []
+        process_state["audio"]["running"] = False
+        process_state["audio"]["merge_running"] = False
+        process_state["audio"]["metrics"] = _new_audio_metrics()
+        process_state["audio"]["heartbeat"] = _new_audio_heartbeat_state()
+
+    for task_name in ("script", "voices", "review", "sanity", "repair", "audacity_export", "m4b_export"):
+        process_state[task_name]["logs"] = []
+        process_state[task_name]["running"] = False
+
+    project_manager.engine = None
+
+    logger.info("Project state reset")
+    return {"status": "reset", "removed": removed}
+
 @app.post("/api/generate_script")
 async def generate_script(background_tasks: BackgroundTasks):
     # Get input file from state.json
@@ -1274,12 +1568,41 @@ async def review_script(background_tasks: BackgroundTasks):
     background_tasks.add_task(run_process, [sys.executable, "-u", "review_script.py"], "review")
     return {"status": "started"}
 
+@app.post("/api/script_sanity_check")
+async def script_sanity_check(background_tasks: BackgroundTasks):
+    if not os.path.exists(SCRIPT_PATH):
+        raise HTTPException(status_code=400, detail="No annotated script found. Generate a script first.")
+
+    if process_state["sanity"]["running"]:
+        raise HTTPException(status_code=400, detail="Script sanity check already running")
+
+    background_tasks.add_task(run_script_sanity_task)
+    return {"status": "started"}
+
+@app.post("/api/replace_missing_chunks")
+async def replace_missing_chunks(background_tasks: BackgroundTasks):
+    if not os.path.exists(SCRIPT_PATH):
+        raise HTTPException(status_code=400, detail="No annotated script found. Generate a script first.")
+
+    if process_state["repair"]["running"]:
+        raise HTTPException(status_code=400, detail="Script repair already running")
+
+    background_tasks.add_task(run_script_repair_task)
+    return {"status": "started"}
+
 @app.get("/api/annotated_script")
 async def get_annotated_script():
     """Return the current working annotated_script.json."""
     if not os.path.exists(SCRIPT_PATH):
         raise HTTPException(status_code=404, detail="No annotated script found")
     return _load_project_script_document()
+
+@app.get("/api/script_sanity_check")
+async def get_script_sanity_check():
+    if not os.path.exists(SCRIPT_SANITY_PATH):
+        raise HTTPException(status_code=404, detail="No sanity check results found")
+    with open(SCRIPT_SANITY_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 @app.get("/api/status/{task_name}")
 async def get_status(task_name: str):
