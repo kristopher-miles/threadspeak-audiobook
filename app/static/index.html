@@ -283,7 +283,7 @@
                             <div class="mb-3 form-check form-switch">
                                 <input class="form-check-input" type="checkbox" id="orphaned-text-to-narrator-on-repair" checked>
                                 <label class="form-check-label" for="orphaned-text-to-narrator-on-repair">Orphaned text becomes Narrator Text on Repair</label>
-                                <div class="form-text">Enabled by default. When missing text is outside dialogue and fails the attribution test, repair inserts it directly as NARRATOR text instead of trying to regenerate character dialogue.</div>
+                                <div class="form-text">Enabled by default. Repair still tries the LLM first. If regeneration fails validation and the missing text is outside dialogue, the fallback patch inserts it as NARRATOR text instead of forcing dialogue regeneration.</div>
                             </div>
                             <hr>
                             <h6 class="mb-3">Prompt Customization</h6>

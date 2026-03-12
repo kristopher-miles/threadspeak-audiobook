@@ -55,6 +55,7 @@ class ScriptSanityCheckTests(unittest.TestCase):
         self.assertEqual(result["inserted_words"], 2)
         self.assertEqual(result["invalid_section_count"], 2)
         self.assertEqual(result["invalid_chunk_count"], 1)
+        self.assertIn("bonus extra", [section.get("inserted_text") for section in result["invalid_sections"]])
 
     def test_counts_inserted_script_only_chapter(self):
         source = {
@@ -212,6 +213,60 @@ class ScriptSanityCheckTests(unittest.TestCase):
 
         self.assertGreater(result["missing_words"], 0)
         self.assertEqual(result["attribution_pruned_sections"], 0)
+
+    def test_persists_new_attribution_decisions_and_skips_them_on_retry(self):
+        source = {
+            "type": "text",
+            "title": "Book",
+            "chapters": [{
+                "title": "Chapter One",
+                "text": 'Hello there, he said quietly, before leaving.',
+            }],
+        }
+        script = {
+            "entries": [{
+                "chapter": "Chapter One",
+                "speaker": "NARRATOR",
+                "text": "Hello there before leaving",
+                "instruct": "",
+            }],
+            "dictionary": [],
+        }
+
+        persisted = []
+        resolver_calls = {"count": 0}
+
+        def resolver(_payload):
+            resolver_calls["count"] += 1
+            return True, "TRUE", "TRUE"
+
+        def persist(phrase_key, decision, decisions):
+            persisted.append((phrase_key, decision["decision"], dict(decisions)))
+
+        first = run_script_sanity_check(
+            source,
+            script,
+            chunk_size=100,
+            attribution_resolver=resolver,
+            attribution_decision_persist=persist,
+        )
+
+        self.assertEqual(resolver_calls["count"], 1)
+        self.assertEqual(len(persisted), 1)
+        self.assertEqual(first["attribution_pruned_sections"], 1)
+
+        resolver_calls["count"] = 0
+        second = run_script_sanity_check(
+            source,
+            script,
+            chunk_size=100,
+            attribution_resolver=resolver,
+            known_phrase_decisions=first["attribution_phrase_decisions"],
+        )
+
+        self.assertEqual(resolver_calls["count"], 0)
+        self.assertEqual(second["attribution_cache_hits"], 1)
+        self.assertEqual(second["attribution_pruned_sections"], 1)
 
 
 if __name__ == "__main__":

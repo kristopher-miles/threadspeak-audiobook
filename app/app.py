@@ -396,6 +396,24 @@ def _append_task_log(task_name: str, run_id: str, message: str) -> bool:
         return True
 
 
+def _status_text_snippet(text: str, limit: int = 100) -> str:
+    normalized = " ".join(str(text or "").split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _format_invalid_text_details(missing_text: str = "", inserted_text: str = "") -> str:
+    parts = []
+    missing_snippet = _status_text_snippet(missing_text)
+    inserted_snippet = _status_text_snippet(inserted_text)
+    if missing_snippet:
+        parts.append(f'missing="{missing_snippet}"')
+    if inserted_snippet:
+        parts.append(f'inserted="{inserted_snippet}"')
+    return ", ".join(parts)
+
+
 def _start_task_run(task_name: str) -> str:
     run_id = str(uuid.uuid4())
     with task_state_lock:
@@ -1209,6 +1227,16 @@ def run_script_sanity_task(run_id: str):
             )
             progress_state["last_logged_current"] = current
 
+    def persist_attribution_decision(_phrase_key: str, _decision: dict, phrase_decisions: dict):
+        if not _task_is_current("sanity", run_id):
+            return
+        save_script_document(
+            SCRIPT_PATH,
+            entries=script_document.get("entries"),
+            dictionary=script_document.get("dictionary", []),
+            sanity_cache={"phrase_decisions": phrase_decisions},
+        )
+
     try:
         if os.path.exists(SCRIPT_SANITY_PATH):
             os.remove(SCRIPT_SANITY_PATH)
@@ -1275,6 +1303,7 @@ def run_script_sanity_task(run_id: str):
             attribution_resolver=attribution_resolver,
             known_phrase_decisions=(script_document.get("sanity_cache") or {}).get("phrase_decisions"),
             attribution_progress=on_attribution_progress,
+            attribution_decision_persist=persist_attribution_decision,
         )
         if not _task_is_current("sanity", run_id):
             return
@@ -1304,6 +1333,13 @@ def run_script_sanity_task(run_id: str):
                     f'invalid_sections={len(chapter["invalid_sections"])}, '
                     f'invalid_chunks={chapter["invalid_chunk_count"]}'
                 )
+                for section_index, section in enumerate(chapter.get("invalid_sections") or [], start=1):
+                    details = _format_invalid_text_details(
+                        section.get("source_text") or "",
+                        section.get("inserted_text") or "",
+                    )
+                    if details:
+                        log(f"  section {section_index}: {details}")
 
         log(f"Dialogue-attribution candidates: {result['attribution_candidates']}")
         log(f"Dialogue-attribution cache hits: {result['attribution_cache_hits']}")

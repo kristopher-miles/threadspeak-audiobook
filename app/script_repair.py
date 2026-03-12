@@ -2,6 +2,7 @@ import copy
 import json
 import os
 import re
+import time
 
 from openai import OpenAI
 
@@ -169,6 +170,63 @@ def _build_narrator_replacement_entries(chapter_title, source_text):
         "text": text,
         "instruct": "Neutral, clear announcement." if _is_structural_segment(text) else "Neutral, even narration.",
     }]
+
+
+def _build_validation_failure_replacement_entries(chapter_title, source_text, target_is_inside_dialogue, prefer_narrator):
+    if prefer_narrator and not target_is_inside_dialogue:
+        return _build_narrator_replacement_entries(chapter_title, source_text), "narrator"
+    return _build_literal_replacement_entries(chapter_title, source_text), "literal"
+
+
+def _whole_entry_block_for_script_span(group_entries, start_word, end_word):
+    selected = [
+        item for item in group_entries
+        if item["word_end"] > start_word and item["word_start"] < end_word
+    ]
+    if not selected:
+        return None
+    if selected[0]["word_start"] != start_word or selected[-1]["word_end"] != end_word:
+        return None
+    return [item["entry_index"] for item in selected]
+
+
+def _remove_entry_indices(entries, entry_indices):
+    removal_set = set(entry_indices or [])
+    return [
+        copy.deepcopy(entry)
+        for index, entry in enumerate(entries or [])
+        if index not in removal_set
+    ]
+
+
+def _removal_strictly_improves_sanity(current_sanity, candidate_sanity):
+    return (
+        int(candidate_sanity.get("inserted_words") or 0) < int(current_sanity.get("inserted_words") or 0)
+        and int(candidate_sanity.get("missing_words") or 0) <= int(current_sanity.get("missing_words") or 0)
+        and int(candidate_sanity.get("invalid_chunk_count") or 0) <= int(current_sanity.get("invalid_chunk_count") or 0)
+    )
+
+
+def _status_text_snippet(text, limit=100):
+    normalized = " ".join(str(text or "").split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _format_invalid_text_details(missing_text="", inserted_text=""):
+    parts = []
+    missing_snippet = _status_text_snippet(missing_text)
+    inserted_snippet = _status_text_snippet(inserted_text)
+    if missing_snippet:
+        parts.append(f'missing="{missing_snippet}"')
+    if inserted_snippet:
+        parts.append(f'inserted="{inserted_snippet}"')
+    return ", ".join(parts)
+
+
+def _should_shortcut_short_narration_patch(missing_words, target_is_inside_dialogue):
+    return int(missing_words or 0) > 0 and int(missing_words or 0) <= 3 and not target_is_inside_dialogue
 
 
 def _slice_text_by_char_span(text, start_char, end_char):
@@ -407,6 +465,61 @@ def _splice_replacement(entries, chapter_group, replacement_chunk, replacement_e
     )
 
 
+def _join_text_segments(left_text, right_text):
+    left = (left_text or "").strip()
+    right = (right_text or "").strip()
+    if left and right:
+        return f"{left} {right}"
+    return left or right
+
+
+def _format_duration(seconds):
+    seconds = max(0, int(round(float(seconds or 0))))
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:d}:{seconds:02d}"
+
+
+def _merge_narrator_replacement_into_adjacent_entry(entries, chapter_group, replacement_chunk, replacement_entries):
+    if not replacement_entries:
+        return None
+    if any((entry.get("speaker") or "").strip().upper() != "NARRATOR" for entry in replacement_entries):
+        return None
+
+    replacement_text = _join_text_segments("", " ".join((entry.get("text") or "").strip() for entry in replacement_entries))
+    if not replacement_text:
+        return None
+
+    prefix = _extract_entries_word_span(
+        chapter_group["entries"],
+        0,
+        int(replacement_chunk.get("script_word_start") or 0),
+    )
+    suffix = _extract_entries_word_span(
+        chapter_group["entries"],
+        int(replacement_chunk.get("script_word_end") or 0),
+        chapter_group["word_count"],
+    )
+
+    inserted_entries = []
+    if prefix and (prefix[-1].get("speaker") or "").strip().upper() == "NARRATOR":
+        prefix[-1]["text"] = _join_text_segments(prefix[-1].get("text"), replacement_text)
+    elif suffix and (suffix[0].get("speaker") or "").strip().upper() == "NARRATOR":
+        suffix[0]["text"] = _join_text_segments(replacement_text, suffix[0].get("text"))
+    else:
+        inserted_entries = copy.deepcopy(replacement_entries)
+
+    return (
+        copy.deepcopy(entries[:chapter_group["entries"][0]["entry_index"]])
+        + prefix
+        + inserted_entries
+        + suffix
+        + copy.deepcopy(entries[chapter_group["entries"][-1]["entry_index"] + 1:])
+    )
+
+
 def repair_invalid_chunks(root_dir, log, should_continue=None):
     state_path = os.path.join(root_dir, "state.json")
     script_path = os.path.join(root_dir, "annotated_script.json")
@@ -435,6 +548,10 @@ def repair_invalid_chunks(root_dir, log, should_continue=None):
     attempted_targets = set()
     failed_targets = set()
     initial_result = None
+    completed_repair_durations = []
+
+    def record_repair_completion(started_at):
+        completed_repair_durations.append(max(0.0, time.time() - started_at))
 
     while True:
         _ensure_continue(should_continue)
@@ -472,11 +589,32 @@ def repair_invalid_chunks(root_dir, log, should_continue=None):
         attempted_targets.add(signature)
 
         chapter_title = chapter_result.get("source_title") or chapter_result.get("chapter_title") or chapter_result.get("script_title") or ""
+        target_inserted_text = _slice_text_by_word_span(
+            script_group["text"] if (script_group := _find_script_group(_group_entries_by_chapter(script_document["entries"]), chapter_result.get("script_title") or chapter_title)) else "",
+            int(replacement_chunk.get("script_word_start") or 0),
+            int(replacement_chunk.get("script_word_end") or 0),
+        )
+        target_details = _format_invalid_text_details(
+            replacement_chunk.get("source_text") or "",
+            target_inserted_text,
+        )
+        avg_duration = (
+            sum(completed_repair_durations) / len(completed_repair_durations)
+            if completed_repair_durations else None
+        )
+        timing_stats = (
+            f'outstanding_invalid_sections={sanity_result["invalid_section_count"]}, '
+            f'avg_repair_time={_format_duration(avg_duration) if avg_duration is not None else "n/a"}, '
+            f'estimated_completion={_format_duration(avg_duration * sanity_result["invalid_section_count"]) if avg_duration is not None else "n/a"}'
+        )
         log(
             f'Repairing "{chapter_title or "untitled"}": '
+            f'{timing_stats}, '
             f'missing_words={replacement_chunk["missing_words"]}, '
             f'inserted_words={replacement_chunk["inserted_words"]}'
+            f'{", " + target_details if target_details else ""}'
         )
+        target_started_at = time.time()
 
         entries = script_document["entries"]
         chapter_groups = _group_entries_by_chapter(entries)
@@ -499,6 +637,7 @@ def repair_invalid_chunks(root_dir, log, should_continue=None):
             if os.path.exists(chunks_path):
                 os.remove(chunks_path)
             repaired_targets += 1
+            record_repair_completion(target_started_at)
             log(f'Removed inserted text from "{chapter_title}".')
             continue
 
@@ -508,6 +647,45 @@ def repair_invalid_chunks(root_dir, log, should_continue=None):
             failed_targets.add(signature)
             log(f'Could not locate source/script chapter pair for "{chapter_title}".')
             continue
+
+        removable_entry_indices = None
+        if int(replacement_chunk.get("inserted_words") or 0) > 0:
+            removable_entry_indices = _whole_entry_block_for_script_span(
+                script_group["entries"],
+                int(replacement_chunk.get("script_word_start") or 0),
+                int(replacement_chunk.get("script_word_end") or 0),
+            )
+        if removable_entry_indices:
+            _ensure_continue(should_continue)
+            candidate_entries = _remove_entry_indices(entries, removable_entry_indices)
+            candidate_script_document = {
+                "entries": candidate_entries,
+                "dictionary": script_document.get("dictionary", []),
+                "sanity_cache": sanity_cache,
+            }
+            candidate_sanity = run_script_sanity_check(
+                source_document,
+                candidate_script_document,
+                settings["chunk_size"],
+                known_phrase_decisions=sanity_cache.get("phrase_decisions"),
+            )
+            if _removal_strictly_improves_sanity(sanity_result, candidate_sanity):
+                save_script_document(
+                    script_path,
+                    entries=candidate_entries,
+                    dictionary=script_document.get("dictionary", []),
+                    sanity_cache=sanity_cache,
+                )
+                if os.path.exists(chunks_path):
+                    os.remove(chunks_path)
+                repaired_targets += 1
+                record_repair_completion(target_started_at)
+                log(
+                    f'Removed {len(removable_entry_indices)} self-contained inserted entr'
+                    f'{"y" if len(removable_entry_indices) == 1 else "ies"} from "{chapter_title}" without LLM regeneration'
+                    f'{": " + target_details if target_details else "."}'
+                )
+                continue
 
         excerpt_start, excerpt_end, excerpt_text = _build_centered_excerpt(
             source_chapter["text"],
@@ -549,13 +727,22 @@ def repair_invalid_chunks(root_dir, log, should_continue=None):
             if os.path.exists(chunks_path):
                 os.remove(chunks_path)
             repaired_targets += 1
+            record_repair_completion(target_started_at)
             log(f'Patched structural span in "{chapter_title}" without LLM regeneration.')
             continue
 
-        if settings.get("orphaned_text_to_narrator_on_repair", True) and not target_is_inside_dialogue:
+        if _should_shortcut_short_narration_patch(
+            replacement_chunk.get("missing_words"),
+            target_is_inside_dialogue,
+        ):
             replacement_entries = _build_narrator_replacement_entries(source_chapter["title"], target_source_text)
             _ensure_continue(should_continue)
-            updated_entries = _splice_replacement(entries, script_group, replacement_chunk, replacement_entries)
+            updated_entries = _merge_narrator_replacement_into_adjacent_entry(
+                entries,
+                script_group,
+                replacement_chunk,
+                replacement_entries,
+            ) or _splice_replacement(entries, script_group, replacement_chunk, replacement_entries)
             save_script_document(
                 script_path,
                 entries=updated_entries,
@@ -565,7 +752,11 @@ def repair_invalid_chunks(root_dir, log, should_continue=None):
             if os.path.exists(chunks_path):
                 os.remove(chunks_path)
             repaired_targets += 1
-            log(f'Patched orphaned non-dialogue text in "{chapter_title}" as NARRATOR.')
+            record_repair_completion(target_started_at)
+            log(
+                f'Patched short non-dialogue omission in "{chapter_title}" as narration without LLM regeneration'
+                f'{": " + target_details if target_details else "."}'
+            )
             continue
 
         context_entries = copy.deepcopy(entries[:script_group["entries"][0]["entry_index"]])
@@ -608,12 +799,27 @@ def repair_invalid_chunks(root_dir, log, should_continue=None):
             log(
                 f'Validation failed for "{chapter_title}": '
                 f'missing_words={validation["missing_words"]}, inserted_words={validation["inserted_words"]}'
+                f'{", " + target_details if target_details else ""}'
             )
 
         if not validated:
-            replacement_entries = _build_literal_replacement_entries(source_chapter["title"], target_source_text)
+            replacement_entries, fallback_kind = _build_validation_failure_replacement_entries(
+                source_chapter["title"],
+                target_source_text,
+                target_is_inside_dialogue,
+                settings.get("orphaned_text_to_narrator_on_repair", True),
+            )
             _ensure_continue(should_continue)
-            updated_entries = _splice_replacement(entries, script_group, replacement_chunk, replacement_entries)
+            updated_entries = (
+                _merge_narrator_replacement_into_adjacent_entry(
+                    entries,
+                    script_group,
+                    replacement_chunk,
+                    replacement_entries,
+                )
+                if fallback_kind == "narrator"
+                else None
+            ) or _splice_replacement(entries, script_group, replacement_chunk, replacement_entries)
             save_script_document(
                 script_path,
                 entries=updated_entries,
@@ -623,7 +829,17 @@ def repair_invalid_chunks(root_dir, log, should_continue=None):
             if os.path.exists(chunks_path):
                 os.remove(chunks_path)
             repaired_targets += 1
-            log(f'Fell back to literal source patch for "{chapter_title}" after validation failures.')
+            record_repair_completion(target_started_at)
+            if fallback_kind == "narrator":
+                log(
+                    f'Fell back to narrator patch for "{chapter_title}" after validation failures'
+                    f'{": " + target_details if target_details else "."}'
+                )
+            else:
+                log(
+                    f'Fell back to literal source patch for "{chapter_title}" after validation failures'
+                    f'{": " + target_details if target_details else "."}'
+                )
             continue
 
         generated_group = _group_entries_by_chapter(generated_entries)[0]
@@ -648,7 +864,9 @@ def repair_invalid_chunks(root_dir, log, should_continue=None):
         if os.path.exists(chunks_path):
             os.remove(chunks_path)
         repaired_targets += 1
+        record_repair_completion(target_started_at)
         log(
             f'Patched "{chapter_title}" with {len(replacement_entries)} regenerated entr'
-            f'{"y" if len(replacement_entries) == 1 else "ies"}.'
+            f'{"y" if len(replacement_entries) == 1 else "ies"}'
+            f'{": " + target_details if target_details else "."}'
         )

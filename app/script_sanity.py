@@ -207,6 +207,7 @@ def _build_invalid_section(source_chapter, script_chapter, source_tokens, script
     script_end = _char_end(script_tokens, j2, script_anchor)
 
     source_span_text = source_text[source_anchor:source_end].strip() if source_end >= source_anchor else ""
+    script_span_text = script_text[script_anchor:script_end].strip() if script_end >= script_anchor else ""
     left_context, right_context = _sentence_context(source_text, source_anchor, source_end)
     sentence_start = _find_sentence_left_boundary(source_text, source_anchor)
     sentence_end = _find_sentence_right_boundary(source_text, source_end)
@@ -228,6 +229,7 @@ def _build_invalid_section(source_chapter, script_chapter, source_tokens, script
         "source_excerpt": _excerpt(source_text, source_anchor, source_end),
         "script_excerpt": _excerpt(script_text, script_anchor, script_end),
         "source_text": source_span_text,
+        "inserted_text": script_span_text,
         "left_context": left_context,
         "right_context": right_context,
         "covers_full_sentence": bool(source_span_text) and _normalize_phrase_key(source_span_text) == _normalize_phrase_key(sentence_text),
@@ -256,6 +258,7 @@ def _build_chapter_only_section(kind, chapter):
         "source_excerpt": text[:200].strip() if kind == "missing_chapter" else "",
         "script_excerpt": text[:200].strip() if kind == "inserted_chapter" else "",
         "source_text": text.strip() if kind == "missing_chapter" else "",
+        "inserted_text": text.strip() if kind == "inserted_chapter" else "",
         "left_context": "",
         "right_context": "",
         "covers_full_sentence": kind == "missing_chapter",
@@ -479,6 +482,7 @@ def run_script_sanity_check(
     attribution_resolver=None,
     known_phrase_decisions=None,
     attribution_progress=None,
+    attribution_decision_persist=None,
 ):
     source_chapters = []
     for index, chapter in enumerate(source_document.get("chapters") or [], start=1):
@@ -634,6 +638,12 @@ def run_script_sanity_check(
             "reply": normalized_reply[:500],
             "checked_at": time.time(),
         }
+        if callable(attribution_decision_persist):
+            attribution_decision_persist(
+                phrase_key,
+                phrase_decisions[phrase_key],
+                dict(phrase_decisions),
+            )
         result["attribution_model_queries"] += 1
         if callable(attribution_progress):
             attribution_progress(
