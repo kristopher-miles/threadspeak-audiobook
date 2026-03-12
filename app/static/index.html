@@ -186,6 +186,15 @@
             color: var(--app-text);
             border-color: var(--app-divider) !important;
         }
+        .editor-stat-action {
+            cursor: pointer;
+            border-radius: 10px;
+            padding: 0.25rem 0.5rem;
+            transition: background-color 0.15s ease, color 0.15s ease;
+        }
+        .editor-stat-action:hover {
+            background-color: var(--app-table-hover);
+        }
         /* Editor row expand/collapse */
         .chunk-expand-btn {
             border: none;
@@ -310,11 +319,15 @@
                                 <div class="form-text">Seed for reproducibility</div>
                             </div>
                             <div class="col-md-2">
-                                <div class="form-check form-switch mt-4">
-                                    <input class="form-check-input" type="checkbox" id="auto-regenerate-bad-clips">
-                                    <label class="form-check-label" for="auto-regenerate-bad-clips">Auto-Regenerate Bad Clips</label>
+                                <label class="form-label">Bad Clip Retries</label>
+                                <div class="d-flex align-items-center gap-2">
+                                    <div class="form-check form-switch m-0">
+                                        <input class="form-check-input" type="checkbox" id="auto-regenerate-bad-clips">
+                                        <label class="form-check-label" for="auto-regenerate-bad-clips">Enabled</label>
+                                    </div>
+                                    <input type="number" class="form-control" id="auto-regenerate-bad-clip-attempts" value="3" min="0" step="1" style="max-width: 96px;">
                                 </div>
-                                <div class="form-text">Retry invalid clips once immediately before continuing</div>
+                                <div class="form-text">Attempts controls retry count after an error. Positive numbers retry that many times. `0` or invalid disables retries.</div>
                             </div>
                         </div>
                         <div class="row mb-3" id="tts-local-options" style="display:none;">
@@ -953,6 +966,7 @@
                             <td class="text-center align-top"><button class="btn btn-danger btn-sm w-100" id="btn-cancel-render" onclick="cancelRender()" style="display:none;"><i class="fas fa-stop me-1"></i>Cancel</button></td>
                             <td class="align-middle text-muted px-1">|</td>
                             <td class="text-center align-top" style="min-width:100px;"><button class="btn btn-warning btn-sm w-100" id="btn-merge"><i class="fas fa-file-audio me-1"></i>Merge All</button></td>
+                            <td class="text-center align-top" style="min-width:130px;"><button class="btn btn-outline-warning btn-sm w-100" id="btn-merge-optimized"><i class="fas fa-box-archive me-1"></i>Optimized Export</button></td>
                         </tr>
                         <tr>
                             <td class="text-center text-muted" style="font-size:0.7rem;">Preview generated audio in the current view</td>
@@ -963,6 +977,7 @@
                             <td></td>
                             <td></td>
                             <td class="text-center text-muted" style="font-size:0.7rem;">Combine all chunks into final audiobook</td>
+                            <td class="text-center text-muted" style="font-size:0.7rem;">Export <=2 hour MP3 parts in a zip</td>
                         </tr>
                      </table>
                 </div>
@@ -1009,11 +1024,11 @@
                                  <div class="small text-muted">Remaining Queue Words</div>
                                  <div class="fw-semibold" id="editor-estimate-words">0</div>
                              </div>
-                             <div class="col-md-3 col-sm-6">
-                                 <div class="small text-muted">Errors</div>
-                                 <div class="fw-semibold" id="editor-estimate-errors">0 clips, 0.0%</div>
-                             </div>
-                         </div>
+                            <div class="col-md-3 col-sm-6">
+                                <div class="small text-muted">Errors</div>
+                                <div class="fw-semibold editor-stat-action" id="editor-estimate-errors" onclick="jumpToFirstEditorError()" title="Jump to the first errored segment">0 clips, 0.0%</div>
+                            </div>
+                        </div>
                      </div>
 
                      <div class="table-responsive">
@@ -1052,6 +1067,38 @@
                     <h4><span class="step-indicator step-active">5</span>Final Result</h4>
                 </div>
                 <div class="card-body">
+                    <div id="audio-merge-progress" class="theme-panel border rounded p-3 mb-3" style="display:none;">
+                        <div class="row g-3">
+                            <div class="col-md-3 col-sm-6">
+                                <div class="small text-muted">Merge Stage</div>
+                                <div class="fw-semibold" id="audio-merge-stage">Waiting</div>
+                            </div>
+                            <div class="col-md-3 col-sm-6">
+                                <div class="small text-muted">Progress</div>
+                                <div class="fw-semibold" id="audio-merge-chapter-progress">0 / 0</div>
+                            </div>
+                            <div class="col-md-3 col-sm-6">
+                                <div class="small text-muted">Elapsed</div>
+                                <div class="fw-semibold" id="audio-merge-elapsed">0s</div>
+                            </div>
+                            <div class="col-md-3 col-sm-6">
+                                <div class="small text-muted">Merged Duration</div>
+                                <div class="fw-semibold" id="audio-merge-duration">0s</div>
+                            </div>
+                            <div class="col-md-6 col-sm-12">
+                                <div class="small text-muted">Current Chapter</div>
+                                <div class="fw-semibold" id="audio-merge-current-chapter">Waiting for merge to start</div>
+                            </div>
+                            <div class="col-md-3 col-sm-6">
+                                <div class="small text-muted">Working Size</div>
+                                <div class="fw-semibold" id="audio-merge-size">0 B</div>
+                            </div>
+                            <div class="col-md-3 col-sm-6">
+                                <div class="small text-muted">Output File</div>
+                                <div class="fw-semibold" id="audio-merge-output-size">0 B</div>
+                            </div>
+                        </div>
+                    </div>
                     <div id="audio-player-container" class="text-center" style="display:none;">
                         <h5>Your Audiobook</h5>
                         <audio id="main-audio" controls class="w-100 mt-2">
@@ -1319,6 +1366,7 @@
                 document.getElementById('batch-group-by-type').checked = !!config.tts.batch_group_by_type;
                 document.getElementById('sub-batch-enabled').checked = config.tts.sub_batch_enabled !== false;
                 document.getElementById('auto-regenerate-bad-clips').checked = !!config.tts.auto_regenerate_bad_clips;
+                document.getElementById('auto-regenerate-bad-clip-attempts').value = config.tts.auto_regenerate_bad_clip_attempts ?? 3;
                 if (config.tts.sub_batch_min_size != null) {
                     document.getElementById('sub-batch-min-size').value = config.tts.sub_batch_min_size;
                 }
@@ -1465,6 +1513,7 @@
             document.getElementById('banned-tokens').value = '';
             document.getElementById('merge-narrators').checked = false;
             document.getElementById('orphaned-text-to-narrator-on-repair').checked = true;
+            document.getElementById('auto-regenerate-bad-clip-attempts').value = 3;
         };
 
         // Toggle chevron on collapse
@@ -1485,6 +1534,10 @@
             parallelWorkers = Math.max(1, parallelWorkers);
             document.getElementById('parallel-workers').value = parallelWorkers;
 
+            const rawRetryAttempts = parseInt(document.getElementById('auto-regenerate-bad-clip-attempts').value, 10);
+            const retryAttempts = Number.isInteger(rawRetryAttempts) && rawRetryAttempts > 0 ? rawRetryAttempts : 0;
+            document.getElementById('auto-regenerate-bad-clip-attempts').value = retryAttempts > 0 ? retryAttempts : 0;
+
             const config = {
                 llm: {
                     base_url: document.getElementById('llm-url').value,
@@ -1502,6 +1555,7 @@
                     batch_group_by_type: document.getElementById('batch-group-by-type').checked,
                     sub_batch_enabled: document.getElementById('sub-batch-enabled').checked,
                     auto_regenerate_bad_clips: document.getElementById('auto-regenerate-bad-clips').checked,
+                    auto_regenerate_bad_clip_attempts: retryAttempts,
                     sub_batch_min_size: parseInt(document.getElementById('sub-batch-min-size').value) || 4,
                     sub_batch_ratio: parseFloat(document.getElementById('sub-batch-ratio').value) || 5,
                     sub_batch_max_chars: parseInt(document.getElementById('sub-batch-max-chars').value) || 3000,
@@ -2754,6 +2808,19 @@
             return new Intl.NumberFormat('en-US').format(value || 0);
         }
 
+        function formatBytes(bytes) {
+            const value = Number(bytes) || 0;
+            if (value < 1024) return `${value} B`;
+            const units = ['KB', 'MB', 'GB', 'TB'];
+            let size = value / 1024;
+            let unitIndex = 0;
+            while (size >= 1024 && unitIndex < units.length - 1) {
+                size /= 1024;
+                unitIndex += 1;
+            }
+            return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[unitIndex]}`;
+        }
+
         function renderAudioEstimatePanel(audioState) {
             const metrics = audioState?.metrics || {};
             const etaEl = document.getElementById('editor-estimate-eta');
@@ -2791,6 +2858,75 @@
                 el.textContent = '';
             }
         }
+
+        function renderAudioMergeProgress(status) {
+            const panel = document.getElementById('audio-merge-progress');
+            if (!panel) return;
+
+            const progress = status?.merge_progress || {};
+            const shouldShow = Boolean(status?.merge_running) || Boolean(progress?.running) || (progress?.total_chapters || 0) > 0;
+            panel.style.display = shouldShow ? '' : 'none';
+            if (!shouldShow) return;
+
+            const stageMap = {
+                preparing: 'Preparing Inputs',
+                starting: 'Starting',
+                assembling: 'Assembling Chapters',
+                packing: 'Packing Parts',
+                bundling: 'Writing Zip',
+                exporting: 'Exporting File',
+                complete: 'Complete',
+                idle: 'Idle',
+            };
+
+            document.getElementById('audio-merge-stage').textContent = stageMap[progress.stage] || 'Working';
+            document.getElementById('audio-merge-chapter-progress').textContent = `${progress.chapter_index || 0} / ${progress.total_chapters || 0}`;
+            document.getElementById('audio-merge-elapsed').textContent = formatDuration(progress.elapsed_seconds || 0);
+            document.getElementById('audio-merge-duration').textContent = formatDuration(progress.merged_duration_seconds || 0);
+            document.getElementById('audio-merge-current-chapter').textContent = progress.chapter_label || 'Waiting for merge to start';
+            document.getElementById('audio-merge-size').textContent = formatBytes(progress.estimated_size_bytes || 0);
+            document.getElementById('audio-merge-output-size').textContent = formatBytes(progress.output_file_size_bytes || 0);
+        }
+
+        async function focusChunkInEditor(chunkId) {
+            await loadChunks(true);
+            const row = document.querySelector(`tr[data-id="${chunkId}"]`);
+            if (!row) return false;
+            document.querySelectorAll('tr').forEach(r => r.classList.remove('table-primary'));
+            row.classList.add('table-primary');
+            row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            return true;
+        }
+
+        window.jumpToFirstEditorError = async () => {
+            try {
+                const chunks = await API.get('/api/chunks');
+                const firstError = chunks.find(chunk => chunk.status === 'error');
+                if (!firstError) {
+                    showToast('No errored segments found.', 'warning');
+                    return;
+                }
+
+                const chapter = getChunkChapterName(firstError);
+                const chapterToggle = document.getElementById('editor-chapter-only');
+                if (chapterToggle) {
+                    chapterToggle.checked = true;
+                }
+                selectedEditorChapter = chapter || WHOLE_PROJECT_CHAPTER_ID;
+                syncEditorChapterState(chunks);
+
+                const focused = await focusChunkInEditor(firstError.id);
+                if (!focused) {
+                    showToast('Found an errored segment, but it could not be focused in the editor.', 'warning');
+                    return;
+                }
+
+                const scopeLabel = chapter ? `chapter "${chapter}"` : 'the current script';
+                showToast(`Jumped to the first errored segment in ${scopeLabel}.`, 'info', 2500);
+            } catch (e) {
+                showToast('Failed to jump to the first errored segment: ' + e.message, 'error');
+            }
+        };
 
         async function refreshAudioQueueUI() {
             const audioState = await API.get('/api/status/audio');
@@ -3417,6 +3553,18 @@
              }
         });
 
+        document.getElementById('btn-merge-optimized').addEventListener('click', async () => {
+             if (!await showConfirm("Create an optimized export zip with audiobook parts capped at about 2 hours each?")) return;
+
+             try {
+                 await API.post('/api/merge_optimized', {});
+                 document.querySelector('[data-tab="audio"]').click();
+                 pollLogs('audio', 'audio-logs');
+             } catch (e) {
+                 showToast("Optimized export failed: " + e.message, 'error');
+             }
+        });
+
 
         // --- Audacity Export ---
         window.exportAudacity = async () => {
@@ -3528,11 +3676,25 @@
             lora_training: 'lora-train-logs',
         };
         const activeTaskPolls = new Map();
+        const handledTaskCompletions = new Set();
+
+        function shouldHandleTaskCompletion(taskName, marker) {
+            if (!marker) return false;
+            const key = `${taskName}:${marker}`;
+            if (handledTaskCompletions.has(key)) {
+                return false;
+            }
+            handledTaskCompletions.add(key);
+            return true;
+        }
 
         function renderTaskLogs(taskName, status, elementId = taskLogTargets[taskName]) {
             const el = document.getElementById(elementId);
             if (!el || !status) return;
             const logs = Array.isArray(status.logs) ? status.logs : [];
+            if (taskName === 'audio') {
+                renderAudioMergeProgress(status);
+            }
             if ('value' in el && el.tagName === 'TEXTAREA') {
                 el.value = logs.join('\n');
                 el.scrollTop = el.scrollHeight;
@@ -3543,11 +3705,24 @@
         }
 
         function finalizeTaskStatus(taskName, status) {
-            if (taskName === 'audio' && status.logs.some(l => l.includes("complete"))) {
-                const audio = document.getElementById('main-audio');
-                audio.src = `/api/audiobook?t=${new Date().getTime()}`;
-                document.getElementById('audio-player-container').style.display = 'block';
-                document.getElementById('download-link').href = audio.src;
+            if (taskName === 'audio' && status.logs.some(l => l.includes("Optimized export complete"))) {
+                const marker = `optimized:${status.merge_progress?.updated_at || status.logs[status.logs.length - 1] || ''}`;
+                if (shouldHandleTaskCompletion(taskName, marker)) {
+                    const a = document.createElement('a');
+                    a.href = `/api/optimized_export?t=${new Date().getTime()}`;
+                    a.download = 'optimized_audiobook.zip';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                }
+            } else if (taskName === 'audio' && status.logs.some(l => l.includes("Merge complete"))) {
+                const marker = `merge:${status.merge_progress?.updated_at || status.logs[status.logs.length - 1] || ''}`;
+                if (shouldHandleTaskCompletion(taskName, marker)) {
+                    const audio = document.getElementById('main-audio');
+                    audio.src = `/api/audiobook?t=${new Date().getTime()}`;
+                    document.getElementById('audio-player-container').style.display = 'block';
+                    document.getElementById('download-link').href = audio.src;
+                }
             }
             if ((taskName === 'script' || taskName === 'review') && status.logs.some(l => l.includes("completed successfully"))) {
                 const tbody = document.getElementById('chunks-table-body');

@@ -528,6 +528,10 @@ curl -X POST http://127.0.0.1:4200/api/generate_batch_fast \
 
 # Merge all chunks into final audiobook
 curl -X POST http://127.0.0.1:4200/api/merge
+
+# Export optimized <=2 hour MP3 parts as a zip
+curl -X POST http://127.0.0.1:4200/api/merge_optimized
+curl http://127.0.0.1:4200/api/optimized_export --output optimized_audiobook.zip
 ```
 
 ### Saved Scripts
@@ -708,6 +712,12 @@ requests.post(f"{BASE}/api/export_audacity")
 # ... poll /api/status/audacity_export until not running ...
 with open("audacity_export.zip", "wb") as f:
     f.write(requests.get(f"{BASE}/api/export_audacity").content)
+
+# Export optimized <=2 hour MP3 parts
+requests.post(f"{BASE}/api/merge_optimized")
+# ... poll /api/status/audio until "Optimized export complete" appears ...
+with open("optimized_audiobook.zip", "wb") as f:
+    f.write(requests.get(f"{BASE}/api/optimized_export").content)
 ```
 
 ## JavaScript Integration
@@ -755,6 +765,11 @@ await fetch(`${BASE}/api/generate_batch_fast`, {
 
 // Merge into final audiobook
 await fetch(`${BASE}/api/merge`, { method: "POST" });
+
+// Export optimized <=2 hour MP3 parts
+await fetch(`${BASE}/api/merge_optimized`, { method: "POST" });
+// ... poll /api/status/audio until complete ...
+// Download zip from GET /api/optimized_export
 
 // Export to Audacity
 await fetch(`${BASE}/api/export_audacity`, { method: "POST" });

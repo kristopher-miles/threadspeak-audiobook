@@ -8,6 +8,7 @@ import io
 import re
 import time
 import copy
+import tempfile
 from tts import (
     TTSEngine,
     combine_audio_with_pauses,
@@ -24,7 +25,6 @@ from script_store import (
 from source_document import load_source_document, iter_document_paragraphs
 
 MAX_CHUNK_CHARS = 500
-MAX_AUTO_REGENERATE_BAD_CLIP_ATTEMPTS = 1
 CHAPTER_HEADING_RE = re.compile(
     r'^(chapter|part|book|volume|prologue|epilogue|introduction|conclusion|act|section)\b',
     re.IGNORECASE,
@@ -176,6 +176,160 @@ class ProjectManager:
         state["render_prep_complete"] = bool(complete)
         self._save_state(state)
         return state["render_prep_complete"]
+
+    @staticmethod
+    def _escape_concat_path(path):
+        return path.replace("\\", "\\\\").replace("'", r"'\''")
+
+    @classmethod
+    def _write_concat_line(cls, handle, path):
+        handle.write(f"file '{cls._escape_concat_path(path)}'\n")
+
+    def _collect_merge_timeline(self, progress_callback=None, merge_started_at=None):
+        chunks = self.load_chunks()
+        timeline = []
+        timeline_size_bytes = 0
+
+        if progress_callback:
+            progress_callback({
+                "stage": "preparing",
+                "chapter_index": 0,
+                "total_chapters": 0,
+                "chapter_label": "Scanning completed clips",
+                "elapsed_seconds": 0.0,
+                "merged_duration_seconds": 0.0,
+                "estimated_size_bytes": 0,
+                "output_file_size_bytes": 0,
+            })
+
+        for chunk in chunks:
+            if chunk.get("status") != "done":
+                continue
+            path = chunk.get("audio_path")
+            if not path:
+                continue
+            full_path = os.path.join(self.root_dir, path)
+            if not os.path.exists(full_path):
+                continue
+            item = {
+                "chunk": chunk,
+                "full_path": full_path,
+                "file_size_bytes": os.path.getsize(full_path),
+            }
+            timeline.append(item)
+            timeline_size_bytes += item["file_size_bytes"]
+            if progress_callback and len(timeline) % 100 == 0:
+                progress_callback({
+                    "stage": "preparing",
+                    "chapter_index": 0,
+                    "total_chapters": 0,
+                    "chapter_label": f"Indexed {len(timeline)} clips",
+                    "elapsed_seconds": max(0.0, time.time() - (merge_started_at or time.time())),
+                    "merged_duration_seconds": 0.0,
+                    "estimated_size_bytes": timeline_size_bytes,
+                    "output_file_size_bytes": 0,
+                })
+
+        return timeline
+
+    def _group_timeline_by_chapter(self, timeline):
+        chapter_groups = []
+        current_label = None
+        current_items = []
+
+        for item in timeline:
+            chunk = item["chunk"]
+            chapter_label = (chunk.get("chapter") or "").strip() or "Unlabeled"
+            if current_items and chapter_label != current_label:
+                chapter_groups.append((current_label, current_items))
+                current_items = [item]
+                current_label = chapter_label
+            else:
+                if not current_items:
+                    current_label = chapter_label
+                current_items.append(item)
+
+        if current_items:
+            chapter_groups.append((current_label, current_items))
+
+        return chapter_groups
+
+    def _emit_merge_progress(
+        self,
+        progress_callback,
+        merge_started_at,
+        *,
+        stage,
+        chapter_index,
+        total_chapters,
+        chapter_label,
+        estimated_size_bytes,
+        output_path=None,
+        merged_duration_seconds=0.0,
+    ):
+        if not progress_callback:
+            return
+        progress_callback({
+            "stage": stage,
+            "chapter_index": chapter_index,
+            "total_chapters": total_chapters,
+            "chapter_label": chapter_label,
+            "elapsed_seconds": time.time() - merge_started_at,
+            "merged_duration_seconds": merged_duration_seconds,
+            "estimated_size_bytes": estimated_size_bytes,
+            "output_file_size_bytes": os.path.getsize(output_path) if output_path and os.path.exists(output_path) else 0,
+        })
+
+    def _create_silence_assets(self, temp_dir):
+        default_silence_path = os.path.join(temp_dir, "pause_default.mp3")
+        same_silence_path = os.path.join(temp_dir, "pause_same_speaker.mp3")
+        default_export = AudioSegment.silent(duration=DEFAULT_PAUSE_MS).export(default_silence_path, format="mp3")
+        if hasattr(default_export, "close"):
+            default_export.close()
+        same_export = AudioSegment.silent(duration=SAME_SPEAKER_PAUSE_MS).export(same_silence_path, format="mp3")
+        if hasattr(same_export, "close"):
+            same_export.close()
+        return {
+            "default_path": default_silence_path,
+            "same_path": same_silence_path,
+            "default_size_bytes": os.path.getsize(default_silence_path),
+            "same_size_bytes": os.path.getsize(same_silence_path),
+        }
+
+    def _export_concat_mp3(self, concat_path, output_path, progress_tick=None):
+        command = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            concat_path,
+            "-vn",
+            "-c:a",
+            "libmp3lame",
+            "-q:a",
+            "2",
+            output_path,
+        ]
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        while process.poll() is None:
+            if progress_tick:
+                progress_tick()
+            time.sleep(1)
+
+        return process.returncode == 0
+
+    def _optimized_export_part_basename(self, part_index):
+        title = self._current_script_title().strip() or "Project"
+        safe_title = re.sub(r"[^A-Za-z0-9]+", "-", title).strip("-").lower() or "project"
+        return f"{safe_title}-{part_index:02d}.mp3"
 
     def _load_generation_settings(self):
         config = {}
@@ -1155,6 +1309,16 @@ class ProjectManager:
                 pass
         return config.get("tts", {})
 
+    def _get_auto_regen_retry_attempts(self):
+        tts_settings = self._load_tts_settings()
+        if not tts_settings.get("auto_regenerate_bad_clips", False):
+            return 0
+        try:
+            attempts = int(tts_settings.get("auto_regenerate_bad_clip_attempts", 3))
+        except (TypeError, ValueError):
+            return 0
+        return attempts if attempts > 0 else 0
+
     @staticmethod
     def _cleanup_temp_file(temp_path):
         if os.path.exists(temp_path):
@@ -1258,8 +1422,7 @@ class ProjectManager:
             text = chunk["text"]
             transformed_text, _ = apply_dictionary_to_text(text, self.load_dictionary_entries())
             instruct = chunk.get("instruct", "")
-            tts_settings = self._load_tts_settings()
-            auto_regenerate_bad_clips = tts_settings.get("auto_regenerate_bad_clips", False)
+            auto_regen_retry_attempts = self._get_auto_regen_retry_attempts()
 
             print(
                 f"Generating chunk {index}: speaker={speaker}, resolved_speaker={resolved_speaker}, "
@@ -1277,7 +1440,7 @@ class ProjectManager:
 
             if success:
                 result = self._finalize_generated_audio(index, speaker, transformed_text, temp_path, attempt=attempt)
-                if result["status"] == "error" and auto_regenerate_bad_clips and attempt < MAX_AUTO_REGENERATE_BAD_CLIP_ATTEMPTS:
+                if result["status"] == "error" and auto_regen_retry_attempts > 0 and attempt < auto_regen_retry_attempts:
                     self._update_chunk_fields_if_token(
                         index,
                         generation_token,
@@ -1288,7 +1451,7 @@ class ProjectManager:
                         generation_token=None,
                     )
                     self._cleanup_temp_file(temp_path)
-                    print(f"Chunk {index} failed sanity check; auto-regenerating attempt {attempt + 1}/{MAX_AUTO_REGENERATE_BAD_CLIP_ATTEMPTS}")
+                    print(f"Chunk {index} failed sanity check; auto-regenerating attempt {attempt + 1}/{auto_regen_retry_attempts}")
                     return self.generate_chunk_audio(index, attempt=attempt + 1, generation_token=generation_token)
                 self._update_chunk_fields_if_token(
                     index,
@@ -1328,35 +1491,254 @@ class ProjectManager:
             self._cleanup_temp_file(os.path.join(self.root_dir, f"temp_chunk_{index}.wav"))
             return False, str(e)
 
-    def merge_audio(self):
-        chunks = self.load_chunks()
-        audio_segments = []
-        speakers = []
+    def merge_audio(self, progress_callback=None):
+        merge_started_at = time.time()
+        timeline = self._collect_merge_timeline(progress_callback=progress_callback, merge_started_at=merge_started_at)
 
-        for chunk in chunks:
-            if chunk.get("status") != "done":
-                continue
-            path = chunk.get("audio_path")
-            if path:
-                full_path = os.path.join(self.root_dir, path)
-                if os.path.exists(full_path):
-                    try:
-                        # Auto-detect format (mp3 or wav)
-                        segment = AudioSegment.from_file(full_path)
-                        audio_segments.append(segment)
-                        speakers.append(chunk["speaker"])
-                    except Exception as e:
-                        print(f"Error loading audio segment {path}: {e}")
-
-        if not audio_segments:
+        if not timeline:
             return False, "No audio segments found"
 
-        final_audio = combine_audio_with_pauses(audio_segments, speakers)
+        chapter_groups = self._group_timeline_by_chapter(timeline)
+
         output_filename = "cloned_audiobook.mp3"
         output_path = os.path.join(self.root_dir, output_filename)
-        final_audio.export(output_path, format="mp3")
+        temp_dir = tempfile.mkdtemp(prefix="merge_audio_", dir=self.root_dir)
+        concat_path = os.path.join(temp_dir, "concat.txt")
 
-        return True, output_filename
+        try:
+            silence_assets = self._create_silence_assets(temp_dir)
+
+            estimated_size_bytes = 0
+            previous_speaker = None
+
+            with open(concat_path, "w", encoding="utf-8") as concat_file:
+                for chapter_index, (chapter_label, chapter_items) in enumerate(chapter_groups, start=1):
+                    chapter_first_speaker = chapter_items[0]["chunk"]["speaker"] if chapter_items else None
+                    if previous_speaker is not None and chapter_first_speaker is not None:
+                        pause_path = silence_assets["same_path"] if previous_speaker == chapter_first_speaker else silence_assets["default_path"]
+                        pause_size = silence_assets["same_size_bytes"] if previous_speaker == chapter_first_speaker else silence_assets["default_size_bytes"]
+                        self._write_concat_line(concat_file, pause_path)
+                        estimated_size_bytes += pause_size
+
+                    chapter_previous_speaker = None
+                    for item in chapter_items:
+                        speaker = item["chunk"]["speaker"]
+                        if chapter_previous_speaker is not None:
+                            pause_path = silence_assets["same_path"] if chapter_previous_speaker == speaker else silence_assets["default_path"]
+                            pause_size = silence_assets["same_size_bytes"] if chapter_previous_speaker == speaker else silence_assets["default_size_bytes"]
+                            self._write_concat_line(concat_file, pause_path)
+                            estimated_size_bytes += pause_size
+                        self._write_concat_line(concat_file, item["full_path"])
+                        estimated_size_bytes += item["file_size_bytes"]
+                        chapter_previous_speaker = speaker
+
+                    previous_speaker = chapter_previous_speaker if chapter_previous_speaker is not None else previous_speaker
+                    self._emit_merge_progress(
+                        progress_callback,
+                        merge_started_at,
+                        stage="assembling",
+                        chapter_index=chapter_index,
+                        total_chapters=len(chapter_groups),
+                        chapter_label=chapter_label,
+                        estimated_size_bytes=estimated_size_bytes,
+                        output_path=output_path,
+                    )
+
+            self._emit_merge_progress(
+                progress_callback,
+                merge_started_at,
+                stage="exporting",
+                chapter_index=len(chapter_groups),
+                total_chapters=len(chapter_groups),
+                chapter_label=chapter_groups[-1][0],
+                estimated_size_bytes=estimated_size_bytes,
+                output_path=output_path,
+            )
+
+            if not self._export_concat_mp3(
+                concat_path,
+                output_path,
+                progress_tick=lambda: self._emit_merge_progress(
+                    progress_callback,
+                    merge_started_at,
+                    stage="exporting",
+                    chapter_index=len(chapter_groups),
+                    total_chapters=len(chapter_groups),
+                    chapter_label=chapter_groups[-1][0],
+                    estimated_size_bytes=estimated_size_bytes,
+                    output_path=output_path,
+                ),
+            ):
+                return False, "ffmpeg merge failed"
+
+            self._emit_merge_progress(
+                progress_callback,
+                merge_started_at,
+                stage="complete",
+                chapter_index=len(chapter_groups),
+                total_chapters=len(chapter_groups),
+                chapter_label=chapter_groups[-1][0],
+                estimated_size_bytes=estimated_size_bytes,
+                output_path=output_path,
+            )
+            return True, output_filename
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def export_optimized_mp3_zip(self, progress_callback=None, max_part_seconds=7200):
+        merge_started_at = time.time()
+        timeline = self._collect_merge_timeline(progress_callback=progress_callback, merge_started_at=merge_started_at)
+        if not timeline:
+            return False, "No audio segments found"
+
+        chapter_groups = self._group_timeline_by_chapter(timeline)
+        zip_path = os.path.join(self.root_dir, "optimized_audiobook.zip")
+        temp_dir = tempfile.mkdtemp(prefix="optimized_export_", dir=self.root_dir)
+
+        try:
+            silence_assets = self._create_silence_assets(temp_dir)
+            chapter_exports = []
+            estimated_size_bytes = 0
+
+            for chapter_index, (chapter_label, chapter_items) in enumerate(chapter_groups, start=1):
+                concat_path = os.path.join(temp_dir, f"chapter_{chapter_index:03d}.txt")
+                chapter_output_path = os.path.join(temp_dir, f"chapter_{chapter_index:03d}.mp3")
+                chapter_estimated_size = 0
+                chapter_previous_speaker = None
+
+                with open(concat_path, "w", encoding="utf-8") as concat_file:
+                    for item in chapter_items:
+                        speaker = item["chunk"]["speaker"]
+                        if chapter_previous_speaker is not None:
+                            pause_path = silence_assets["same_path"] if chapter_previous_speaker == speaker else silence_assets["default_path"]
+                            pause_size = silence_assets["same_size_bytes"] if chapter_previous_speaker == speaker else silence_assets["default_size_bytes"]
+                            self._write_concat_line(concat_file, pause_path)
+                            chapter_estimated_size += pause_size
+                        self._write_concat_line(concat_file, item["full_path"])
+                        chapter_estimated_size += item["file_size_bytes"]
+                        chapter_previous_speaker = speaker
+
+                self._emit_merge_progress(
+                    progress_callback,
+                    merge_started_at,
+                    stage="assembling",
+                    chapter_index=chapter_index,
+                    total_chapters=len(chapter_groups),
+                    chapter_label=chapter_label,
+                    estimated_size_bytes=estimated_size_bytes + chapter_estimated_size,
+                    output_path=chapter_output_path,
+                )
+
+                if not self._export_concat_mp3(concat_path, chapter_output_path):
+                    return False, f"Failed to export chapter {chapter_label}"
+
+                chapter_duration_seconds = AudioSegment.from_file(chapter_output_path).duration_seconds
+                chapter_size_bytes = os.path.getsize(chapter_output_path)
+                estimated_size_bytes += chapter_size_bytes
+                chapter_exports.append({
+                    "label": chapter_label,
+                    "path": chapter_output_path,
+                    "duration_seconds": chapter_duration_seconds,
+                    "file_size_bytes": chapter_size_bytes,
+                    "first_speaker": chapter_items[0]["chunk"]["speaker"],
+                    "last_speaker": chapter_items[-1]["chunk"]["speaker"],
+                })
+
+            part_groups = []
+            current_group = []
+            current_duration = 0.0
+            for chapter in chapter_exports:
+                chapter_pause_seconds = 0.0
+                if current_group:
+                    previous = current_group[-1]
+                    chapter_pause_seconds = SAME_SPEAKER_PAUSE_MS / 1000.0 if previous["last_speaker"] == chapter["first_speaker"] else DEFAULT_PAUSE_MS / 1000.0
+                proposed_duration = current_duration + chapter_pause_seconds + chapter["duration_seconds"]
+                if current_group and proposed_duration > max_part_seconds:
+                    part_groups.append(current_group)
+                    current_group = [chapter]
+                    current_duration = chapter["duration_seconds"]
+                else:
+                    current_group.append(chapter)
+                    current_duration = proposed_duration if len(current_group) > 1 else chapter["duration_seconds"]
+            if current_group:
+                part_groups.append(current_group)
+
+            part_paths = []
+            for part_index, part_group in enumerate(part_groups, start=1):
+                part_basename = self._optimized_export_part_basename(part_index)
+                part_output_path = os.path.join(temp_dir, part_basename)
+                concat_path = os.path.join(temp_dir, f"part_{part_index:03d}.txt")
+                part_estimated_size = 0
+
+                with open(concat_path, "w", encoding="utf-8") as concat_file:
+                    for chapter_offset, chapter in enumerate(part_group):
+                        if chapter_offset > 0:
+                            previous = part_group[chapter_offset - 1]
+                            pause_path = silence_assets["same_path"] if previous["last_speaker"] == chapter["first_speaker"] else silence_assets["default_path"]
+                            pause_size = silence_assets["same_size_bytes"] if previous["last_speaker"] == chapter["first_speaker"] else silence_assets["default_size_bytes"]
+                            self._write_concat_line(concat_file, pause_path)
+                            part_estimated_size += pause_size
+                        self._write_concat_line(concat_file, chapter["path"])
+                        part_estimated_size += chapter["file_size_bytes"]
+
+                self._emit_merge_progress(
+                    progress_callback,
+                    merge_started_at,
+                    stage="packing",
+                    chapter_index=part_index,
+                    total_chapters=len(part_groups),
+                    chapter_label=", ".join(chapter["label"] for chapter in part_group[:2]) + ("..." if len(part_group) > 2 else ""),
+                    estimated_size_bytes=part_estimated_size,
+                    output_path=part_output_path,
+                )
+
+                if not self._export_concat_mp3(
+                    concat_path,
+                    part_output_path,
+                    progress_tick=lambda current_path=part_output_path, current_size=part_estimated_size, current_index=part_index: self._emit_merge_progress(
+                        progress_callback,
+                        merge_started_at,
+                        stage="packing",
+                        chapter_index=current_index,
+                        total_chapters=len(part_groups),
+                        chapter_label=f"Part {current_index} of {len(part_groups)}",
+                        estimated_size_bytes=current_size,
+                        output_path=current_path,
+                    ),
+                ):
+                    return False, f"Failed to export optimized part {part_index}"
+
+                part_paths.append((part_output_path, part_basename))
+
+            self._emit_merge_progress(
+                progress_callback,
+                merge_started_at,
+                stage="bundling",
+                chapter_index=len(part_paths),
+                total_chapters=len(part_paths),
+                chapter_label="Writing optimized export zip",
+                estimated_size_bytes=sum(os.path.getsize(path) for path, _ in part_paths),
+                output_path=zip_path,
+            )
+
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for part_path, part_basename in part_paths:
+                    zf.write(part_path, arcname=part_basename)
+
+            self._emit_merge_progress(
+                progress_callback,
+                merge_started_at,
+                stage="complete",
+                chapter_index=len(part_paths),
+                total_chapters=len(part_paths),
+                chapter_label=f"Created {len(part_paths)} optimized part{'s' if len(part_paths) != 1 else ''}",
+                estimated_size_bytes=sum(os.path.getsize(path) for path, _ in part_paths),
+                output_path=zip_path,
+            )
+
+            return True, os.path.basename(zip_path)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def export_audacity(self):
         """Export project as an Audacity-compatible zip with per-speaker WAV tracks,
@@ -1862,8 +2244,7 @@ class ProjectManager:
         }
         voice_config = self.prepare_runtime_voice_config(voice_config, resolved_speakers)
         dictionary_entries = self.load_dictionary_entries()
-        tts_settings = self._load_tts_settings()
-        auto_regenerate_bad_clips = tts_settings.get("auto_regenerate_bad_clips", False)
+        auto_regen_retry_attempts = self._get_auto_regen_retry_attempts()
 
         # Get TTS engine
         engine = self.get_engine()
@@ -1950,7 +2331,7 @@ class ProjectManager:
                         temp_path,
                         attempt=0,
                     )
-                    updated_status = "pending" if (result["status"] == "error" and auto_regenerate_bad_clips) else result["status"]
+                    updated_status = "pending" if (result["status"] == "error" and auto_regen_retry_attempts > 0) else result["status"]
                     updated_chunk = self._update_chunk_fields_if_token(
                         idx,
                         generation_token,
@@ -1970,7 +2351,7 @@ class ProjectManager:
                         print(f"Chunk {idx} completed: {updated_chunk['audio_path']}")
                         if item_callback:
                             item_callback(idx, True, shared_elapsed, word_counts.get(idx, 0), word_counts.get(idx, 0))
-                    elif auto_regenerate_bad_clips:
+                    elif auto_regen_retry_attempts > 0:
                         print(f"Chunk {idx} failed validation in batch; retrying immediately at the front of the queue")
                         retry_start = time.time()
                         retry_success, retry_msg = self.generate_chunk_audio(idx, attempt=1, generation_token=generation_token)

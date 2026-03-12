@@ -47,6 +47,7 @@ VOICE_CONFIG_PATH = os.path.join(ROOT_DIR, "voice_config.json")
 SCRIPT_PATH = os.path.join(ROOT_DIR, "annotated_script.json")
 AUDIOBOOK_PATH = os.path.join(ROOT_DIR, "cloned_audiobook.mp3")
 M4B_PATH = os.path.join(ROOT_DIR, "audiobook.m4b")
+OPTIMIZED_EXPORT_PATH = os.path.join(ROOT_DIR, "optimized_audiobook.zip")
 UPLOADS_DIR = os.path.join(BASE_DIR, "uploads")
 SCRIPTS_DIR = os.path.join(ROOT_DIR, "scripts")
 CHUNKS_PATH = os.path.join(ROOT_DIR, "chunks.json")
@@ -206,7 +207,8 @@ class TTSConfig(BaseModel):
     device: str = "auto"  # local mode: "auto", "cuda:0", "cpu", etc.
     language: str = "English"  # TTS language
     parallel_workers: int = 2  # concurrent TTS workers
-    auto_regenerate_bad_clips: bool = False  # retry invalid clips once immediately
+    auto_regenerate_bad_clips: bool = False
+    auto_regenerate_bad_clip_attempts: int = 3
     batch_seed: Optional[int] = None  # Single seed for batch mode, None/-1 = random
     compile_codec: bool = False  # torch.compile the codec for ~3-4x batch throughput (slow first run)
     sub_batch_enabled: bool = True  # split batch by text length to reduce padding waste
@@ -383,6 +385,7 @@ process_state = {
         "current_job": None,
         "recent_jobs": [],
         "merge_running": False,
+        "merge_progress": {},
         "metrics": {},
         "heartbeat": {},
     },
@@ -434,6 +437,24 @@ def _new_audio_metrics():
 
 
 process_state["audio"]["metrics"] = _new_audio_metrics()
+
+
+def _new_audio_merge_progress():
+    return {
+        "running": False,
+        "stage": None,
+        "chapter_index": 0,
+        "total_chapters": 0,
+        "chapter_label": "",
+        "elapsed_seconds": 0.0,
+        "merged_duration_seconds": 0.0,
+        "estimated_size_bytes": 0,
+        "output_file_size_bytes": 0,
+        "updated_at": None,
+    }
+
+
+process_state["audio"]["merge_progress"] = _new_audio_merge_progress()
 
 
 def _new_audio_heartbeat_state():
@@ -629,6 +650,7 @@ def _refresh_audio_process_state_locked(persist=False):
     process_state["audio"]["running"] = audio_current_job is not None or process_state["audio"].get("merge_running", False)
     process_state["audio"]["metrics"] = _format_audio_metrics_locked()
     process_state["audio"]["heartbeat"] = _format_audio_heartbeat_locked()
+    process_state["audio"]["merge_progress"] = dict(process_state["audio"].get("merge_progress") or _new_audio_merge_progress())
     if persist:
         _persist_audio_queue_state_locked()
 
@@ -1511,7 +1533,8 @@ async def get_config():
             "mode": "local",
             "url": "http://127.0.0.1:7860",
             "device": "auto",
-            "auto_regenerate_bad_clips": False
+            "auto_regenerate_bad_clips": False,
+            "auto_regenerate_bad_clip_attempts": 3
         },
         "prompts": {
             "system_prompt": "",
@@ -2154,8 +2177,37 @@ async def merge_audio_endpoint(background_tasks: BackgroundTasks):
         process_state["audio"]["merge_running"] = True
         process_state["audio"]["running"] = True
         process_state["audio"]["logs"] = ["Starting merge..."]
+        process_state["audio"]["merge_progress"] = _new_audio_merge_progress() | {"running": True, "stage": "starting", "updated_at": time.time()}
         try:
-            success, msg = project_manager.merge_audio()
+            def on_progress(progress):
+                process_state["audio"]["merge_progress"] = {
+                    "running": True,
+                    "stage": progress.get("stage"),
+                    "chapter_index": int(progress.get("chapter_index", 0) or 0),
+                    "total_chapters": int(progress.get("total_chapters", 0) or 0),
+                    "chapter_label": progress.get("chapter_label") or "",
+                    "elapsed_seconds": float(progress.get("elapsed_seconds", 0.0) or 0.0),
+                    "merged_duration_seconds": float(progress.get("merged_duration_seconds", 0.0) or 0.0),
+                    "estimated_size_bytes": int(progress.get("estimated_size_bytes", 0) or 0),
+                    "output_file_size_bytes": int(progress.get("output_file_size_bytes", 0) or 0),
+                    "updated_at": time.time(),
+                }
+                stage = progress.get("stage")
+                chapter_index = int(progress.get("chapter_index", 0) or 0)
+                total_chapters = int(progress.get("total_chapters", 0) or 0)
+                chapter_label = progress.get("chapter_label") or "Unlabeled"
+                if stage == "preparing":
+                    process_state["audio"]["logs"].append(f"Preparing merge inputs: {chapter_label}")
+                elif stage == "assembling":
+                    process_state["audio"]["logs"].append(f"Assembling chapter {chapter_index}/{total_chapters}: {chapter_label}")
+                elif stage == "packing":
+                    process_state["audio"]["logs"].append(f"Packing optimized part {chapter_index}/{total_chapters}: {chapter_label}")
+                elif stage == "bundling":
+                    process_state["audio"]["logs"].append("Writing optimized export zip...")
+                elif stage == "exporting":
+                    process_state["audio"]["logs"].append("Exporting final audiobook file...")
+
+            success, msg = project_manager.merge_audio(progress_callback=on_progress)
             if success:
                 process_state["audio"]["logs"].append(f"Merge complete: {msg}")
             else:
@@ -2163,11 +2215,81 @@ async def merge_audio_endpoint(background_tasks: BackgroundTasks):
         except Exception as e:
             process_state["audio"]["logs"].append(f"Merge error: {e}")
         finally:
+            progress = process_state["audio"].get("merge_progress") or _new_audio_merge_progress()
+            process_state["audio"]["merge_progress"] = progress | {
+                "running": False,
+                "stage": "complete" if process_state["audio"]["logs"] and "Merge complete" in process_state["audio"]["logs"][-1] else "idle",
+                "updated_at": time.time(),
+            }
             process_state["audio"]["merge_running"] = False
             process_state["audio"]["running"] = False
 
     background_tasks.add_task(task)
     return {"status": "started"}
+
+@app.post("/api/merge_optimized")
+async def merge_optimized_audio_endpoint(background_tasks: BackgroundTasks):
+    with audio_queue_lock:
+        if audio_current_job is not None or audio_queue or process_state["audio"].get("merge_running", False):
+            raise HTTPException(status_code=400, detail="Audio queue is active. Wait for queued jobs to finish or cancel them first.")
+
+    def task():
+        process_state["audio"]["merge_running"] = True
+        process_state["audio"]["running"] = True
+        process_state["audio"]["logs"] = ["Starting optimized export..."]
+        process_state["audio"]["merge_progress"] = _new_audio_merge_progress() | {"running": True, "stage": "starting", "updated_at": time.time()}
+        try:
+            def on_progress(progress):
+                process_state["audio"]["merge_progress"] = {
+                    "running": True,
+                    "stage": progress.get("stage"),
+                    "chapter_index": int(progress.get("chapter_index", 0) or 0),
+                    "total_chapters": int(progress.get("total_chapters", 0) or 0),
+                    "chapter_label": progress.get("chapter_label") or "",
+                    "elapsed_seconds": float(progress.get("elapsed_seconds", 0.0) or 0.0),
+                    "merged_duration_seconds": float(progress.get("merged_duration_seconds", 0.0) or 0.0),
+                    "estimated_size_bytes": int(progress.get("estimated_size_bytes", 0) or 0),
+                    "output_file_size_bytes": int(progress.get("output_file_size_bytes", 0) or 0),
+                    "updated_at": time.time(),
+                }
+                stage = progress.get("stage")
+                chapter_index = int(progress.get("chapter_index", 0) or 0)
+                total_chapters = int(progress.get("total_chapters", 0) or 0)
+                chapter_label = progress.get("chapter_label") or "Unlabeled"
+                if stage == "preparing":
+                    process_state["audio"]["logs"].append(f"Preparing optimized export inputs: {chapter_label}")
+                elif stage == "assembling":
+                    process_state["audio"]["logs"].append(f"Exporting chapter {chapter_index}/{total_chapters}: {chapter_label}")
+                elif stage == "packing":
+                    process_state["audio"]["logs"].append(f"Packing optimized part {chapter_index}/{total_chapters}: {chapter_label}")
+                elif stage == "bundling":
+                    process_state["audio"]["logs"].append("Writing optimized export zip...")
+
+            success, msg = project_manager.export_optimized_mp3_zip(progress_callback=on_progress)
+            if success:
+                process_state["audio"]["logs"].append(f"Optimized export complete: {msg}")
+            else:
+                process_state["audio"]["logs"].append(f"Optimized export failed: {msg}")
+        except Exception as e:
+            process_state["audio"]["logs"].append(f"Optimized export error: {e}")
+        finally:
+            progress = process_state["audio"].get("merge_progress") or _new_audio_merge_progress()
+            process_state["audio"]["merge_progress"] = progress | {
+                "running": False,
+                "stage": "complete" if process_state["audio"]["logs"] and "Optimized export complete" in process_state["audio"]["logs"][-1] else "idle",
+                "updated_at": time.time(),
+            }
+            process_state["audio"]["merge_running"] = False
+            process_state["audio"]["running"] = False
+
+    background_tasks.add_task(task)
+    return {"status": "started"}
+
+@app.get("/api/optimized_export")
+async def get_optimized_export():
+    if not os.path.exists(OPTIMIZED_EXPORT_PATH):
+        raise HTTPException(status_code=404, detail="Optimized export not found. Generate it first.")
+    return FileResponse(OPTIMIZED_EXPORT_PATH, filename="optimized_audiobook.zip", media_type="application/zip")
 
 @app.post("/api/export_audacity")
 async def export_audacity_endpoint(background_tasks: BackgroundTasks):

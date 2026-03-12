@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+import zipfile
 
 import numpy as np
 import soundfile as sf
@@ -187,6 +188,135 @@ class ReconcileChunkAudioStatesTests(unittest.TestCase):
         with open(state_path, "r", encoding="utf-8") as f:
             state = json.load(f)
         self.assertTrue(state["render_prep_complete"])
+
+    def test_auto_regen_retry_attempts_uses_positive_config_value(self):
+        config_path = os.path.join(self.root_dir, "app", "config.json")
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump({"tts": {"auto_regenerate_bad_clips": True, "auto_regenerate_bad_clip_attempts": 3}}, f)
+
+        self.assertEqual(self.manager._get_auto_regen_retry_attempts(), 3)
+
+    def test_auto_regen_retry_attempts_disables_on_zero_or_invalid(self):
+        config_path = os.path.join(self.root_dir, "app", "config.json")
+
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump({"tts": {"auto_regenerate_bad_clips": True, "auto_regenerate_bad_clip_attempts": 0}}, f)
+        self.assertEqual(self.manager._get_auto_regen_retry_attempts(), 0)
+
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump({"tts": {"auto_regenerate_bad_clips": True, "auto_regenerate_bad_clip_attempts": "bad"}}, f)
+        self.assertEqual(self.manager._get_auto_regen_retry_attempts(), 0)
+
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump({"tts": {"auto_regenerate_bad_clips": False, "auto_regenerate_bad_clip_attempts": 5}}, f)
+        self.assertEqual(self.manager._get_auto_regen_retry_attempts(), 0)
+
+
+class MergeAudioTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root_dir = self.temp_dir.name
+        os.makedirs(os.path.join(self.root_dir, "voicelines"), exist_ok=True)
+        os.makedirs(os.path.join(self.root_dir, "app"), exist_ok=True)
+        with open(os.path.join(self.root_dir, "annotated_script.json"), "w", encoding="utf-8") as f:
+            json.dump({"entries": [], "dictionary": []}, f)
+        self.manager = ProjectManager(self.root_dir)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _write_wav(self, relative_path, duration_seconds):
+        full_path = os.path.join(self.root_dir, relative_path)
+        sample_rate = 24000
+        samples = np.zeros(int(sample_rate * duration_seconds), dtype=np.float32)
+        sf.write(full_path, samples, sample_rate)
+        return full_path
+
+    def test_merge_audio_reports_progress_and_creates_mp3(self):
+        self._write_wav("voicelines/clip1.wav", duration_seconds=0.5)
+        self._write_wav("voicelines/clip2.wav", duration_seconds=0.5)
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "speaker": "Narrator",
+                "text": "One.",
+                "instruct": "",
+                "chapter": "Chapter 1",
+                "status": "done",
+                "audio_path": "voicelines/clip1.wav",
+            },
+            {
+                "id": 1,
+                "speaker": "Narrator",
+                "text": "Two.",
+                "instruct": "",
+                "chapter": "Chapter 2",
+                "status": "done",
+                "audio_path": "voicelines/clip2.wav",
+            },
+        ])
+
+        progress = []
+        success, output_filename = self.manager.merge_audio(progress_callback=progress.append)
+
+        self.assertTrue(success)
+        self.assertEqual(output_filename, "cloned_audiobook.mp3")
+        self.assertTrue(os.path.exists(os.path.join(self.root_dir, output_filename)))
+        self.assertGreater(os.path.getsize(os.path.join(self.root_dir, output_filename)), 0)
+        stages = [item.get("stage") for item in progress]
+        self.assertIn("preparing", stages)
+        self.assertIn("assembling", stages)
+        self.assertIn("exporting", stages)
+        self.assertEqual(stages[-1], "complete")
+
+    def test_optimized_export_creates_ordered_zip_parts(self):
+        with open(os.path.join(self.root_dir, "state.json"), "w", encoding="utf-8") as f:
+            json.dump({"input_file_path": os.path.join(self.root_dir, "My Great Book.txt")}, f)
+
+        self._write_wav("voicelines/clip1.wav", duration_seconds=0.5)
+        self._write_wav("voicelines/clip2.wav", duration_seconds=0.5)
+        self._write_wav("voicelines/clip3.wav", duration_seconds=0.5)
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "speaker": "Narrator",
+                "text": "One.",
+                "instruct": "",
+                "chapter": "Chapter 1",
+                "status": "done",
+                "audio_path": "voicelines/clip1.wav",
+            },
+            {
+                "id": 1,
+                "speaker": "Narrator",
+                "text": "Two.",
+                "instruct": "",
+                "chapter": "Chapter 2",
+                "status": "done",
+                "audio_path": "voicelines/clip2.wav",
+            },
+            {
+                "id": 2,
+                "speaker": "Narrator",
+                "text": "Three.",
+                "instruct": "",
+                "chapter": "Chapter 3",
+                "status": "done",
+                "audio_path": "voicelines/clip3.wav",
+            },
+        ])
+
+        success, output_filename = self.manager.export_optimized_mp3_zip(max_part_seconds=1.4)
+
+        self.assertTrue(success)
+        self.assertEqual(output_filename, "optimized_audiobook.zip")
+        zip_path = os.path.join(self.root_dir, output_filename)
+        self.assertTrue(os.path.exists(zip_path))
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            self.assertEqual(
+                zf.namelist(),
+                ["my-great-book-01.mp3", "my-great-book-02.mp3"],
+            )
 
 
 class DecomposeLongSegmentsTests(unittest.TestCase):
