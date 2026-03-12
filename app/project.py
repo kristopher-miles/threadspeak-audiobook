@@ -9,6 +9,7 @@ import re
 import time
 import copy
 import tempfile
+import uuid
 from tts import (
     TTSEngine,
     combine_audio_with_pauses,
@@ -63,6 +64,7 @@ def _build_chunk(speaker, text, instruct, chapter=None):
         "speaker": speaker,
         "text": text,
         "instruct": instruct,
+        "uid": uuid.uuid4().hex,
     }
     if chapter:
         chunk["chapter"] = chapter
@@ -167,6 +169,43 @@ class ProjectManager:
         state_path = os.path.join(self.root_dir, "state.json")
         with open(state_path, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2, ensure_ascii=False)
+
+    @staticmethod
+    def _new_chunk_uid():
+        return uuid.uuid4().hex
+
+    def _ensure_chunk_uids(self, chunks):
+        changed = False
+        seen = set()
+        for chunk in chunks:
+            uid = str(chunk.get("uid") or "").strip()
+            if not uid or uid in seen:
+                uid = self._new_chunk_uid()
+                chunk["uid"] = uid
+                changed = True
+            seen.add(uid)
+        return changed
+
+    def resolve_chunk_index(self, chunk_ref, chunks=None):
+        chunks = chunks if chunks is not None else self.load_chunks()
+        ref = "" if chunk_ref is None else str(chunk_ref)
+
+        for index, chunk in enumerate(chunks):
+            if str(chunk.get("uid") or "") == ref:
+                return index
+
+        try:
+            numeric_ref = int(ref)
+        except (TypeError, ValueError):
+            return None
+
+        if 0 <= numeric_ref < len(chunks):
+            return numeric_ref
+
+        for index, chunk in enumerate(chunks):
+            if chunk.get("id") == numeric_ref:
+                return index
+        return None
 
     def is_render_prep_complete(self):
         return bool(self._load_state().get("render_prep_complete"))
@@ -729,7 +768,10 @@ class ProjectManager:
         if os.path.exists(self.chunks_path):
             try:
                 with open(self.chunks_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    chunks = json.load(f)
+                if self._ensure_chunk_uids(chunks):
+                    self.save_chunks(chunks)
+                return chunks
             except (json.JSONDecodeError, ValueError) as e:
                 print(f"WARNING: chunks.json is corrupted ({e}). Regenerating from script...")
                 os.remove(self.chunks_path)
@@ -742,6 +784,7 @@ class ProjectManager:
             # Initialize chunk status
             for i, chunk in enumerate(chunks):
                 chunk["id"] = i
+                chunk["uid"] = chunk.get("uid") or self._new_chunk_uid()
                 chunk["status"] = "pending" # pending, generating, done, error
                 chunk["audio_path"] = None
                 chunk["audio_validation"] = None
@@ -910,6 +953,7 @@ class ProjectManager:
 
     def save_chunks(self, chunks):
         with self._chunks_lock:
+            self._ensure_chunk_uids(chunks)
             self._atomic_json_write(chunks, self.chunks_path)
 
     def _update_chunk_fields(self, index, **fields):
@@ -1027,20 +1071,22 @@ class ProjectManager:
                 self._atomic_json_write(chunks, self.chunks_path)
         return reset_count
 
-    def insert_chunk(self, after_index):
+    def insert_chunk(self, after_ref):
         """Insert an empty chunk after the given index. Returns the new chunk list."""
         with self._chunks_lock:
             if not os.path.exists(self.chunks_path):
                 return None
             with open(self.chunks_path, "r", encoding="utf-8") as f:
                 chunks = json.load(f)
-            if not (0 <= after_index < len(chunks)):
+            after_index = self.resolve_chunk_index(after_ref, chunks)
+            if after_index is None or not (0 <= after_index < len(chunks)):
                 return None
 
             # Copy speaker from the row we're splitting from
             source = chunks[after_index]
             new_chunk = {
                 "id": after_index + 1,
+                "uid": self._new_chunk_uid(),
                 "speaker": source.get("speaker", "NARRATOR"),
                 "text": "",
                 "instruct": "",
@@ -1058,18 +1104,20 @@ class ProjectManager:
             self._atomic_json_write(chunks, self.chunks_path)
             return chunks
 
-    def delete_chunk(self, index):
+    def delete_chunk(self, chunk_ref):
         """Delete a chunk at the given index. Returns (deleted_chunk, updated_chunks) or None."""
         with self._chunks_lock:
             if not os.path.exists(self.chunks_path):
                 return None
             with open(self.chunks_path, "r", encoding="utf-8") as f:
                 chunks = json.load(f)
-            if not (0 <= index < len(chunks)):
+            index = self.resolve_chunk_index(chunk_ref, chunks)
+            if index is None or not (0 <= index < len(chunks)):
                 return None
             if len(chunks) <= 1:
                 return None  # don't allow deleting the last chunk
 
+            restore_after_uid = chunks[index - 1].get("uid") if index > 0 else None
             deleted = chunks.pop(index)
 
             # Re-number all IDs
@@ -1077,9 +1125,9 @@ class ProjectManager:
                 chunk["id"] = i
 
             self._atomic_json_write(chunks, self.chunks_path)
-            return deleted, chunks
+            return deleted, chunks, restore_after_uid
 
-    def restore_chunk(self, at_index, chunk_data):
+    def restore_chunk(self, at_index, chunk_data, after_uid=None):
         """Re-insert a chunk at a specific index. Returns the updated chunk list."""
         with self._chunks_lock:
             if not os.path.exists(self.chunks_path):
@@ -1087,15 +1135,44 @@ class ProjectManager:
             with open(self.chunks_path, "r", encoding="utf-8") as f:
                 chunks = json.load(f)
 
-            at_index = max(0, min(at_index, len(chunks)))
+            if after_uid:
+                resolved = self.resolve_chunk_index(after_uid, chunks)
+                at_index = 0 if resolved is None else resolved + 1
+            else:
+                at_index = max(0, min(at_index, len(chunks)))
             chunks.insert(at_index, chunk_data)
 
             # Re-number all IDs
             for i, chunk in enumerate(chunks):
                 chunk["id"] = i
+            self._ensure_chunk_uids(chunks)
 
             self._atomic_json_write(chunks, self.chunks_path)
             return chunks
+
+    def repair_legacy_chunk_order(self, chunks):
+        """Rewrite chunks.json from the editor's current chunk order.
+
+        This is a legacy repair tool for projects that may have suffered from
+        index-based insert/delete/restore mismatches. The editor's current
+        full chunk list is treated as the source of truth.
+        """
+        if not isinstance(chunks, list) or not chunks:
+            return None
+
+        repaired = []
+        for i, chunk in enumerate(chunks):
+            if not isinstance(chunk, dict):
+                return None
+            repaired_chunk = copy.deepcopy(chunk)
+            repaired_chunk["id"] = i
+            repaired_chunk["uid"] = repaired_chunk.get("uid") or self._new_chunk_uid()
+            repaired.append(repaired_chunk)
+
+        with self._chunks_lock:
+            self._atomic_json_write(repaired, self.chunks_path)
+
+        return repaired
 
     def decompose_long_segments(self, chapter=None, max_words=25):
         with self._chunks_lock:
@@ -1279,9 +1356,10 @@ class ProjectManager:
                 "min_words": min_words,
             }
 
-    def update_chunk(self, index, data):
+    def update_chunk(self, chunk_ref, data):
         chunks = self.load_chunks()
-        if 0 <= index < len(chunks):
+        index = self.resolve_chunk_index(chunk_ref, chunks)
+        if index is not None and 0 <= index < len(chunks):
             chunk = chunks[index]
             # Update fields
             if "text" in data: chunk["text"] = data["text"]

@@ -272,11 +272,14 @@ class ChunkMergeOrphansRequest(BaseModel):
     chapter: Optional[str] = None
     min_words: int = 10
 
+class ChunkRepairLegacyRequest(BaseModel):
+    chunks: List[dict]
+
 class RenderPrepStateRequest(BaseModel):
     complete: bool = True
 
 class BatchGenerateRequest(BaseModel):
-    indices: List[int]
+    indices: List[str]
     label: Optional[str] = None
     scope: Optional[str] = None
 
@@ -802,8 +805,9 @@ def _enqueue_audio_job(kind, indices, label=None, scope=None):
         chunks = project_manager.load_chunks()
         valid_indices = []
         word_counts = {}
-        for idx in indices:
-            if 0 <= idx < len(chunks):
+        for chunk_ref in indices:
+            idx = project_manager.resolve_chunk_index(chunk_ref, chunks)
+            if idx is not None and 0 <= idx < len(chunks):
                 text = chunks[idx].get("text", "")
                 if text and text.strip():
                     valid_indices.append(idx)
@@ -2079,12 +2083,13 @@ async def get_chunks():
 
 class ChunkRestoreRequest(BaseModel):
     chunk: dict
-    at_index: int
+    at_index: Optional[int] = None
+    after_uid: Optional[str] = None
 
 @app.post("/api/chunks/restore")
 async def restore_chunk(request: ChunkRestoreRequest):
     """Re-insert a previously deleted chunk at a specific index."""
-    chunks = project_manager.restore_chunk(request.at_index, request.chunk)
+    chunks = project_manager.restore_chunk(request.at_index or 0, request.chunk, after_uid=request.after_uid)
     if chunks is None:
         raise HTTPException(status_code=400, detail="Failed to restore chunk")
     return {"status": "ok", "total": len(chunks)}
@@ -2117,13 +2122,27 @@ async def merge_orphans(request: ChunkMergeOrphansRequest):
     result = project_manager.merge_orphan_segments(chapter=chapter, min_words=min_words)
     return {"status": "ok", **result}
 
+@app.post("/api/chunks/repair_legacy")
+async def repair_legacy_chunks(request: ChunkRepairLegacyRequest):
+    running_task = _any_project_task_running()
+    if running_task:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot repair chunk order while {running_task} work is running",
+        )
+
+    repaired = project_manager.repair_legacy_chunk_order(request.chunks)
+    if repaired is None:
+        raise HTTPException(status_code=400, detail="Failed to repair legacy chunk order")
+    return {"status": "ok", "total": len(repaired)}
+
 @app.post("/api/render_prep_state")
 async def set_render_prep_state(request: RenderPrepStateRequest):
     complete = project_manager.set_render_prep_complete(bool(request.complete))
     return {"status": "ok", "render_prep_complete": complete}
 
 @app.post("/api/chunks/{index}")
-async def update_chunk(index: int, update: ChunkUpdate):
+async def update_chunk(index: str, update: ChunkUpdate):
     data = update.model_dump(exclude_unset=True)
     logger.info(f"Updating chunk {index} with data: {data}")
     chunk = project_manager.update_chunk(index, data)
@@ -2133,7 +2152,7 @@ async def update_chunk(index: int, update: ChunkUpdate):
     return chunk
 
 @app.post("/api/chunks/{index}/insert")
-async def insert_chunk(index: int):
+async def insert_chunk(index: str):
     """Insert an empty chunk after the given index."""
     chunks = project_manager.insert_chunk(index)
     if chunks is None:
@@ -2141,24 +2160,25 @@ async def insert_chunk(index: int):
     return {"status": "ok", "total": len(chunks)}
 
 @app.delete("/api/chunks/{index}")
-async def delete_chunk(index: int):
+async def delete_chunk(index: str):
     """Delete a chunk at the given index."""
     result = project_manager.delete_chunk(index)
     if result is None:
         raise HTTPException(status_code=400, detail="Cannot delete chunk (invalid index or last remaining chunk)")
-    deleted, chunks = result
-    return {"status": "ok", "deleted": deleted, "total": len(chunks)}
+    deleted, chunks, restore_after_uid = result
+    return {"status": "ok", "deleted": deleted, "total": len(chunks), "restore_after_uid": restore_after_uid}
 
 @app.post("/api/chunks/{index}/generate")
-async def generate_chunk_endpoint(index: int, background_tasks: BackgroundTasks):
+async def generate_chunk_endpoint(index: str, background_tasks: BackgroundTasks):
     chunks = project_manager.load_chunks()
-    if not (0 <= index < len(chunks)):
-        raise HTTPException(status_code=404, detail="Invalid chunk index")
-    if not chunks[index].get("text", "").strip():
+    resolved_index = project_manager.resolve_chunk_index(index, chunks)
+    if resolved_index is None or not (0 <= resolved_index < len(chunks)):
+        raise HTTPException(status_code=404, detail="Invalid chunk id")
+    if not chunks[resolved_index].get("text", "").strip():
         raise HTTPException(status_code=400, detail="Cannot generate audio for an empty line")
 
     def task():
-        project_manager.generate_chunk_audio(index)
+        project_manager.generate_chunk_audio(resolved_index)
 
     background_tasks.add_task(task)
     return {"status": "started"}

@@ -1049,6 +1049,9 @@
                          </table>
                      </div>
                      <div class="d-flex justify-content-end gap-2 mt-3">
+                         <button class="btn btn-outline-danger btn-sm" id="btn-repair-legacy-project" onclick="repairLegacyProject()">
+                             <i class="fas fa-wrench me-1"></i>Repair Legacy Project
+                         </button>
                          <button class="btn btn-outline-primary btn-sm" id="btn-merge-orphans" onclick="mergeOrphans()">
                              <i class="fas fa-compress-alt me-1"></i>Merge Orphans
                          </button>
@@ -2712,7 +2715,8 @@
         }
 
         function updateChunkRow(chunk) {
-            const tr = document.querySelector(`tr[data-id="${chunk.id}"]`);
+            const chunkRef = getChunkRef(chunk);
+            const tr = document.querySelector(`tr[data-id="${chunkRef}"]`);
             if (!tr) return false;
 
             const { statusColor, statusDetail } = getChunkStatusMeta(chunk);
@@ -2745,7 +2749,7 @@
                     if (existingProgress && !existingBtn) {
                         const btn = document.createElement('button');
                         btn.className = 'btn btn-sm btn-primary';
-                        btn.onclick = () => generateChunk(chunk.id);
+                        btn.onclick = () => generateChunk(chunkRef);
                         btn.innerHTML = '<i class="fas fa-play"></i> Gen';
                         actionContainer.replaceChild(btn, existingProgress);
                     }
@@ -2760,7 +2764,7 @@
 
                     if (existingNoAudio) {
                         // No audio element yet, create one
-                        const audioHtml = `<audio class="chunk-audio" data-id="${chunk.id}" data-audio-path="${escapeHtml(chunk.audio_path)}" data-audio-fingerprint="${escapeHtml(nextFingerprint)}" controls src="${newSrc}" style="width: 200px; height: 30px;" onplay="stopOthers(${chunk.id})"></audio>`;
+                        const audioHtml = `<audio class="chunk-audio" data-id="${escapeHtml(chunkRef)}" data-audio-path="${escapeHtml(chunk.audio_path)}" data-audio-fingerprint="${escapeHtml(nextFingerprint)}" controls src="${newSrc}" style="width: 200px; height: 30px;" onplay='stopOthers(${JSON.stringify(chunkRef)})'></audio>`;
                         existingNoAudio.outerHTML = audioHtml;
                     } else if (existingAudio) {
                         const currentFingerprint = existingAudio.dataset.audioFingerprint || '';
@@ -2791,6 +2795,10 @@
             if (!cancelBtn) return;
             const hasAudioWork = Boolean(audioState?.running) || (audioState?.queue || []).length > 0;
             cancelBtn.style.display = hasAudioWork ? 'inline-block' : 'none';
+        }
+
+        function getChunkRef(chunk) {
+            return String(chunk?.uid || chunk?.id || '');
         }
 
         function formatDuration(seconds) {
@@ -2915,7 +2923,7 @@
                 selectedEditorChapter = chapter || WHOLE_PROJECT_CHAPTER_ID;
                 syncEditorChapterState(chunks);
 
-                const focused = await focusChunkInEditor(firstError.id);
+                const focused = await focusChunkInEditor(getChunkRef(firstError));
                 if (!focused) {
                     showToast('Found an errored segment, but it could not be focused in the editor.', 'warning');
                     return;
@@ -2998,7 +3006,7 @@
                     // Only update status badges and progress indicators
                     visibleChunks.forEach(chunk => updateChunkRow(chunk));
                     cachedChunks = chunks;
-                    cachedVisibleChunkIds = visibleChunks.map(chunk => chunk.id);
+                    cachedVisibleChunkIds = visibleChunks.map(chunk => getChunkRef(chunk));
                     refreshDictionaryCounts(chunks);
 
                     return;
@@ -3009,13 +3017,13 @@
                                     cachedChunks.length === chunks.length &&
                                     tbody.children.length === visibleChunks.length &&
                                     cachedVisibleChunkIds.length === visibleChunks.length &&
-                                    cachedVisibleChunkIds.every((id, index) => id === visibleChunks[index].id);
+                                    cachedVisibleChunkIds.every((id, index) => id === getChunkRef(visibleChunks[index]));
 
                 if (canIncrement) {
                     // Incremental update - only update changed rows
                     visibleChunks.forEach(chunk => {
-                        const i = chunk.id;
-                        const cached = cachedChunks[i];
+                        const chunkRef = getChunkRef(chunk);
+                        const cached = cachedChunks.find(candidate => getChunkRef(candidate) === chunkRef);
                         const cachedError = cached && cached.audio_validation ? cached.audio_validation.error : null;
                         const nextError = chunk.audio_validation ? chunk.audio_validation.error : null;
                         if (!cached || cached.status !== chunk.status || cached.audio_path !== chunk.audio_path || cachedError !== nextError) {
@@ -3027,27 +3035,29 @@
                     tbody.innerHTML = visibleChunks.length === 0
                         ? '<tr><td colspan="6" class="text-center text-muted">No segments in this chapter yet.</td></tr>'
                         : visibleChunks.map(chunk => {
+                        const chunkRef = getChunkRef(chunk);
+                        const quotedChunkRef = JSON.stringify(chunkRef);
                         const { statusColor, statusDetail } = getChunkStatusMeta(chunk);
                         const audioFingerprint = getChunkAudioFingerprint(chunk);
 
                         const audioPlayer = chunk.audio_path ?
-                            `<audio class="chunk-audio" data-id="${chunk.id}" data-audio-path="${escapeHtml(chunk.audio_path)}" data-audio-fingerprint="${escapeHtml(audioFingerprint)}" controls src="/${chunk.audio_path}?t=${Date.now()}" style="width: 200px; height: 30px;" onplay="stopOthers(${chunk.id})"></audio>` :
+                            `<audio class="chunk-audio" data-id="${escapeHtml(chunkRef)}" data-audio-path="${escapeHtml(chunk.audio_path)}" data-audio-fingerprint="${escapeHtml(audioFingerprint)}" controls src="/${chunk.audio_path}?t=${Date.now()}" style="width: 200px; height: 30px;" onplay='stopOthers(${quotedChunkRef})'></audio>` :
                             '<span class="text-muted small">No audio</span>';
 
                         const actionArea = chunk.status === 'generating' ?
                             `<div class="progress" style="width: 100px; height: 20px;">
                                 <div class="progress-bar progress-bar-striped progress-bar-animated bg-warning" role="progressbar" style="width: 100%"></div>
                              </div>` :
-                            `<button class="btn btn-sm btn-primary" onclick="generateChunk(${chunk.id})"><i class="fas fa-play"></i> Gen</button>`;
+                            `<button class="btn btn-sm btn-primary" onclick='generateChunk(${quotedChunkRef})'><i class="fas fa-play"></i> Gen</button>`;
 
                         return `
-                            <tr data-id="${chunk.id}" class="chunk-row">
+                            <tr data-id="${escapeHtml(chunkRef)}" class="chunk-row">
                                 <td class="text-center align-middle" style="white-space:nowrap;">
-                                    <button class="chunk-expand-btn" onclick="toggleChunkExpand(this)" title="Expand/collapse"><i class="fas fa-chevron-down"></i></button><button class="chunk-expand-btn" onclick="insertChunkAfter(${chunk.id})" title="Insert line below"><i class="fas fa-plus"></i></button><button class="chunk-expand-btn" onclick="deleteChunk(${chunk.id})" title="Delete line"><i class="fas fa-trash" style="color:#dc3545;"></i></button>
+                                    <button class="chunk-expand-btn" onclick="toggleChunkExpand(this)" title="Expand/collapse"><i class="fas fa-chevron-down"></i></button><button class="chunk-expand-btn" onclick='insertChunkAfter(${quotedChunkRef})' title="Insert line below"><i class="fas fa-plus"></i></button><button class="chunk-expand-btn" onclick='deleteChunk(${quotedChunkRef})' title="Delete line"><i class="fas fa-trash" style="color:#dc3545;"></i></button>
                                 </td>
-                                <td><input type="text" class="form-control form-control-sm" value="${chunk.speaker}" onchange="updateChunk(${chunk.id}, 'speaker', this.value)"></td>
-                                <td><textarea class="form-control form-control-sm chunk-text" rows="2" onchange="updateChunk(${chunk.id}, 'text', this.value)">${chunk.text}</textarea></td>
-                                <td><textarea class="form-control form-control-sm chunk-instruct" rows="2" onchange="updateChunk(${chunk.id}, 'instruct', this.value)" title="Short TTS direction (3-8 words)">${chunk.instruct || ''}</textarea></td>
+                                <td><input type="text" class="form-control form-control-sm" value="${chunk.speaker}" onchange='updateChunk(${quotedChunkRef}, "speaker", this.value)'></td>
+                                <td><textarea class="form-control form-control-sm chunk-text" rows="2" onchange='updateChunk(${quotedChunkRef}, "text", this.value)'>${chunk.text}</textarea></td>
+                                <td><textarea class="form-control form-control-sm chunk-instruct" rows="2" onchange='updateChunk(${quotedChunkRef}, "instruct", this.value)' title="Short TTS direction (3-8 words)">${chunk.instruct || ''}</textarea></td>
                                 <td class="chunk-status-cell"><span class="badge bg-${statusColor}">${chunk.status}</span>${statusDetail}</td>
                                 <td>
                                     <div class="d-flex align-items-center gap-2">
@@ -3061,7 +3071,7 @@
                 }
 
                 cachedChunks = chunks;
-                cachedVisibleChunkIds = visibleChunks.map(chunk => chunk.id);
+                cachedVisibleChunkIds = visibleChunks.map(chunk => getChunkRef(chunk));
                 refreshDictionaryCounts(chunks);
 
             } catch (e) {
@@ -3167,6 +3177,54 @@
             }
         };
 
+        window.repairLegacyProject = async () => {
+            const button = document.getElementById('btn-repair-legacy-project');
+            const chunks = Array.isArray(cachedChunks) && cachedChunks.length > 0
+                ? cachedChunks
+                : await API.get('/api/chunks');
+
+            if (!chunks.length) {
+                showToast('No chunks are loaded to repair.', 'warning');
+                return;
+            }
+
+            const confirmed = await showConfirm(
+                'Repair the project using the editor\'s current full chunk order as the source of truth? This will rewrite the saved chunk structure to match what is currently loaded on screen.'
+            );
+            if (!confirmed) return;
+
+            try {
+                if (button) {
+                    button.disabled = true;
+                    button.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Repairing...';
+                }
+
+                const result = await API.post('/api/chunks/repair_legacy', { chunks });
+                await loadChunks(true);
+                showToast(`Repaired legacy chunk order for ${result.total} segment${result.total === 1 ? '' : 's'}.`, 'success');
+            } catch (e) {
+                showToast('Failed to repair legacy project: ' + e.message, 'error');
+            } finally {
+                if (button) {
+                    button.disabled = false;
+                    button.innerHTML = '<i class="fas fa-wrench me-1"></i>Repair Legacy Project';
+                }
+            }
+        };
+
+        async function repairLegacyProjectBeforeExport() {
+            const chunks = Array.isArray(cachedChunks) && cachedChunks.length > 0
+                ? cachedChunks
+                : await API.get('/api/chunks');
+
+            if (!chunks.length) {
+                throw new Error('No chunks are loaded to export.');
+            }
+
+            await API.post('/api/chunks/repair_legacy', { chunks });
+            cachedChunks = chunks;
+        }
+
         async function autoPrepareSegmentsBeforeRender() {
             if (renderPrepComplete) {
                 return;
@@ -3212,7 +3270,7 @@
                 const data = await res.json();
 
                 // Store for undo
-                _lastDeleted = { chunk: data.deleted, at_index: id };
+                _lastDeleted = { chunk: data.deleted, after_uid: data.restore_after_uid || null };
                 clearTimeout(_undoTimer);
 
                 // Show toast with undo action
@@ -3251,7 +3309,7 @@
             try {
                 await API.post('/api/chunks/restore', {
                     chunk: _lastDeleted.chunk,
-                    at_index: _lastDeleted.at_index
+                    after_uid: _lastDeleted.after_uid
                 });
 
                 // Dismiss the toast
@@ -3367,7 +3425,7 @@
                 const data = {};
                 data[field] = value;
                 await API.post(`/api/chunks/${id}`, data);
-                const cached = cachedChunks.find(chunk => chunk.id === id);
+                const cached = cachedChunks.find(chunk => getChunkRef(chunk) === String(id));
                 if (cached) {
                     cached[field] = value;
                     refreshDictionaryCounts(cachedChunks);
@@ -3392,7 +3450,7 @@
                 const changeHandler = input.getAttribute('onchange');
                 if (changeHandler) {
                     // Extract field name from onchange="updateChunk(id, 'field', this.value)"
-                    const match = changeHandler.match(/updateChunk\(\d+,\s*'(\w+)'/);
+                    const match = changeHandler.match(/updateChunk\([^,]+,\s*["'](\w+)["']/);
                     if (match) {
                         data[match[1]] = input.value;
                     }
@@ -3544,6 +3602,7 @@
              if (!await showConfirm("Merge all valid audio chunks into final audiobook?")) return;
 
              try {
+                 await repairLegacyProjectBeforeExport();
                  await API.post('/api/merge', {});
                  // Switch to Result tab and poll
                  document.querySelector('[data-tab="audio"]').click();
@@ -3557,6 +3616,7 @@
              if (!await showConfirm("Create an optimized export zip with audiobook parts capped at about 2 hours each?")) return;
 
              try {
+                 await repairLegacyProjectBeforeExport();
                  await API.post('/api/merge_optimized', {});
                  document.querySelector('[data-tab="audio"]').click();
                  pollLogs('audio', 'audio-logs');

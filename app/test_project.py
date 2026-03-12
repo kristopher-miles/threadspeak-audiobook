@@ -318,6 +318,87 @@ class MergeAudioTests(unittest.TestCase):
                 ["my-great-book-01.mp3", "my-great-book-02.mp3"],
             )
 
+    def test_repair_legacy_chunk_order_rewrites_chunks_from_editor_order(self):
+        original = [
+            {
+                "id": 0,
+                "speaker": "Narrator",
+                "text": "First",
+                "instruct": "",
+                "chapter": "Chapter 1",
+                "status": "done",
+                "audio_path": "voicelines/clip1.wav",
+            },
+            {
+                "id": 1,
+                "speaker": "Narrator",
+                "text": "Second",
+                "instruct": "",
+                "chapter": "Chapter 1",
+                "status": "done",
+                "audio_path": "voicelines/clip2.wav",
+            },
+        ]
+        self.manager.save_chunks(original)
+
+        repaired = self.manager.repair_legacy_chunk_order([
+            {
+                "id": 99,
+                "speaker": "Narrator",
+                "text": "Second",
+                "instruct": "",
+                "chapter": "Chapter 1",
+                "status": "done",
+                "audio_path": "voicelines/clip2.wav",
+            },
+            {
+                "id": 42,
+                "speaker": "Narrator",
+                "text": "Replacement First",
+                "instruct": "calm",
+                "chapter": "Chapter 1",
+                "status": "pending",
+                "audio_path": None,
+            },
+        ])
+
+        self.assertEqual([chunk["id"] for chunk in repaired], [0, 1])
+        self.assertEqual([chunk["text"] for chunk in repaired], ["Second", "Replacement First"])
+        persisted = self.manager.load_chunks()
+        self.assertEqual([chunk["text"] for chunk in persisted], ["Second", "Replacement First"])
+
+    def test_load_chunks_backfills_stable_uids_for_legacy_rows(self):
+        legacy = [
+            {"id": 0, "speaker": "Narrator", "text": "One", "instruct": "", "status": "pending", "audio_path": None},
+            {"id": 1, "speaker": "Narrator", "text": "Two", "instruct": "", "status": "pending", "audio_path": None},
+        ]
+        with open(os.path.join(self.root_dir, "chunks.json"), "w", encoding="utf-8") as f:
+            json.dump(legacy, f, indent=2)
+
+        loaded = self.manager.load_chunks()
+
+        self.assertEqual(len(loaded), 2)
+        self.assertTrue(all(chunk.get("uid") for chunk in loaded))
+        self.assertNotEqual(loaded[0]["uid"], loaded[1]["uid"])
+
+    def test_delete_and_restore_use_stable_uid(self):
+        self.manager.save_chunks([
+            {"id": 0, "speaker": "Narrator", "text": "One", "instruct": "", "status": "pending", "audio_path": None},
+            {"id": 1, "speaker": "Narrator", "text": "Two", "instruct": "", "status": "pending", "audio_path": None},
+            {"id": 2, "speaker": "Narrator", "text": "Three", "instruct": "", "status": "pending", "audio_path": None},
+        ])
+        initial = self.manager.load_chunks()
+        deleted_uid = initial[1]["uid"]
+        previous_uid = initial[0]["uid"]
+
+        deleted, remaining, restore_after_uid = self.manager.delete_chunk(deleted_uid)
+        self.assertEqual(deleted["text"], "Two")
+        self.assertEqual(restore_after_uid, previous_uid)
+        self.assertEqual([chunk["text"] for chunk in remaining], ["One", "Three"])
+
+        restored = self.manager.restore_chunk(0, deleted, after_uid=restore_after_uid)
+        self.assertEqual([chunk["text"] for chunk in restored], ["One", "Two", "Three"])
+
 
 class DecomposeLongSegmentsTests(unittest.TestCase):
     def setUp(self):
