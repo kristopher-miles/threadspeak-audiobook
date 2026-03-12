@@ -270,6 +270,9 @@ class ChunkMergeOrphansRequest(BaseModel):
     chapter: Optional[str] = None
     min_words: int = 10
 
+class RenderPrepStateRequest(BaseModel):
+    complete: bool = True
+
 class BatchGenerateRequest(BaseModel):
     indices: List[int]
     label: Optional[str] = None
@@ -1603,6 +1606,7 @@ async def get_config():
                 pass
 
     # Include current input file info if available
+    config["render_prep_complete"] = False
     state_path = os.path.join(ROOT_DIR, "state.json")
     if os.path.exists(state_path):
         try:
@@ -1611,6 +1615,7 @@ async def get_config():
             input_path = state.get("input_file_path", "")
             if input_path and os.path.exists(input_path):
                 config["current_file"] = os.path.basename(input_path)
+            config["render_prep_complete"] = bool(state.get("render_prep_complete"))
         except (json.JSONDecodeError, ValueError):
             pass
 
@@ -2088,6 +2093,11 @@ async def merge_orphans(request: ChunkMergeOrphansRequest):
     min_words = max(int(request.min_words or 10), 1)
     result = project_manager.merge_orphan_segments(chapter=chapter, min_words=min_words)
     return {"status": "ok", **result}
+
+@app.post("/api/render_prep_state")
+async def set_render_prep_state(request: RenderPrepStateRequest):
+    complete = project_manager.set_render_prep_complete(bool(request.complete))
+    return {"status": "ok", "render_prep_complete": complete}
 
 @app.post("/api/chunks/{index}")
 async def update_chunk(index: int, update: ChunkUpdate):

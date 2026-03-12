@@ -177,6 +177,17 @@ class ReconcileChunkAudioStatesTests(unittest.TestCase):
         self.assertIn('Source paragraphs mentioning "Alice"', payload["prompt"])
         self.assertTrue(payload["prompt"].endswith('Return {"voice":"for Alice"}'))
 
+    def test_render_prep_flag_persists_in_state(self):
+        self.assertFalse(self.manager.is_render_prep_complete())
+
+        self.assertTrue(self.manager.set_render_prep_complete(True))
+        self.assertTrue(self.manager.is_render_prep_complete())
+
+        state_path = os.path.join(self.root_dir, "state.json")
+        with open(state_path, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        self.assertTrue(state["render_prep_complete"])
+
 
 class DecomposeLongSegmentsTests(unittest.TestCase):
     def setUp(self):
@@ -319,10 +330,27 @@ class MergeOrphanSegmentsTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    def _chapter_intro_chunks(self, chapter, start_id=0, speaker="Narrator"):
+        chunks = []
+        for offset in range(5):
+            chunks.append({
+                "id": start_id + offset,
+                "speaker": speaker,
+                "text": f"Protected intro line {offset}.",
+                "instruct": "",
+                "status": "pending",
+                "audio_path": None,
+                "audio_validation": None,
+                "auto_regen_count": 0,
+                "chapter": chapter,
+            })
+        return chunks
+
     def test_merges_short_segment_with_adjacent_same_speaker_until_threshold(self):
-        chunks = [
+        chunks = self._chapter_intro_chunks("Chapter 1")
+        chunks.extend([
             {
-                "id": 0,
+                "id": 5,
                 "speaker": "Narrator",
                 "text": "Hello there friend.",
                 "instruct": "",
@@ -333,7 +361,7 @@ class MergeOrphanSegmentsTests(unittest.TestCase):
                 "chapter": "Chapter 1",
             },
             {
-                "id": 1,
+                "id": 6,
                 "speaker": "Narrator",
                 "text": "We meet again tonight.",
                 "instruct": "Gentle",
@@ -344,7 +372,7 @@ class MergeOrphanSegmentsTests(unittest.TestCase):
                 "chapter": "Chapter 1",
             },
             {
-                "id": 2,
+                "id": 7,
                 "speaker": "Narrator",
                 "text": "Stay close now.",
                 "instruct": "",
@@ -354,24 +382,25 @@ class MergeOrphanSegmentsTests(unittest.TestCase):
                 "auto_regen_count": 0,
                 "chapter": "Chapter 1",
             },
-        ]
+        ])
         self.manager.save_chunks(chunks)
 
         result = self.manager.merge_orphan_segments(min_words=10)
         updated = self.manager.load_chunks()
 
         self.assertEqual(result["changed"], 2)
-        self.assertEqual(len(updated), 1)
-        self.assertEqual(updated[0]["text"], "Hello there friend. We meet again tonight. Stay close now.")
-        self.assertEqual(updated[0]["instruct"], "Gentle")
-        self.assertEqual(updated[0]["status"], "pending")
-        self.assertIsNone(updated[0]["audio_path"])
-        self.assertIsNone(updated[0]["audio_validation"])
+        self.assertEqual(len(updated), 6)
+        self.assertEqual(updated[5]["text"], "Hello there friend. We meet again tonight. Stay close now.")
+        self.assertEqual(updated[5]["instruct"], "Gentle")
+        self.assertEqual(updated[5]["status"], "pending")
+        self.assertIsNone(updated[5]["audio_path"])
+        self.assertIsNone(updated[5]["audio_validation"])
 
     def test_prefers_first_non_empty_instruction_and_can_merge_forward(self):
-        chunks = [
+        chunks = self._chapter_intro_chunks("Chapter 1", speaker="Alice")
+        chunks.extend([
             {
-                "id": 0,
+                "id": 5,
                 "speaker": "Alice",
                 "text": "Hi there.",
                 "instruct": "Bright",
@@ -382,7 +411,7 @@ class MergeOrphanSegmentsTests(unittest.TestCase):
                 "chapter": "Chapter 1",
             },
             {
-                "id": 1,
+                "id": 6,
                 "speaker": "Alice",
                 "text": "Come inside now please.",
                 "instruct": "Serious",
@@ -392,20 +421,22 @@ class MergeOrphanSegmentsTests(unittest.TestCase):
                 "auto_regen_count": 0,
                 "chapter": "Chapter 1",
             },
-        ]
+        ])
         self.manager.save_chunks(chunks)
 
         result = self.manager.merge_orphan_segments(min_words=10)
         updated = self.manager.load_chunks()
 
         self.assertEqual(result["changed"], 1)
-        self.assertEqual(len(updated), 1)
-        self.assertEqual(updated[0]["instruct"], "Bright")
+        self.assertEqual(len(updated), 6)
+        self.assertEqual(updated[5]["instruct"], "Bright")
 
     def test_limits_merge_to_requested_chapter(self):
-        chunks = [
+        chunks = self._chapter_intro_chunks("Chapter 1")
+        chunks.extend(self._chapter_intro_chunks("Chapter 2", start_id=5))
+        chunks.extend([
             {
-                "id": 0,
+                "id": 10,
                 "speaker": "Narrator",
                 "text": "One two three.",
                 "instruct": "",
@@ -416,7 +447,7 @@ class MergeOrphanSegmentsTests(unittest.TestCase):
                 "chapter": "Chapter 1",
             },
             {
-                "id": 1,
+                "id": 11,
                 "speaker": "Narrator",
                 "text": "Four five six.",
                 "instruct": "",
@@ -427,7 +458,7 @@ class MergeOrphanSegmentsTests(unittest.TestCase):
                 "chapter": "Chapter 2",
             },
             {
-                "id": 2,
+                "id": 12,
                 "speaker": "Narrator",
                 "text": "Seven eight nine ten eleven.",
                 "instruct": "",
@@ -437,17 +468,139 @@ class MergeOrphanSegmentsTests(unittest.TestCase):
                 "auto_regen_count": 0,
                 "chapter": "Chapter 2",
             },
-        ]
+        ])
         self.manager.save_chunks(chunks)
 
         result = self.manager.merge_orphan_segments(chapter="Chapter 2", min_words=10)
         updated = self.manager.load_chunks()
 
         self.assertEqual(result["changed"], 1)
-        self.assertEqual(len(updated), 2)
-        self.assertEqual(updated[0]["chapter"], "Chapter 1")
-        self.assertEqual(updated[0]["text"], "One two three.")
-        self.assertEqual(updated[1]["text"], "Four five six. Seven eight nine ten eleven.")
+        self.assertEqual(len(updated), 12)
+        self.assertEqual(updated[10]["chapter"], "Chapter 1")
+        self.assertEqual(updated[10]["text"], "One two three.")
+        self.assertEqual(updated[11]["text"], "Four five six. Seven eight nine ten eleven.")
+
+    def test_does_not_merge_across_chapter_boundaries_in_whole_project_mode(self):
+        chunks = self._chapter_intro_chunks("Chapter 1")
+        chunks.extend(self._chapter_intro_chunks("Chapter 2", start_id=5))
+        chunks.extend([
+            {
+                "id": 10,
+                "speaker": "Narrator",
+                "text": "One two three.",
+                "instruct": "",
+                "status": "pending",
+                "audio_path": None,
+                "audio_validation": None,
+                "auto_regen_count": 0,
+                "chapter": "Chapter 1",
+            },
+            {
+                "id": 11,
+                "speaker": "Narrator",
+                "text": "Four five six.",
+                "instruct": "",
+                "status": "pending",
+                "audio_path": None,
+                "audio_validation": None,
+                "auto_regen_count": 0,
+                "chapter": "Chapter 2",
+            },
+        ])
+        self.manager.save_chunks(chunks)
+
+        result = self.manager.merge_orphan_segments(min_words=10)
+        updated = self.manager.load_chunks()
+
+        self.assertEqual(result["changed"], 0)
+        self.assertEqual(len(updated), 12)
+        self.assertEqual(updated[10]["chapter"], "Chapter 1")
+        self.assertEqual(updated[11]["chapter"], "Chapter 2")
+
+    def test_preserves_exact_chapter_label_when_merging(self):
+        chunks = self._chapter_intro_chunks("Chapter 12A")
+        chunks.extend([
+            {
+                "id": 5,
+                "speaker": "Narrator",
+                "text": "Alpha beta gamma.",
+                "instruct": "",
+                "status": "done",
+                "audio_path": "voicelines/a.wav",
+                "audio_validation": {"is_valid": True},
+                "auto_regen_count": 0,
+                "chapter": "Chapter 12A",
+            },
+            {
+                "id": 6,
+                "speaker": "Narrator",
+                "text": "Delta epsilon zeta eta theta iota.",
+                "instruct": "",
+                "status": "pending",
+                "audio_path": None,
+                "audio_validation": None,
+                "auto_regen_count": 0,
+                "chapter": "Chapter 12A",
+            },
+        ])
+        self.manager.save_chunks(chunks)
+
+        result = self.manager.merge_orphan_segments(min_words=10)
+        updated = self.manager.load_chunks()
+
+        self.assertEqual(result["changed"], 1)
+        self.assertEqual(len(updated), 6)
+        self.assertEqual(updated[5]["chapter"], "Chapter 12A")
+        self.assertIsNone(updated[5]["audio_path"])
+
+    def test_skips_first_five_samples_of_each_chapter(self):
+        chunks = []
+        for i in range(5):
+            chunks.append({
+                "id": i,
+                "speaker": "Narrator",
+                "text": f"Short intro {i}.",
+                "instruct": "",
+                "status": "pending",
+                "audio_path": None,
+                "audio_validation": None,
+                "auto_regen_count": 0,
+                "chapter": "Chapter 1",
+            })
+        chunks.extend([
+            {
+                "id": 5,
+                "speaker": "Narrator",
+                "text": "Tiny tail.",
+                "instruct": "",
+                "status": "pending",
+                "audio_path": None,
+                "audio_validation": None,
+                "auto_regen_count": 0,
+                "chapter": "Chapter 1",
+            },
+            {
+                "id": 6,
+                "speaker": "Narrator",
+                "text": "This should merge with the tiny tail now.",
+                "instruct": "",
+                "status": "pending",
+                "audio_path": None,
+                "audio_validation": None,
+                "auto_regen_count": 0,
+                "chapter": "Chapter 1",
+            },
+        ])
+        self.manager.save_chunks(chunks)
+
+        result = self.manager.merge_orphan_segments(min_words=10)
+        updated = self.manager.load_chunks()
+
+        self.assertEqual(result["changed"], 1)
+        self.assertEqual(len(updated), 6)
+        for i in range(5):
+            self.assertEqual(updated[i]["text"], f"Short intro {i}.")
+        self.assertEqual(updated[5]["text"], "Tiny tail. This should merge with the tiny tail now.")
 
 
 if __name__ == "__main__":

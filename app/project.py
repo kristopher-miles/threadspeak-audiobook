@@ -163,6 +163,20 @@ class ProjectManager:
         except (json.JSONDecodeError, ValueError, OSError):
             return {}
 
+    def _save_state(self, state):
+        state_path = os.path.join(self.root_dir, "state.json")
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2, ensure_ascii=False)
+
+    def is_render_prep_complete(self):
+        return bool(self._load_state().get("render_prep_complete"))
+
+    def set_render_prep_complete(self, complete=True):
+        state = self._load_state()
+        state["render_prep_complete"] = bool(complete)
+        self._save_state(state)
+        return state["render_prep_complete"]
+
     def _load_generation_settings(self):
         config = {}
         if os.path.exists(self.config_path):
@@ -235,6 +249,14 @@ class ProjectManager:
         return (chunk.get("chapter") or "").strip() == chapter
 
     @staticmethod
+    def _chapter_key(chunk):
+        return (chunk.get("chapter") or "").strip()
+
+    @classmethod
+    def _chunks_share_chapter(cls, first_chunk, second_chunk):
+        return cls._chapter_key(first_chunk) == cls._chapter_key(second_chunk)
+
+    @staticmethod
     def _join_chunk_text(*parts):
         return " ".join(part.strip() for part in parts if (part or "").strip()).strip()
 
@@ -242,10 +264,6 @@ class ProjectManager:
         merged = copy.deepcopy(first_chunk)
         merged["text"] = self._join_chunk_text(first_chunk.get("text", ""), second_chunk.get("text", ""))
         merged["instruct"] = (first_chunk.get("instruct") or "").strip() or (second_chunk.get("instruct") or "").strip()
-        if not (merged.get("chapter") or "").strip():
-            second_chapter = (second_chunk.get("chapter") or "").strip()
-            if second_chapter:
-                merged["chapter"] = second_chapter
         merged["status"] = "pending"
         merged["audio_path"] = None
         merged["audio_validation"] = None
@@ -1028,12 +1046,23 @@ class ProjectManager:
             with open(self.chunks_path, "r", encoding="utf-8") as f:
                 chunks = json.load(f)
 
+            chapter_chunk_counts = {}
+            for chunk in chunks:
+                chapter_key = self._chapter_key(chunk)
+                chapter_position = chapter_chunk_counts.get(chapter_key, 0)
+                chunk["_merge_protected"] = chapter_position < 5
+                chapter_chunk_counts[chapter_key] = chapter_position + 1
+
             changed = 0
             index = 0
 
             while index < len(chunks):
                 chunk = chunks[index]
                 if not self._chunk_in_scope(chunk, chapter):
+                    index += 1
+                    continue
+
+                if chunk.get("_merge_protected"):
                     index += 1
                     continue
 
@@ -1045,11 +1074,15 @@ class ProjectManager:
                     can_merge_prev = (
                         prev_index >= 0
                         and self._chunk_in_scope(chunks[prev_index], chapter)
+                        and not chunks[prev_index].get("_merge_protected")
+                        and self._chunks_share_chapter(chunks[prev_index], current_chunk)
                         and self._speakers_match(chunks[prev_index].get("speaker"), current_chunk.get("speaker"))
                     )
                     can_merge_next = (
                         next_index < len(chunks)
                         and self._chunk_in_scope(chunks[next_index], chapter)
+                        and not chunks[next_index].get("_merge_protected")
+                        and self._chunks_share_chapter(current_chunk, chunks[next_index])
                         and self._speakers_match(chunks[next_index].get("speaker"), current_chunk.get("speaker"))
                     )
 
@@ -1069,6 +1102,9 @@ class ProjectManager:
                     break
 
                 index += 1
+
+            for chunk in chunks:
+                chunk.pop("_merge_protected", None)
 
             for i, chunk in enumerate(chunks):
                 chunk["id"] = i

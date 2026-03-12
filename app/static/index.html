@@ -7,7 +7,43 @@
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
-        body { background-color: #f8f9fa; }
+        :root {
+            --app-bg: #f4f6fb;
+            --app-text: #18212f;
+            --app-muted: #5f6b7a;
+            --app-card-bg: #ffffff;
+            --app-card-border: rgba(15, 23, 42, 0.08);
+            --app-card-header-bg: #f8fafc;
+            --app-surface: #eef3f9;
+            --app-input-bg: #ffffff;
+            --app-input-border: #cbd5e1;
+            --app-input-text: #172033;
+            --app-table-stripe: rgba(15, 23, 42, 0.025);
+            --app-table-hover: rgba(13, 110, 253, 0.08);
+            --app-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+            --app-divider: rgba(15, 23, 42, 0.08);
+        }
+        body[data-theme="dark"] {
+            --app-bg: #0f1723;
+            --app-text: #e7edf5;
+            --app-muted: #9fb0c3;
+            --app-card-bg: #162131;
+            --app-card-border: rgba(148, 163, 184, 0.16);
+            --app-card-header-bg: #1b293b;
+            --app-surface: #111c2b;
+            --app-input-bg: #0f1a29;
+            --app-input-border: #2b3c51;
+            --app-input-text: #eef4fb;
+            --app-table-stripe: rgba(148, 163, 184, 0.05);
+            --app-table-hover: rgba(96, 165, 250, 0.12);
+            --app-shadow: 0 18px 48px rgba(2, 6, 23, 0.4);
+            --app-divider: rgba(148, 163, 184, 0.14);
+        }
+        body {
+            background-color: var(--app-bg);
+            color: var(--app-text);
+            transition: background-color 0.2s ease, color 0.2s ease;
+        }
         .container-wide { max-width: 85%; margin-left: auto; margin-right: auto; padding-left: 12px; padding-right: 12px; }
         .nav-link { cursor: pointer; }
         .log-window {
@@ -20,7 +56,21 @@
             border-radius: 5px;
             font-size: 0.9em;
         }
-        .card { margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .card {
+            margin-bottom: 20px;
+            box-shadow: var(--app-shadow);
+            border: 1px solid var(--app-card-border);
+            background-color: var(--app-card-bg);
+        }
+        .card-header {
+            background-color: var(--app-card-header-bg);
+            color: var(--app-text);
+            border-bottom: 1px solid var(--app-divider);
+        }
+        .card-body, .accordion-body {
+            background-color: var(--app-card-bg);
+            color: var(--app-text);
+        }
         .step-indicator {
             display: inline-block;
             width: 25px;
@@ -37,16 +87,104 @@
         .voice-card { border-left: 4px solid #0d6efd; }
         .voice-card.alias-active {
             border-left-color: #6c757d;
-            background: #f1f3f5;
+            background: var(--app-surface);
         }
         .voice-card.alias-active .voice-primary-content {
             opacity: 0.45;
             filter: grayscale(1);
         }
         .voice-card .voice-alias-box {
-            background: rgba(255, 255, 255, 0.9);
+            background: color-mix(in srgb, var(--app-card-bg) 88%, transparent);
             border-radius: 0.5rem;
             padding: 0.5rem;
+        }
+        .text-muted, .form-text, small.text-muted {
+            color: var(--app-muted) !important;
+        }
+        .form-control,
+        .form-select,
+        .input-group-text,
+        textarea.form-control {
+            background-color: var(--app-input-bg);
+            border-color: var(--app-input-border);
+            color: var(--app-input-text);
+        }
+        .form-control:focus,
+        .form-select:focus,
+        textarea.form-control:focus {
+            background-color: var(--app-input-bg);
+            color: var(--app-input-text);
+        }
+        .form-control::placeholder,
+        textarea.form-control::placeholder {
+            color: var(--app-muted);
+        }
+        .form-check-input {
+            background-color: var(--app-input-bg);
+            border-color: var(--app-input-border);
+        }
+        .form-check-label,
+        .form-label,
+        .col-form-label {
+            color: var(--app-text);
+        }
+        .table {
+            color: var(--app-text);
+            border-color: var(--app-divider);
+        }
+        .table > :not(caption) > * > * {
+            background-color: var(--app-card-bg);
+            color: var(--app-text);
+            border-bottom-color: var(--app-divider);
+            box-shadow: none;
+        }
+        .table-hover > tbody > tr:hover > * {
+            background-color: var(--app-table-hover);
+        }
+        .table-light > :not(caption) > * > * {
+            background-color: var(--app-surface);
+        }
+        .border,
+        .border-top,
+        .border-bottom,
+        .border-start,
+        .border-end,
+        hr {
+            border-color: var(--app-divider) !important;
+        }
+        .bg-light,
+        .bg-white {
+            background-color: var(--app-surface) !important;
+            color: var(--app-text) !important;
+        }
+        .modal-content {
+            background-color: var(--app-card-bg);
+            color: var(--app-text);
+            border-color: var(--app-card-border);
+        }
+        .modal-header,
+        .modal-footer {
+            border-color: var(--app-divider);
+        }
+        .btn-close {
+            filter: invert(0);
+        }
+        body[data-theme="dark"] .btn-close:not(.btn-close-white) {
+            filter: invert(1) grayscale(1);
+        }
+        body[data-theme="dark"] audio {
+            filter: invert(0.92) hue-rotate(180deg);
+        }
+        .theme-toggle-card {
+            background: linear-gradient(135deg, color-mix(in srgb, var(--app-surface) 92%, transparent), var(--app-card-bg));
+            border: 1px solid var(--app-divider);
+            border-radius: 14px;
+            padding: 0.9rem 1rem;
+        }
+        .theme-panel {
+            background-color: var(--app-surface) !important;
+            color: var(--app-text);
+            border-color: var(--app-divider) !important;
         }
         /* Editor row expand/collapse */
         .chunk-expand-btn {
@@ -338,6 +476,18 @@
                             <button type="button" class="btn btn-outline-danger" id="btn-reset-project">
                                 <i class="fas fa-trash-alt me-2"></i>Reset Project
                             </button>
+                        </div>
+                        <div class="theme-toggle-card mt-4">
+                            <div class="d-flex flex-wrap justify-content-between align-items-center gap-3">
+                                <div>
+                                    <div class="fw-semibold">Dark Mode</div>
+                                    <div class="small text-muted">Optimized for long editing sessions. Text and surfaces stay readable across the app.</div>
+                                </div>
+                                <div class="form-check form-switch m-0">
+                                    <input class="form-check-input" type="checkbox" id="dark-mode-toggle" checked onchange="toggleDarkMode(this.checked)">
+                                    <label class="form-check-label fw-semibold" for="dark-mode-toggle">Enabled</label>
+                                </div>
+                            </div>
                         </div>
                     </form>
                 </div>
@@ -841,7 +991,7 @@
                          </div>
                      </div>
 
-                     <div id="editor-estimate-panel" class="border rounded p-3 mb-3" style="background: var(--bs-light, #f8f9fa);">
+                     <div id="editor-estimate-panel" class="theme-panel border rounded p-3 mb-3">
                          <div class="row g-3">
                              <div class="col-md-2 col-sm-6">
                                  <div class="small text-muted">Queue ETA</div>
@@ -920,7 +1070,7 @@
                                 <i class="fas fa-book-reader me-1"></i>M4B Export Options <i class="fas fa-chevron-down fa-xs ms-1"></i>
                             </a>
                             <div class="collapse mt-2" id="m4b-options">
-                                <div class="border rounded p-3" style="background: var(--bs-light, #f8f9fa);">
+                                <div class="theme-panel border rounded p-3">
                                     <div class="row g-2">
                                         <div class="col-md-6">
                                             <label class="form-label small mb-1">Title</label>
@@ -1117,6 +1267,28 @@
             }
         };
 
+        const THEME_STORAGE_KEY = 'alexandria-theme';
+
+        function applyTheme(theme) {
+            const resolvedTheme = theme === 'light' ? 'light' : 'dark';
+            document.body.dataset.theme = resolvedTheme;
+            const toggle = document.getElementById('dark-mode-toggle');
+            if (toggle) {
+                toggle.checked = resolvedTheme === 'dark';
+            }
+        }
+
+        function getStoredTheme() {
+            const storedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+            return storedTheme === 'light' ? 'light' : 'dark';
+        }
+
+        window.toggleDarkMode = (enabled) => {
+            const theme = enabled ? 'dark' : 'light';
+            localStorage.setItem(THEME_STORAGE_KEY, theme);
+            applyTheme(theme);
+        };
+
         // --- Setup Tab ---
 
         function toggleTTSMode() {
@@ -1252,6 +1424,7 @@
                     document.getElementById('upload-status').innerHTML =
                         `<span class="text-success"><i class="fas fa-check me-1"></i>Loaded: ${config.current_file}</span>`;
                 }
+                renderPrepComplete = !!config.render_prep_complete;
             } catch (e) {
                 console.error("Failed to load config", e);
             }
@@ -2343,6 +2516,7 @@
         let selectedEditorChapter = WHOLE_PROJECT_CHAPTER_ID;
         let editorChapterAutoSelected = false;
         let audioQueuePollTimer = null;
+        let renderPrepComplete = false;
 
         // Check if any audio is currently playing
         function isAudioPlaying() {
@@ -2858,6 +3032,10 @@
         };
 
         async function autoPrepareSegmentsBeforeRender() {
+            if (renderPrepComplete) {
+                return;
+            }
+
             const chapterOnly = isChapterOnlyEnabled();
             const chapter = chapterOnly && selectedEditorChapter !== WHOLE_PROJECT_CHAPTER_ID
                 ? selectedEditorChapter
@@ -2883,6 +3061,9 @@
             if (decomposeResult.changed > 0) {
                 showToast(`Decomposed ${decomposeResult.changed} long segment${decomposeResult.changed === 1 ? '' : 's'} before rendering ${scopeLabel}.`, 'success');
             }
+
+            const persistResult = await API.post('/api/render_prep_state', { complete: true });
+            renderPrepComplete = !!persistResult.render_prep_complete;
         }
 
         let _lastDeleted = null;
@@ -4567,6 +4748,7 @@
         document.getElementById('dsb-global-seed')?.addEventListener('input', dsbSaveForm);
 
         // Init
+        applyTheme(getStoredTheme());
         loadConfig();
         loadVoices();
         loadSavedScripts();
