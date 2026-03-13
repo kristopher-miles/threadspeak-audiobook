@@ -1,6 +1,7 @@
 import os
 import sys
 import gc
+import copy
 import json
 import shutil
 import logging
@@ -10,11 +11,12 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Union
 import re
 import time
 import threading
 import zipfile
+import tempfile
 import subprocess
 import aiofiles
 import uuid
@@ -22,6 +24,7 @@ from openai import OpenAI
 
 # Import ProjectManager
 from project import ProjectManager
+from asr import LocalASRUnavailableError
 from default_prompts import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT, load_default_prompts
 from review_prompts import load_review_prompts
 from attribution_prompts import load_attribution_prompts
@@ -60,6 +63,22 @@ LORA_DATASETS_DIR = os.path.join(ROOT_DIR, "lora_datasets")
 BUILTIN_LORA_DIR = os.path.join(ROOT_DIR, "builtin_lora")
 BUILTIN_LORA_MANIFEST = os.path.join(BUILTIN_LORA_DIR, "manifest.json")
 DATASET_BUILDER_DIR = os.path.join(ROOT_DIR, "dataset_builder")
+PROJECT_ARCHIVE_VERSION = 1
+PROJECT_ARCHIVE_MANIFEST_NAME = "project_archive_manifest.json"
+PROJECT_ARCHIVE_ALLOWED_FILES = {
+    "annotated_script.json",
+    "voice_config.json",
+    "voices.json",
+    "chunks.json",
+    "script_sanity_check.json",
+    "state.json",
+}
+PROJECT_ARCHIVE_ALLOWED_DIRS = {
+    "uploads",
+    "clone_voices",
+    "designed_voices",
+    "voicelines",
+}
 
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 os.makedirs(SCRIPTS_DIR, exist_ok=True)
@@ -275,11 +294,17 @@ class ChunkMergeOrphansRequest(BaseModel):
 class ChunkRepairLegacyRequest(BaseModel):
     chunks: List[dict]
 
+class LostAudioRepairRequest(BaseModel):
+    use_asr: bool = True
+
+class ASRTranscribeRequest(BaseModel):
+    audio_path: str
+
 class RenderPrepStateRequest(BaseModel):
     complete: bool = True
 
 class BatchGenerateRequest(BaseModel):
-    indices: List[str]
+    indices: List[Union[str, int]]
     label: Optional[str] = None
     scope: Optional[str] = None
 
@@ -371,10 +396,28 @@ class DatasetBuilderUpdateRowsRequest(BaseModel):
     name: str
     rows: List[dict]  # [{emotion, text, seed}]
 
+
+class ProcessingWorkflowRequest(BaseModel):
+    process_voices: bool = True
+    generate_audio: bool = False
+
+
+class WorkflowPauseRequested(Exception):
+    pass
+
 # Global state for process tracking
 ROLLING_AUDIO_SAMPLE_LIMIT = 50
 AUDIO_HEARTBEAT_INTERVAL_SECONDS = 600
 AUDIO_RECOVERY_POLL_SECONDS = 5
+PROCESSING_WORKFLOW_STATE_PATH = os.path.join(ROOT_DIR, "processing_workflow_state.json")
+PROCESSING_WORKFLOW_STAGE_LABELS = {
+    "script": "Generate Annotated Script",
+    "review": "Review Script",
+    "sanity": "Sanity Check",
+    "repair": "Replace Missing Chunks",
+    "voices": "Process Voices",
+    "audio": "Generate Audio",
+}
 
 
 process_state = {
@@ -399,7 +442,21 @@ process_state = {
     "repair": {"running": False, "logs": []},
     "lora_training": {"running": False, "logs": []},
     "dataset_gen": {"running": False, "logs": []},
-    "dataset_builder": {"running": False, "logs": [], "cancel": False}
+    "dataset_builder": {"running": False, "logs": [], "cancel": False},
+    "processing_workflow": {
+        "running": False,
+        "paused": False,
+        "pause_requested": False,
+        "current_stage": None,
+        "completed_stages": [],
+        "options": {"process_voices": True, "generate_audio": False},
+        "logs": [],
+        "last_error": None,
+        "started_at": None,
+        "updated_at": None,
+        "completed_at": None,
+        "resume_count": 0,
+    },
 }
 
 audio_queue_lock = threading.RLock()
@@ -475,6 +532,8 @@ process_state["audio"]["heartbeat"] = _new_audio_heartbeat_state()
 
 task_state_lock = threading.RLock()
 task_processes = {}
+processing_workflow_lock = threading.RLock()
+processing_workflow_thread = None
 
 
 def _task_is_current(task_name: str, run_id: str) -> bool:
@@ -629,10 +688,395 @@ def _serialize_audio_job(job):
 
 
 def _atomic_json_write(path, data):
-    tmp_path = path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    os.replace(tmp_path, path)
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=os.path.dirname(path) or ".",
+            prefix=f".{os.path.basename(path)}.",
+            suffix=".tmp",
+            delete=False,
+        ) as f:
+            tmp_path = f.name
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def _new_processing_workflow_state():
+    return {
+        "running": False,
+        "paused": False,
+        "pause_requested": False,
+        "current_stage": None,
+        "completed_stages": [],
+        "options": {"process_voices": True, "generate_audio": False},
+        "logs": [],
+        "last_error": None,
+        "started_at": None,
+        "updated_at": None,
+        "completed_at": None,
+        "resume_count": 0,
+    }
+
+
+def _persist_processing_workflow_state_locked():
+    _atomic_json_write(PROCESSING_WORKFLOW_STATE_PATH, process_state["processing_workflow"])
+
+
+def _refresh_processing_workflow_updated_at_locked():
+    process_state["processing_workflow"]["updated_at"] = time.time()
+
+
+def _append_processing_workflow_log_locked(message):
+    process_state["processing_workflow"]["logs"].append(message)
+    _trim_logs(process_state["processing_workflow"]["logs"])
+    _refresh_processing_workflow_updated_at_locked()
+    _persist_processing_workflow_state_locked()
+
+
+def _set_processing_workflow_state_locked(**updates):
+    process_state["processing_workflow"].update(updates)
+    _refresh_processing_workflow_updated_at_locked()
+    _persist_processing_workflow_state_locked()
+
+
+def _processing_workflow_stage_sequence(options=None):
+    options = options or process_state["processing_workflow"].get("options") or {}
+    stages = ["script", "review", "sanity", "repair"]
+    if options.get("process_voices", True):
+        stages.append("voices")
+    if options.get("generate_audio", False):
+        stages.append("audio")
+    return stages
+
+
+def _processing_workflow_is_pause_requested():
+    with processing_workflow_lock:
+        return bool(process_state["processing_workflow"].get("pause_requested"))
+
+
+def _ensure_processing_workflow_not_paused():
+    if _processing_workflow_is_pause_requested():
+        raise WorkflowPauseRequested()
+
+
+def _mark_processing_workflow_stage_complete(stage_name):
+    with processing_workflow_lock:
+        completed = list(process_state["processing_workflow"].get("completed_stages") or [])
+        if stage_name not in completed:
+            completed.append(stage_name)
+        process_state["processing_workflow"]["completed_stages"] = completed
+        process_state["processing_workflow"]["current_stage"] = stage_name
+        _append_processing_workflow_log_locked(
+            f"{PROCESSING_WORKFLOW_STAGE_LABELS.get(stage_name, stage_name)} completed."
+        )
+
+
+def _set_processing_workflow_paused(stage_name=None):
+    with processing_workflow_lock:
+        process_state["processing_workflow"]["running"] = False
+        process_state["processing_workflow"]["paused"] = True
+        process_state["processing_workflow"]["pause_requested"] = False
+        if stage_name is not None:
+            process_state["processing_workflow"]["current_stage"] = stage_name
+        _append_processing_workflow_log_locked("Processing paused. Resume to continue from the current stage.")
+
+
+def _set_processing_workflow_failed(stage_name, message):
+    with processing_workflow_lock:
+        process_state["processing_workflow"]["running"] = False
+        process_state["processing_workflow"]["paused"] = False
+        process_state["processing_workflow"]["pause_requested"] = False
+        process_state["processing_workflow"]["current_stage"] = stage_name
+        process_state["processing_workflow"]["last_error"] = message
+        _append_processing_workflow_log_locked(message)
+
+
+def _set_processing_workflow_completed():
+    with processing_workflow_lock:
+        process_state["processing_workflow"]["running"] = False
+        process_state["processing_workflow"]["paused"] = False
+        process_state["processing_workflow"]["pause_requested"] = False
+        process_state["processing_workflow"]["current_stage"] = None
+        process_state["processing_workflow"]["last_error"] = None
+        process_state["processing_workflow"]["completed_at"] = time.time()
+        _append_processing_workflow_log_locked("Processing workflow completed successfully.")
+
+
+def _request_processing_workflow_pause_locked():
+    state = process_state["processing_workflow"]
+    if not state.get("running"):
+        return False
+    if state.get("pause_requested"):
+        return False
+    state["pause_requested"] = True
+    _append_processing_workflow_log_locked("Pause requested. Waiting for the current stage to stop safely.")
+    return True
+
+
+def _terminate_task_process_if_running(task_name):
+    with task_state_lock:
+        process = task_processes.get(task_name)
+    if process is None:
+        return False
+    if process.poll() is not None:
+        return False
+    try:
+        process.terminate()
+        return True
+    except Exception:
+        return False
+
+
+def _pause_audio_queue_for_workflow():
+    global audio_recovery_request
+    with audio_queue_condition:
+        cleared = len(audio_queue)
+        now = time.time()
+        while audio_queue:
+            job = audio_queue.pop(0)
+            job["status"] = "cancelled"
+            job["finished_at"] = now
+            _record_audio_recent_job_locked(job)
+
+        if audio_current_job is not None:
+            process_state["audio"]["cancel"] = True
+            audio_recovery_request = None
+            _append_audio_log_locked(f"[WORKFLOW] Pause requested for audio job #{audio_current_job['id']}")
+            if cleared:
+                _append_audio_log_locked(f"[WORKFLOW] Removed {cleared} queued audio job(s)")
+            _refresh_audio_process_state_locked(persist=True)
+            return True
+
+        if cleared:
+            audio_recovery_request = None
+            _append_audio_log_locked(f"[WORKFLOW] Removed {cleared} queued audio job(s)")
+            _refresh_audio_process_state_locked(persist=True)
+            return True
+    return False
+
+
+def _request_active_stage_pause(stage_name):
+    if stage_name in ("script", "review"):
+        return _terminate_task_process_if_running(stage_name)
+    if stage_name == "audio":
+        return _pause_audio_queue_for_workflow()
+    return False
+
+
+def _normalize_archive_path(path: str) -> str:
+    normalized = (path or "").replace("\\", "/").strip("/")
+    if not normalized:
+        return ""
+    parts = [part for part in normalized.split("/") if part and part != "."]
+    if any(part == ".." for part in parts):
+        raise ValueError(f"Unsafe archive path: {path}")
+    return "/".join(parts)
+
+
+def _is_allowed_project_archive_path(path: str) -> bool:
+    normalized = _normalize_archive_path(path)
+    if not normalized or normalized == PROJECT_ARCHIVE_MANIFEST_NAME:
+        return True
+    if normalized in PROJECT_ARCHIVE_ALLOWED_FILES:
+        return True
+    first = normalized.split("/", 1)[0]
+    return first in PROJECT_ARCHIVE_ALLOWED_DIRS
+
+
+def _archive_state_with_relative_paths():
+    state = {}
+    state_path = os.path.join(ROOT_DIR, "state.json")
+    if os.path.exists(state_path):
+        with open(state_path, "r", encoding="utf-8") as f:
+            try:
+                state = json.load(f)
+            except (json.JSONDecodeError, ValueError):
+                state = {}
+
+    input_file_path = state.get("input_file_path")
+    if input_file_path:
+        try:
+            absolute_input = os.path.abspath(input_file_path)
+            if os.path.commonpath([absolute_input, os.path.abspath(UPLOADS_DIR)]) == os.path.abspath(UPLOADS_DIR):
+                state["input_file_path"] = os.path.relpath(absolute_input, ROOT_DIR).replace(os.sep, "/")
+            else:
+                state.pop("input_file_path", None)
+        except ValueError:
+            state.pop("input_file_path", None)
+    return state
+
+
+def _project_archive_entries():
+    entries = {}
+
+    def add_relative_path(relative_path: str):
+        normalized = _normalize_archive_path(relative_path)
+        if not normalized or not _is_allowed_project_archive_path(normalized):
+            return
+        absolute_path = os.path.join(ROOT_DIR, normalized)
+        if os.path.exists(absolute_path):
+            entries[normalized] = absolute_path
+
+    for relative_path in sorted(PROJECT_ARCHIVE_ALLOWED_FILES):
+        add_relative_path(relative_path)
+
+    state = _archive_state_with_relative_paths()
+    input_file_path = (state.get("input_file_path") or "").strip()
+    if input_file_path:
+        add_relative_path(input_file_path)
+
+    chunks = []
+    if os.path.exists(CHUNKS_PATH):
+        try:
+            with open(CHUNKS_PATH, "r", encoding="utf-8") as f:
+                chunks = json.load(f)
+        except (json.JSONDecodeError, ValueError, OSError):
+            chunks = []
+
+    for chunk in chunks:
+        audio_path = (chunk.get("audio_path") or "").strip()
+        if audio_path:
+            add_relative_path(audio_path)
+
+    voice_assets = set()
+    for manifest_path in (CLONE_VOICES_MANIFEST, DESIGNED_VOICES_MANIFEST):
+        if os.path.exists(manifest_path):
+            relative_manifest = os.path.relpath(manifest_path, ROOT_DIR).replace(os.sep, "/")
+            add_relative_path(relative_manifest)
+            for entry in _load_manifest(manifest_path):
+                filename = (entry.get("filename") or "").strip()
+                if filename:
+                    voice_assets.add(f"{os.path.dirname(relative_manifest).replace(os.sep, '/')}/{filename}")
+
+    if os.path.exists(VOICE_CONFIG_PATH):
+        try:
+            with open(VOICE_CONFIG_PATH, "r", encoding="utf-8") as f:
+                voice_config = json.load(f)
+        except (json.JSONDecodeError, ValueError, OSError):
+            voice_config = {}
+        if isinstance(voice_config, dict):
+            for config in voice_config.values():
+                if not isinstance(config, dict):
+                    continue
+                ref_audio = (config.get("ref_audio") or "").strip()
+                if ref_audio:
+                    voice_assets.add(ref_audio)
+
+    for relative_path in sorted(voice_assets):
+        add_relative_path(relative_path)
+
+    return sorted(entries.items())
+
+
+def _build_project_archive_manifest(entries):
+    return {
+        "kind": "alexandria_project_archive",
+        "version": PROJECT_ARCHIVE_VERSION,
+        "created_at": time.time(),
+        "entries": [relative_path for relative_path, _ in entries],
+    }
+
+
+def _clear_project_archive_targets():
+    removable_files = [
+        "annotated_script.json",
+        "voice_config.json",
+        "voices.json",
+        "chunks.json",
+        "script_sanity_check.json",
+        "state.json",
+        "cloned_audiobook.mp3",
+        "optimized_audiobook.zip",
+        "audacity_export.zip",
+        "audiobook.m4b",
+        "audio_queue_state.json",
+        "processing_workflow_state.json",
+    ]
+    removable_dirs = ["uploads", "clone_voices", "designed_voices", "voicelines"]
+
+    for relative_path in removable_files:
+        absolute_path = os.path.join(ROOT_DIR, relative_path)
+        if os.path.exists(absolute_path):
+            os.remove(absolute_path)
+
+    for dirname in removable_dirs:
+        absolute_dir = os.path.join(ROOT_DIR, dirname)
+        if os.path.isdir(absolute_dir):
+            shutil.rmtree(absolute_dir)
+        os.makedirs(absolute_dir, exist_ok=True)
+
+
+def _reset_runtime_state_after_project_load():
+    global audio_current_job, audio_recovery_request
+    with audio_queue_condition:
+        audio_queue.clear()
+        audio_current_job = None
+        audio_recovery_request = None
+        process_state["audio"]["cancel"] = False
+        process_state["audio"]["queue"] = []
+        process_state["audio"]["current_job"] = None
+        process_state["audio"]["recent_jobs"] = []
+        process_state["audio"]["logs"] = []
+        process_state["audio"]["running"] = False
+        process_state["audio"]["merge_running"] = False
+        process_state["audio"]["merge_progress"] = _new_audio_merge_progress()
+        process_state["audio"]["metrics"] = _new_audio_metrics()
+        process_state["audio"]["heartbeat"] = _new_audio_heartbeat_state()
+        _refresh_audio_process_state_locked(persist=False)
+
+    with processing_workflow_lock:
+        process_state["processing_workflow"] = _new_processing_workflow_state()
+        _persist_processing_workflow_state_locked()
+
+    for task_name in ("script", "voices", "review", "sanity", "repair", "audacity_export", "m4b_export"):
+        process_state[task_name]["logs"] = []
+        process_state[task_name]["running"] = False
+
+    project_manager.engine = None
+    project_manager.recover_interrupted_generating_chunks()
+    project_manager.reconcile_chunk_audio_states()
+
+
+def _restore_project_archive(extracted_dir: str):
+    _clear_project_archive_targets()
+
+    for relative_path in sorted(PROJECT_ARCHIVE_ALLOWED_FILES):
+        source_path = os.path.join(extracted_dir, relative_path)
+        target_path = os.path.join(ROOT_DIR, relative_path)
+        if not os.path.exists(source_path):
+            continue
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        if relative_path == "state.json":
+            with open(source_path, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            input_file_path = (state.get("input_file_path") or "").strip()
+            if input_file_path:
+                state["input_file_path"] = os.path.join(ROOT_DIR, input_file_path)
+            with open(target_path, "w", encoding="utf-8") as f:
+                json.dump(state, f, indent=2, ensure_ascii=False)
+        else:
+            shutil.copy2(source_path, target_path)
+
+    for dirname in sorted(PROJECT_ARCHIVE_ALLOWED_DIRS):
+        source_dir = os.path.join(extracted_dir, dirname)
+        target_dir = os.path.join(ROOT_DIR, dirname)
+        if not os.path.isdir(source_dir):
+            continue
+        if os.path.isdir(target_dir):
+            shutil.rmtree(target_dir)
+        shutil.copytree(source_dir, target_dir)
+
+    _reset_runtime_state_after_project_load()
 
 
 def _persist_audio_queue_state_locked():
@@ -1039,6 +1483,33 @@ def _perform_audio_recovery_locked(job, run_token, reason):
     return True
 
 
+def _abandon_audio_job_locked(job, run_token, reason, *, status="cancelled"):
+    global audio_current_job, audio_recovery_request
+
+    if audio_current_job is None:
+        return False
+    if audio_current_job["id"] != job["id"] or audio_current_job.get("run_token") != run_token:
+        return False
+
+    reset_count = project_manager.reset_generating_chunks(
+        indices=job.get("indices"),
+        generation_token=run_token,
+    )
+    job["status"] = status
+    job["finished_at"] = time.time()
+    _record_audio_recent_job_locked(job)
+    _append_audio_log_locked(
+        f"[CANCEL] Abandoned job #{job['id']} and reset {reset_count} generating chunk(s) to pending"
+    )
+
+    audio_current_job = None
+    audio_recovery_request = None
+    process_state["audio"]["cancel"] = False
+    _refresh_audio_process_state_locked(persist=True)
+    audio_queue_condition.notify_all()
+    return True
+
+
 def _audio_job_runner(job, settings, run_token, result_holder, done_event):
     job_prefix = f"[JOB {job['id']}]"
 
@@ -1246,6 +1717,7 @@ _restore_audio_queue_state()
 def run_process(command: List[str], task_name: str, run_id: str):
     """Run a subprocess and capture logs."""
     logger.info(f"Starting task {task_name}: {' '.join(command)}")
+    success = False
 
     try:
         env = os.environ.copy()
@@ -1280,6 +1752,7 @@ def run_process(command: List[str], task_name: str, run_id: str):
 
         if return_code == 0:
             _append_task_log(task_name, run_id, f"Task {task_name} completed successfully.")
+            success = True
         else:
             _append_task_log(task_name, run_id, f"Task {task_name} failed with return code {return_code}.")
 
@@ -1288,10 +1761,20 @@ def run_process(command: List[str], task_name: str, run_id: str):
         _append_task_log(task_name, run_id, f"Error: {str(e)}")
     finally:
         _finish_task_run(task_name, run_id, locals().get("process"))
+    return success
 
 
-def run_script_sanity_task(run_id: str):
+def run_script_sanity_task(run_id: str, stop_check=None):
+    success = False
+
+    def ensure_active():
+        if stop_check and stop_check():
+            raise WorkflowPauseRequested()
+        if not _task_is_current("sanity", run_id):
+            raise WorkflowPauseRequested()
+
     def log(message: str):
+        ensure_active()
         return _append_task_log("sanity", run_id, message)
 
     progress_state = {
@@ -1300,6 +1783,8 @@ def run_script_sanity_task(run_id: str):
     }
 
     def on_attribution_progress(event: str, payload: dict):
+        if stop_check and stop_check():
+            return
         if not _task_is_current("sanity", run_id):
             return
         total = int(payload.get("total") or payload.get("candidates") or 0)
@@ -1326,6 +1811,8 @@ def run_script_sanity_task(run_id: str):
             progress_state["last_logged_current"] = current
 
     def persist_attribution_decision(_phrase_key: str, _decision: dict, phrase_decisions: dict):
+        if stop_check and stop_check():
+            return
         if not _task_is_current("sanity", run_id):
             return
         save_script_document(
@@ -1336,9 +1823,11 @@ def run_script_sanity_task(run_id: str):
         )
 
     try:
+        ensure_active()
         if os.path.exists(SCRIPT_SANITY_PATH):
             os.remove(SCRIPT_SANITY_PATH)
 
+        ensure_active()
         if not os.path.exists(SCRIPT_PATH):
             raise FileNotFoundError("No annotated script found. Generate a script first.")
 
@@ -1382,6 +1871,7 @@ def run_script_sanity_task(run_id: str):
         attribution_system_prompt = prompts_config.get("attribution_system_prompt")
         attribution_user_prompt = prompts_config.get("attribution_user_prompt")
         if attribution_system_prompt and attribution_user_prompt:
+            ensure_active()
             client = OpenAI(
                 base_url=llm_config.get("base_url", "http://localhost:11434/v1"),
                 api_key=llm_config.get("api_key", "local"),
@@ -1404,7 +1894,7 @@ def run_script_sanity_task(run_id: str):
             attribution_decision_persist=persist_attribution_decision,
         )
         if not _task_is_current("sanity", run_id):
-            return
+            raise WorkflowPauseRequested()
 
         updated_sanity_cache = {
             "phrase_decisions": result.get("attribution_phrase_decisions", {}),
@@ -1454,30 +1944,44 @@ def run_script_sanity_task(run_id: str):
         log(f"Invalid sections total: {result['invalid_section_count']}")
         log(f"Invalid chunks total: {result['invalid_chunk_count']}")
         log("Task sanity completed successfully.")
+        success = True
+    except WorkflowPauseRequested:
+        logger.info("Sanity task interrupted")
     except Exception as e:
         logger.error(f"Error running script sanity check: {e}")
         if _task_is_current("sanity", run_id):
             log(f"Error: {str(e)}")
     finally:
         _finish_task_run("sanity", run_id)
+    return success
 
 
-def run_script_repair_task(run_id: str):
+def run_script_repair_task(run_id: str, stop_check=None):
+    success = False
+
+    def ensure_active():
+        if stop_check and stop_check():
+            raise WorkflowPauseRequested()
+        if not _task_is_current("repair", run_id):
+            raise WorkflowPauseRequested()
+
     def log(message: str):
+        ensure_active()
         if not _append_task_log("repair", run_id, message):
             raise RepairSupersededError()
 
     try:
+        ensure_active()
         if os.path.exists(SCRIPT_SANITY_PATH):
             os.remove(SCRIPT_SANITY_PATH)
 
         result = repair_invalid_chunks(
             ROOT_DIR,
             log,
-            should_continue=lambda: _task_is_current("repair", run_id),
+            should_continue=lambda: _task_is_current("repair", run_id) and not (stop_check and stop_check()),
         )
         if not _task_is_current("repair", run_id):
-            return
+            raise WorkflowPauseRequested()
         final_sanity = result["final_sanity"]
 
         with open(SCRIPT_SANITY_PATH, "w", encoding="utf-8") as f:
@@ -1499,6 +2003,9 @@ def run_script_repair_task(run_id: str):
             )
 
         log("Task repair completed successfully.")
+        success = True
+    except WorkflowPauseRequested:
+        logger.info("Repair task interrupted")
     except RepairSupersededError:
         logger.info("Repair task superseded by a newer request")
     except Exception as e:
@@ -1507,6 +2014,259 @@ def run_script_repair_task(run_id: str):
             log(f"Error: {str(e)}")
     finally:
         _finish_task_run("repair", run_id)
+    return success
+
+
+def run_lost_audio_repair_task(run_id: str, use_asr: bool):
+    success = False
+    last_progress_message = None
+
+    def ensure_active():
+        if not _task_is_current("repair", run_id):
+            raise WorkflowPauseRequested()
+
+    def log(message: str):
+        ensure_active()
+        if not _append_task_log("repair", run_id, message):
+            raise RepairSupersededError()
+
+    def on_progress(update: dict):
+        nonlocal last_progress_message
+        ensure_active()
+        message = str((update or {}).get("message") or "").strip()
+        if not message or message == last_progress_message:
+            return
+        last_progress_message = message
+        log(message)
+
+    try:
+        log(f"Starting lost audio repair (ASR {'enabled' if use_asr else 'disabled'})...")
+        result = project_manager.repair_lost_audio_links(use_asr=use_asr, progress_callback=on_progress)
+        log(
+            f"Preserved {result.get('preserved', 0)} existing clip(s). "
+            f"Relinked {result.get('relinked', 0)} directly and {result.get('asr_relinked', 0)} via ASR."
+        )
+        log(
+            f"{result.get('invalid_candidates', 0)} candidate(s) still failed validation, "
+            f"{result.get('unmatched_files', 0)} still mismatched speaker, "
+            f"{result.get('total_candidates', 0)} total candidate file(s) scanned."
+        )
+        for error in result.get("asr_errors", []) or []:
+            log(f"ASR note: {error}")
+        log("Task repair completed successfully.")
+        success = True
+    except WorkflowPauseRequested:
+        logger.info("Lost audio repair task interrupted")
+    except RepairSupersededError:
+        logger.info("Lost audio repair task superseded by a newer request")
+    except Exception as e:
+        logger.error(f"Error running lost audio repair: {e}")
+        if _task_is_current("repair", run_id):
+            log(f"Error: {str(e)}")
+    finally:
+        _finish_task_run("repair", run_id)
+    return success
+
+
+def _run_processing_script_stage():
+    state_path = os.path.join(ROOT_DIR, "state.json")
+    if not os.path.exists(state_path):
+        raise FileNotFoundError("No input file selected")
+
+    with open(state_path, "r", encoding="utf-8") as f:
+        state = json.load(f)
+    input_file = state.get("input_file_path")
+    if not input_file:
+        raise FileNotFoundError("No input file found in state")
+
+    run_id = _start_task_run("script")
+    return run_process([sys.executable, "-u", "generate_script.py", input_file], "script", run_id)
+
+
+def _run_processing_review_stage():
+    if not os.path.exists(SCRIPT_PATH):
+        raise FileNotFoundError("No annotated script found. Generate a script first.")
+    run_id = _start_task_run("review")
+    return run_process([sys.executable, "-u", "review_script.py"], "review", run_id)
+
+
+def _run_processing_sanity_stage():
+    if not os.path.exists(SCRIPT_PATH):
+        raise FileNotFoundError("No annotated script found. Generate a script first.")
+    run_id = _start_task_run("sanity")
+    return run_script_sanity_task(run_id, stop_check=_processing_workflow_is_pause_requested)
+
+
+def _run_processing_repair_stage():
+    if not os.path.exists(SCRIPT_PATH):
+        raise FileNotFoundError("No annotated script found. Generate a script first.")
+    run_id = _start_task_run("repair")
+    return run_script_repair_task(run_id, stop_check=_processing_workflow_is_pause_requested)
+
+
+def _run_processing_voices_stage():
+    run_id = _start_task_run("voices")
+    return run_voice_processing_task(run_id, stop_check=_processing_workflow_is_pause_requested)
+
+
+def _auto_prepare_segments_for_processing():
+    if project_manager.is_render_prep_complete():
+        return
+    project_manager.merge_orphan_segments(chapter=None, min_words=10)
+    project_manager.decompose_long_segments(chapter=None, max_words=25)
+    project_manager.set_render_prep_complete(True)
+
+
+def _workflow_pending_audio_indices():
+    chunks = project_manager.load_chunks()
+    return [
+        chunk.get("id", index)
+        for index, chunk in enumerate(chunks)
+        if (chunk.get("text") or "").strip() and chunk.get("status") != "done"
+    ]
+
+
+def _run_processing_audio_stage():
+    _ensure_processing_workflow_not_paused()
+    _auto_prepare_segments_for_processing()
+
+    with audio_queue_lock:
+        _refresh_audio_process_state_locked()
+        has_existing_audio_work = bool(audio_current_job is not None or audio_queue)
+
+    if not has_existing_audio_work:
+        indices = _workflow_pending_audio_indices()
+        if not indices:
+            with processing_workflow_lock:
+                _append_processing_workflow_log_locked("No pending audio segments needed generation.")
+            return True
+
+        settings = _load_audio_worker_settings()
+        kind = "parallel" if settings["tts_cfg"].get("mode") == "external" else "batch_fast"
+        label = "Workflow audio generation"
+        scope = "workflow"
+        if kind == "parallel":
+            _enqueue_audio_job(kind, indices, label=label, scope=scope)
+        else:
+            _enqueue_audio_job(kind, indices, label=label, scope=scope)
+
+    while True:
+        if _processing_workflow_is_pause_requested():
+            _pause_audio_queue_for_workflow()
+            raise WorkflowPauseRequested()
+        with audio_queue_lock:
+            _refresh_audio_process_state_locked()
+            has_audio_work = bool(audio_current_job is not None or audio_queue)
+        if not has_audio_work:
+            break
+        time.sleep(1)
+
+    remaining = _workflow_pending_audio_indices()
+    if remaining:
+        raise RuntimeError(f"Audio generation stopped with {len(remaining)} pending segment(s) remaining.")
+    return True
+
+
+def _execute_processing_workflow_stage(stage_name):
+    with processing_workflow_lock:
+        process_state["processing_workflow"]["current_stage"] = stage_name
+        process_state["processing_workflow"]["last_error"] = None
+        _append_processing_workflow_log_locked(
+            f"Starting {PROCESSING_WORKFLOW_STAGE_LABELS.get(stage_name, stage_name)}..."
+        )
+
+    if stage_name == "script":
+        success = _run_processing_script_stage()
+    elif stage_name == "review":
+        success = _run_processing_review_stage()
+    elif stage_name == "sanity":
+        success = _run_processing_sanity_stage()
+    elif stage_name == "repair":
+        success = _run_processing_repair_stage()
+    elif stage_name == "voices":
+        success = _run_processing_voices_stage()
+    elif stage_name == "audio":
+        success = _run_processing_audio_stage()
+    else:
+        raise RuntimeError(f"Unknown processing stage: {stage_name}")
+
+    if _processing_workflow_is_pause_requested():
+        raise WorkflowPauseRequested()
+    if not success:
+        raise RuntimeError(f"{PROCESSING_WORKFLOW_STAGE_LABELS.get(stage_name, stage_name)} failed.")
+
+
+def _processing_workflow_runner():
+    global processing_workflow_thread
+
+    try:
+        while True:
+            with processing_workflow_lock:
+                state = copy.deepcopy(process_state["processing_workflow"])
+            if not state.get("running"):
+                break
+
+            stages = _processing_workflow_stage_sequence(state.get("options"))
+            pending_stage = next((stage for stage in stages if stage not in (state.get("completed_stages") or [])), None)
+            if pending_stage is None:
+                _set_processing_workflow_completed()
+                break
+
+            try:
+                _execute_processing_workflow_stage(pending_stage)
+                _mark_processing_workflow_stage_complete(pending_stage)
+            except WorkflowPauseRequested:
+                _set_processing_workflow_paused(pending_stage)
+                break
+            except Exception as e:
+                logger.error("Processing workflow failed during %s: %s", pending_stage, e)
+                _set_processing_workflow_failed(
+                    pending_stage,
+                    f"{PROCESSING_WORKFLOW_STAGE_LABELS.get(pending_stage, pending_stage)} failed: {e}",
+                )
+                break
+    finally:
+        with processing_workflow_lock:
+            processing_workflow_thread = None
+
+
+def _start_processing_workflow_thread_locked():
+    global processing_workflow_thread
+    if processing_workflow_thread is not None and processing_workflow_thread.is_alive():
+        return
+    processing_workflow_thread = threading.Thread(
+        target=_processing_workflow_runner,
+        daemon=True,
+        name="processing-workflow",
+    )
+    processing_workflow_thread.start()
+
+
+def _restore_processing_workflow_state():
+    if not os.path.exists(PROCESSING_WORKFLOW_STATE_PATH):
+        return
+
+    try:
+        with open(PROCESSING_WORKFLOW_STATE_PATH, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        logger.warning(f"Failed to restore processing workflow state: {e}")
+        return
+
+    restored = _new_processing_workflow_state()
+    restored.update(payload)
+    process_state["processing_workflow"] = restored
+
+    if restored.get("running") and not restored.get("paused"):
+        with processing_workflow_lock:
+            process_state["processing_workflow"]["resume_count"] = int(
+                process_state["processing_workflow"].get("resume_count", 0) or 0
+            ) + 1
+            _append_processing_workflow_log_locked("Recovered processing workflow after app restart.")
+            _start_processing_workflow_thread_locked()
+
+
+_restore_processing_workflow_state()
 
 # Endpoints
 
@@ -1780,6 +2540,7 @@ async def reset_project():
         AUDIOBOOK_PATH,
         M4B_PATH,
         AUDIO_QUEUE_STATE_PATH,
+        PROCESSING_WORKFLOW_STATE_PATH,
         SCRIPT_SANITY_PATH,
         os.path.join(ROOT_DIR, "audacity_export.zip"),
         os.path.join(ROOT_DIR, "m4b_cover.jpg"),
@@ -1822,6 +2583,10 @@ async def reset_project():
     for task_name in ("script", "voices", "review", "sanity", "repair", "audacity_export", "m4b_export"):
         process_state[task_name]["logs"] = []
         process_state[task_name]["running"] = False
+
+    with processing_workflow_lock:
+        process_state["processing_workflow"] = _new_processing_workflow_state()
+        _persist_processing_workflow_state_locked()
 
     project_manager.engine = None
 
@@ -1895,6 +2660,59 @@ async def get_status(task_name: str):
         with audio_queue_lock:
             _refresh_audio_process_state_locked()
     return process_state[task_name]
+
+
+@app.post("/api/processing/start")
+async def start_processing_workflow(request: ProcessingWorkflowRequest):
+    running_task = _any_project_task_running()
+    with processing_workflow_lock:
+        workflow_state = process_state["processing_workflow"]
+        if workflow_state.get("running") and not workflow_state.get("paused"):
+            raise HTTPException(status_code=409, detail="Processing workflow is already running.")
+
+        if running_task and not workflow_state.get("paused"):
+            raise HTTPException(status_code=409, detail=f"Cannot start processing while '{running_task}' is running.")
+
+        options = {
+            "process_voices": bool(request.process_voices),
+            "generate_audio": bool(request.generate_audio),
+        }
+        if workflow_state.get("paused"):
+            workflow_state["options"] = options
+            workflow_state["running"] = True
+            workflow_state["paused"] = False
+            workflow_state["pause_requested"] = False
+            workflow_state["last_error"] = None
+            workflow_state["resume_count"] = int(workflow_state.get("resume_count", 0) or 0) + 1
+            _append_processing_workflow_log_locked("Resuming processing workflow.")
+        else:
+            process_state["processing_workflow"] = _new_processing_workflow_state() | {
+                "running": True,
+                "paused": False,
+                "pause_requested": False,
+                "options": options,
+                "started_at": time.time(),
+            }
+            _append_processing_workflow_log_locked("Starting processing workflow.")
+
+        _start_processing_workflow_thread_locked()
+        return process_state["processing_workflow"]
+
+
+@app.post("/api/processing/pause")
+async def pause_processing_workflow():
+    with processing_workflow_lock:
+        state = process_state["processing_workflow"]
+        if not state.get("running"):
+            if state.get("paused"):
+                return {"status": "paused"}
+            return {"status": "idle"}
+        requested = _request_processing_workflow_pause_locked()
+        stage_name = state.get("current_stage")
+
+    if requested and stage_name:
+        _request_active_stage_pause(stage_name)
+    return {"status": "pause_requested", "current_stage": stage_name}
 
 @app.get("/api/voices")
 async def get_voices():
@@ -1986,48 +2804,34 @@ async def save_voice_config(config_data: Dict[str, VoiceConfigItem]):
     return {"status": "saved"}
 
 
-@app.post("/api/voices/suggest_description")
-async def suggest_voice_description(request: VoiceDescriptionSuggestRequest):
-    speaker = (request.speaker or "").strip()
+def suggest_voice_description_sync(speaker: str):
+    speaker = (speaker or "").strip()
     if not speaker:
-        raise HTTPException(status_code=400, detail="Speaker is required")
+        raise ValueError("Speaker is required")
 
-    config = await get_config()
+    config = asyncio.run(get_config())
     prompts = config.get("prompts", {})
     prompt_template = (prompts.get("voice_prompt") or "").strip()
     if not prompt_template:
-        try:
-            prompt_template = load_voice_prompt()
-        except RuntimeError as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        prompt_template = load_voice_prompt()
 
-    try:
-        prompt_payload = project_manager.build_voice_suggestion_prompt(speaker, prompt_template)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
+    prompt_payload = project_manager.build_voice_suggestion_prompt(speaker, prompt_template)
     llm_config = config.get("llm", {})
-    try:
-        def run_request():
-            client = OpenAI(
-                base_url=llm_config.get("base_url", "http://localhost:11434/v1"),
-                api_key=llm_config.get("api_key", "local"),
-                timeout=float(llm_config.get("timeout", 600)),
-            )
-            return client.chat.completions.create(
-                model=llm_config.get("model_name", "local-model"),
-                messages=[{"role": "user", "content": prompt_payload["prompt"]}],
-            )
 
-        response = await asyncio.to_thread(run_request)
-    except Exception as e:
-        logger.error(f"Voice description suggestion failed for {speaker}: {e}")
-        raise HTTPException(status_code=500, detail=f"Voice suggestion request failed: {e}")
+    client = OpenAI(
+        base_url=llm_config.get("base_url", "http://localhost:11434/v1"),
+        api_key=llm_config.get("api_key", "local"),
+        timeout=float(llm_config.get("timeout", 600)),
+    )
+    response = client.chat.completions.create(
+        model=llm_config.get("model_name", "local-model"),
+        messages=[{"role": "user", "content": prompt_payload["prompt"]}],
+    )
 
     content = response.choices[0].message.content if response.choices else ""
     voice = _extract_voice_field(content)
     if not voice:
-        raise HTTPException(status_code=500, detail="Model response did not include a valid JSON voice field")
+        raise ValueError("Model response did not include a valid JSON voice field")
 
     return {
         "status": "ok",
@@ -2036,6 +2840,139 @@ async def suggest_voice_description(request: VoiceDescriptionSuggestRequest):
         "matched_paragraphs": len(prompt_payload["paragraphs"]),
         "context_chars": prompt_payload["context_chars"],
     }
+
+
+def run_voice_processing_task(run_id: str, stop_check=None):
+    success = False
+
+    def ensure_active():
+        if stop_check and stop_check():
+            raise WorkflowPauseRequested()
+        if not _task_is_current("voices", run_id):
+            raise WorkflowPauseRequested()
+
+    def log(message: str):
+        ensure_active()
+        _append_task_log("voices", run_id, message)
+
+    try:
+        if not os.path.exists(SCRIPT_PATH):
+            raise FileNotFoundError("No annotated script found. Generate a script first.")
+
+        chunks = project_manager.load_chunks()
+        voices = awaitable_get_voices_sync()
+        if not voices:
+            log("No voices detected in the current script.")
+            log("Task voices completed successfully.")
+            return True
+
+        voice_config = {}
+        if os.path.exists(VOICE_CONFIG_PATH):
+            with open(VOICE_CONFIG_PATH, "r", encoding="utf-8") as f:
+                try:
+                    voice_config = json.load(f)
+                except (json.JSONDecodeError, ValueError):
+                    voice_config = {}
+
+        known_names = {voice["name"] for voice in voices}
+        updated_config = copy.deepcopy(voice_config)
+        changed = False
+
+        for voice in voices:
+            speaker = voice["name"]
+            entry = updated_config.setdefault(speaker, {})
+            if not entry.get("type"):
+                entry["type"] = "design"
+                changed = True
+            if not (entry.get("ref_text") or "").strip():
+                suggested = voice.get("suggested_sample_text") or project_manager.suggest_design_sample_text(speaker, chunks)
+                if suggested:
+                    entry["ref_text"] = suggested
+                    changed = True
+
+        if changed:
+            with open(VOICE_CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(updated_config, f, indent=2, ensure_ascii=False)
+
+        eligible = []
+        for voice in voices:
+            speaker = voice["name"]
+            entry = updated_config.get(speaker, {})
+            alias = (entry.get("alias") or "").strip()
+            if alias and alias in known_names and alias != speaker:
+                log(f"Skipping {speaker}: aliased to {alias}.")
+                continue
+            if entry.get("type", "design") != "design":
+                log(f"Skipping {speaker}: voice type is {entry.get('type')}.")
+                continue
+            ref_audio = (entry.get("ref_audio") or "").strip()
+            ref_audio_path = os.path.join(ROOT_DIR, ref_audio) if ref_audio else ""
+            if ref_audio and os.path.exists(ref_audio_path):
+                log(f"Skipping {speaker}: reusable voice already exists.")
+                continue
+            eligible.append(speaker)
+
+        if not eligible:
+            log("No outstanding voices needed generation.")
+            log("Task voices completed successfully.")
+            return True
+
+        for index, speaker in enumerate(eligible, start=1):
+            ensure_active()
+            voice_data = updated_config.setdefault(speaker, {})
+            description = (voice_data.get("description") or "").strip()
+            sample_text = (voice_data.get("ref_text") or "").strip() or project_manager.suggest_design_sample_text(speaker, chunks)
+
+            if not description:
+                log(f"[{index}/{len(eligible)}] Suggesting voice description for {speaker}...")
+                suggestion = suggest_voice_description_sync(speaker)
+                description = suggestion["voice"].strip()
+                voice_data["description"] = description
+                with open(VOICE_CONFIG_PATH, "w", encoding="utf-8") as f:
+                    json.dump(updated_config, f, indent=2, ensure_ascii=False)
+
+            if not sample_text:
+                raise ValueError(f"No sample text available for '{speaker}'")
+
+            log(f"[{index}/{len(eligible)}] Generating reusable voice for {speaker}...")
+            materialized = project_manager.materialize_design_voice(
+                speaker=speaker,
+                description=description,
+                sample_text=sample_text,
+                force=False,
+                voice_config=updated_config,
+            )
+            updated_config = materialized["voice_config"]
+            log(f"[{index}/{len(eligible)}] Created reusable voice for {speaker}.")
+
+        log("Task voices completed successfully.")
+        success = True
+    except WorkflowPauseRequested:
+        logger.info("Voices task interrupted")
+    except Exception as e:
+        logger.error(f"Error running voice processing task: {e}")
+        if _task_is_current("voices", run_id):
+            _append_task_log("voices", run_id, f"Error: {str(e)}")
+    finally:
+        _finish_task_run("voices", run_id)
+    return success
+
+
+def awaitable_get_voices_sync():
+    return asyncio.run(get_voices())
+
+
+@app.post("/api/voices/suggest_description")
+async def suggest_voice_description(request: VoiceDescriptionSuggestRequest):
+    speaker = (request.speaker or "").strip()
+    if not speaker:
+        raise HTTPException(status_code=400, detail="Speaker is required")
+
+    try:
+        return await asyncio.to_thread(suggest_voice_description_sync, speaker)
+    except Exception as e:
+        logger.error(f"Voice description suggestion failed for {speaker}: {e}")
+        raise HTTPException(status_code=500, detail=f"Voice suggestion request failed: {e}")
 
 
 @app.post("/api/voices/design_generate")
@@ -2135,6 +3072,60 @@ async def repair_legacy_chunks(request: ChunkRepairLegacyRequest):
     if repaired is None:
         raise HTTPException(status_code=400, detail="Failed to repair legacy chunk order")
     return {"status": "ok", "total": len(repaired)}
+
+@app.post("/api/chunks/invalidate_stale_audio")
+async def invalidate_stale_audio():
+    running_task = _any_project_task_running()
+    if running_task:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot invalidate stale audio while {running_task} work is running",
+        )
+
+    result = project_manager.invalidate_stale_audio_references()
+    return {"status": "ok", **result}
+
+@app.get("/api/asr/status")
+async def get_asr_status():
+    settings = project_manager._load_asr_settings()
+    return {
+        "enabled": bool(settings.get("enabled", True)),
+        "model": settings.get("model", "small.en"),
+        "language": settings.get("language", "en"),
+        "device": settings.get("device", "auto"),
+        "compute_type": settings.get("compute_type", "auto"),
+        "beam_size": int(settings.get("beam_size", 1) or 1),
+    }
+
+@app.post("/api/asr/transcribe")
+async def transcribe_audio_clip(request: ASRTranscribeRequest):
+    try:
+        result = project_manager.transcribe_audio_path(request.audio_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Audio file not found")
+    except LocalASRUnavailableError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"ASR transcription failed: {e}")
+    return {"status": "ok", **result}
+
+@app.post("/api/chunks/repair_lost_audio")
+async def repair_lost_audio(request: LostAudioRepairRequest, background_tasks: BackgroundTasks):
+    running_task = _any_project_task_running()
+    if running_task:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot repair lost audio while {running_task} work is running",
+        )
+
+    run_id = _start_task_run("repair")
+    background_tasks.add_task(
+        run_process,
+        [sys.executable, "-u", "lost_audio_repair_runner.py", ROOT_DIR, "1" if bool(request.use_asr) else "0"],
+        "repair",
+        run_id,
+    )
+    return {"status": "started", "run_id": run_id}
 
 @app.post("/api/render_prep_state")
 async def set_render_prep_state(request: RenderPrepStateRequest):
@@ -2454,6 +3445,14 @@ async def cancel_audio():
             _append_audio_log_locked(f"[CANCEL] Cancellation requested for job #{audio_current_job['id']}")
             if cleared:
                 _append_audio_log_locked(f"[CANCEL] Cleared {cleared} queued job(s)")
+            abandoned = _abandon_audio_job_locked(
+                audio_current_job,
+                audio_current_job.get("run_token"),
+                "User requested cancellation",
+                status="cancelled",
+            )
+            if abandoned:
+                return {"status": "cancelled", "cleared_queued_jobs": cleared}
             _refresh_audio_process_state_locked(persist=True)
             return {"status": "cancelling", "cleared_queued_jobs": cleared}
 
@@ -2491,6 +3490,87 @@ async def list_saved_scripts():
             })
     scripts.sort(key=lambda x: x["created"], reverse=True)
     return scripts
+
+
+@app.get("/api/project_archive")
+async def export_project_archive(background_tasks: BackgroundTasks):
+    running_task = _any_project_task_running()
+    if running_task:
+        raise HTTPException(status_code=409, detail=f"Cannot save a project archive while '{running_task}' is running.")
+
+    entries = _project_archive_entries()
+    manifest = _build_project_archive_manifest(entries)
+
+    handle = tempfile.NamedTemporaryFile(prefix="alexandria_project_", suffix=".zip", delete=False)
+    temp_zip_path = handle.name
+    handle.close()
+
+    try:
+        with zipfile.ZipFile(temp_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(PROJECT_ARCHIVE_MANIFEST_NAME, json.dumps(manifest, indent=2, ensure_ascii=False))
+            for relative_path, absolute_path in entries:
+                if relative_path == "state.json":
+                    zf.writestr(relative_path, json.dumps(_archive_state_with_relative_paths(), indent=2, ensure_ascii=False))
+                else:
+                    zf.write(absolute_path, arcname=relative_path)
+    except Exception:
+        if os.path.exists(temp_zip_path):
+            os.remove(temp_zip_path)
+        raise
+
+    archive_name = f"alexandria_project_{time.strftime('%Y%m%d_%H%M%S')}.zip"
+    background_tasks.add_task(lambda: os.path.exists(temp_zip_path) and os.remove(temp_zip_path))
+    return FileResponse(temp_zip_path, filename=archive_name, media_type="application/zip")
+
+
+@app.post("/api/project_archive/load")
+async def load_project_archive(file: UploadFile = File(...)):
+    running_task = _any_project_task_running()
+    if running_task:
+        raise HTTPException(status_code=409, detail=f"Cannot load a project archive while '{running_task}' is running.")
+
+    filename = file.filename or ""
+    if not filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=400, detail="Project archive must be a .zip file.")
+
+    content = await file.read()
+    temp_root = tempfile.mkdtemp(prefix="alexandria_project_import_")
+    zip_path = os.path.join(temp_root, "project.zip")
+    extract_root = os.path.join(temp_root, "extracted")
+    os.makedirs(extract_root, exist_ok=True)
+
+    try:
+        with open(zip_path, "wb") as f:
+            f.write(content)
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            names = zf.namelist()
+            if PROJECT_ARCHIVE_MANIFEST_NAME not in names:
+                raise HTTPException(status_code=400, detail="Archive is missing project archive manifest.")
+
+            try:
+                manifest = json.loads(zf.read(PROJECT_ARCHIVE_MANIFEST_NAME).decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as e:
+                raise HTTPException(status_code=400, detail=f"Archive manifest is invalid: {e}")
+            if manifest.get("kind") != "alexandria_project_archive":
+                raise HTTPException(status_code=400, detail="Archive is not a valid Alexandria project archive.")
+
+            for info in zf.infolist():
+                if info.is_dir() or info.filename == PROJECT_ARCHIVE_MANIFEST_NAME:
+                    continue
+                relative_path = _normalize_archive_path(info.filename)
+                if not _is_allowed_project_archive_path(relative_path):
+                    raise HTTPException(status_code=400, detail=f"Archive contains unsupported path: {relative_path}")
+                target_path = os.path.join(extract_root, relative_path)
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                with zf.open(info, "r") as source, open(target_path, "wb") as target:
+                    shutil.copyfileobj(source, target)
+
+        _restore_project_archive(extract_root)
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+    return {"status": "loaded", "filename": filename}
 
 class ScriptSaveRequest(BaseModel):
     name: str

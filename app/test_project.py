@@ -211,6 +211,25 @@ class ReconcileChunkAudioStatesTests(unittest.TestCase):
             json.dump({"tts": {"auto_regenerate_bad_clips": False, "auto_regenerate_bad_clip_attempts": 5}}, f)
         self.assertEqual(self.manager._get_auto_regen_retry_attempts(), 0)
 
+    def test_load_chunks_preserves_corrupt_file_instead_of_regenerating(self):
+        script_entries = [
+            {"speaker": "Narrator", "text": "Fresh script line.", "instruct": ""}
+        ]
+        with open(os.path.join(self.root_dir, "annotated_script.json"), "w", encoding="utf-8") as f:
+            json.dump({"entries": script_entries, "dictionary": []}, f)
+
+        chunks_path = os.path.join(self.root_dir, "chunks.json")
+        with open(chunks_path, "w", encoding="utf-8") as f:
+            f.write("{not valid json")
+
+        with self.assertRaises(RuntimeError):
+            self.manager.load_chunks()
+
+        backups = [name for name in os.listdir(self.root_dir) if name.startswith("chunks.json.corrupt-")]
+        self.assertTrue(backups)
+        with open(chunks_path, "r", encoding="utf-8") as f:
+            self.assertEqual(f.read(), "{not valid json")
+
 
 class MergeAudioTests(unittest.TestCase):
     def setUp(self):
@@ -812,6 +831,536 @@ class MergeOrphanSegmentsTests(unittest.TestCase):
         for i in range(5):
             self.assertEqual(updated[i]["text"], f"Short intro {i}.")
         self.assertEqual(updated[5]["text"], "Tiny tail. This should merge with the tiny tail now.")
+
+
+class StableAudioFilenameTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root_dir = self.temp_dir.name
+        os.makedirs(os.path.join(self.root_dir, "voicelines"), exist_ok=True)
+        os.makedirs(os.path.join(self.root_dir, "app"), exist_ok=True)
+
+        with open(os.path.join(self.root_dir, "annotated_script.json"), "w", encoding="utf-8") as f:
+            json.dump({"entries": [], "dictionary": []}, f)
+
+        self.manager = ProjectManager(self.root_dir)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _write_temp_wav(self, name, duration_seconds=1.5):
+        path = os.path.join(self.root_dir, name)
+        sample_rate = 24000
+        samples = np.zeros(int(sample_rate * duration_seconds), dtype=np.float32)
+        sf.write(path, samples, sample_rate)
+        return path
+
+    def test_finalize_generated_audio_uses_chunk_uid_in_filename(self):
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "uid": "chunk-alpha",
+                "speaker": "Narrator",
+                "text": "One two three four five six.",
+                "instruct": "",
+                "status": "generating",
+                "audio_path": None,
+            }
+        ])
+        temp_path = self._write_temp_wav("temp_chunk.wav")
+
+        result = self.manager._finalize_generated_audio(
+            0,
+            "Narrator",
+            "One two three four five six.",
+            temp_path,
+            chunk_uid="chunk-alpha",
+        )
+
+        self.assertEqual(result["status"], "done")
+        self.assertEqual(result["audio_path"], "voicelines/voiceline_chunk-alpha_narrator.mp3")
+
+    def test_inserted_chunk_generation_does_not_collide_with_shifted_chunk_audio(self):
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "uid": "chunk-a",
+                "speaker": "Narrator",
+                "text": "First line has enough words for validation to pass cleanly.",
+                "instruct": "",
+                "status": "done",
+                "audio_path": None,
+            },
+            {
+                "id": 1,
+                "uid": "chunk-b",
+                "speaker": "Narrator",
+                "text": "Second line also has enough words for validation to pass cleanly.",
+                "instruct": "",
+                "status": "done",
+                "audio_path": None,
+            },
+        ])
+
+        original_temp = self._write_temp_wav("temp_original.wav")
+        original = self.manager._finalize_generated_audio(
+            1,
+            "Narrator",
+            "Second line also has enough words for validation to pass cleanly.",
+            original_temp,
+            chunk_uid="chunk-b",
+        )
+
+        chunks = self.manager.insert_chunk(0)
+        inserted = chunks[1]
+        inserted["text"] = "Inserted line also has enough words for validation to pass cleanly."
+        self.manager.save_chunks(chunks)
+
+        inserted_temp = self._write_temp_wav("temp_inserted.wav")
+        generated = self.manager._finalize_generated_audio(
+            1,
+            "Narrator",
+            "Inserted line also has enough words for validation to pass cleanly.",
+            inserted_temp,
+            chunk_uid=inserted["uid"],
+        )
+
+        self.assertNotEqual(original["audio_path"], generated["audio_path"])
+        self.assertIn("chunk-b", original["audio_path"])
+        self.assertIn(inserted["uid"], generated["audio_path"])
+
+
+class InvalidateStaleAudioReferenceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root_dir = self.temp_dir.name
+        os.makedirs(os.path.join(self.root_dir, "voicelines"), exist_ok=True)
+        os.makedirs(os.path.join(self.root_dir, "app"), exist_ok=True)
+
+        with open(os.path.join(self.root_dir, "annotated_script.json"), "w", encoding="utf-8") as f:
+            json.dump({"entries": [], "dictionary": []}, f)
+
+        self.manager = ProjectManager(self.root_dir)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_invalidates_noncanonical_duplicate_legacy_audio_references(self):
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "uid": "u0",
+                "speaker": "Narrator",
+                "text": "One",
+                "instruct": "",
+                "status": "done",
+                "audio_path": "voicelines/voiceline_0001_narrator.mp3",
+                "audio_validation": {"is_valid": True},
+                "auto_regen_count": 0,
+            },
+            {
+                "id": 1,
+                "uid": "u1",
+                "speaker": "Narrator",
+                "text": "Two",
+                "instruct": "",
+                "status": "done",
+                "audio_path": "voicelines/voiceline_0001_narrator.mp3",
+                "audio_validation": {"is_valid": True},
+                "auto_regen_count": 0,
+            },
+            {
+                "id": 2,
+                "uid": "u2",
+                "speaker": "Narrator",
+                "text": "Three",
+                "instruct": "",
+                "status": "done",
+                "audio_path": "voicelines/voiceline_0003_narrator.mp3",
+                "audio_validation": {"is_valid": True},
+                "auto_regen_count": 0,
+            },
+        ])
+
+        result = self.manager.invalidate_stale_audio_references()
+        updated = self.manager.load_chunks()
+
+        self.assertEqual(result["invalidated"], 1)
+        self.assertEqual(updated[0]["audio_path"], "voicelines/voiceline_0001_narrator.mp3")
+        self.assertIsNone(updated[1]["audio_path"])
+        self.assertEqual(updated[1]["status"], "pending")
+        self.assertEqual(updated[2]["audio_path"], "voicelines/voiceline_0003_narrator.mp3")
+
+    def test_invalidates_duplicate_uid_based_audio_for_nonmatching_chunks(self):
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "uid": "chunk-alpha",
+                "speaker": "Narrator",
+                "text": "One",
+                "instruct": "",
+                "status": "done",
+                "audio_path": "voicelines/voiceline_chunk-alpha_narrator.mp3",
+                "audio_validation": {"is_valid": True},
+                "auto_regen_count": 0,
+            },
+            {
+                "id": 1,
+                "uid": "chunk-beta",
+                "speaker": "Narrator",
+                "text": "Two",
+                "instruct": "",
+                "status": "done",
+                "audio_path": "voicelines/voiceline_chunk-alpha_narrator.mp3",
+                "audio_validation": {"is_valid": True},
+                "auto_regen_count": 0,
+            },
+        ])
+
+        result = self.manager.invalidate_stale_audio_references()
+        updated = self.manager.load_chunks()
+
+        self.assertEqual(result["invalidated"], 1)
+        self.assertEqual(updated[0]["audio_path"], "voicelines/voiceline_chunk-alpha_narrator.mp3")
+        self.assertIsNone(updated[1]["audio_path"])
+
+    def test_keeps_unique_legacy_audio_references_even_if_index_has_shifted(self):
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "uid": "u0",
+                "speaker": "Narrator",
+                "text": "Moved but still valid",
+                "instruct": "",
+                "status": "done",
+                "audio_path": "voicelines/voiceline_0005_narrator.mp3",
+                "audio_validation": {"is_valid": True},
+                "auto_regen_count": 0,
+            }
+        ])
+
+        result = self.manager.invalidate_stale_audio_references()
+        updated = self.manager.load_chunks()
+
+        self.assertEqual(result["invalidated"], 0)
+        self.assertEqual(updated[0]["audio_path"], "voicelines/voiceline_0005_narrator.mp3")
+
+
+class RepairLostAudioLinksTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root_dir = self.temp_dir.name
+        os.makedirs(os.path.join(self.root_dir, "voicelines"), exist_ok=True)
+        os.makedirs(os.path.join(self.root_dir, "app"), exist_ok=True)
+
+        with open(os.path.join(self.root_dir, "annotated_script.json"), "w", encoding="utf-8") as f:
+            json.dump({"entries": [], "dictionary": []}, f)
+
+        self.manager = ProjectManager(self.root_dir)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _write_wav(self, relative_path, duration_seconds):
+        full_path = os.path.join(self.root_dir, relative_path)
+        sample_rate = 24000
+        samples = np.zeros(int(sample_rate * duration_seconds), dtype=np.float32)
+        sf.write(full_path, samples, sample_rate)
+        return full_path
+
+    def test_repairs_uid_based_audio_links(self):
+        chunk_uid = "1234567890abcdef1234567890abcdef"
+        self._write_wav(f"voicelines/voiceline_{chunk_uid}_narrator.wav", 3.0)
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "uid": chunk_uid,
+                "speaker": "Narrator",
+                "text": "One two three four five six.",
+                "instruct": "",
+                "status": "pending",
+                "audio_path": None,
+                "audio_validation": None,
+                "auto_regen_count": 0,
+            }
+        ])
+
+        result = self.manager.repair_lost_audio_links()
+        repaired = self.manager.load_chunks()
+
+        self.assertEqual(result["relinked"], 1)
+        self.assertEqual(repaired[0]["status"], "done")
+        self.assertEqual(repaired[0]["audio_path"], f"voicelines/voiceline_{chunk_uid}_narrator.wav")
+        self.assertTrue(repaired[0]["audio_validation"]["is_valid"])
+
+    def test_repairs_legacy_index_audio_links(self):
+        self._write_wav("voicelines/voiceline_0002_narrator.wav", 3.0)
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "uid": "u0",
+                "speaker": "Narrator",
+                "text": "Short intro line.",
+                "instruct": "",
+                "status": "pending",
+                "audio_path": None,
+                "audio_validation": None,
+                "auto_regen_count": 0,
+            },
+            {
+                "id": 1,
+                "uid": "u1",
+                "speaker": "Narrator",
+                "text": "One two three four five six.",
+                "instruct": "",
+                "status": "pending",
+                "audio_path": None,
+                "audio_validation": None,
+                "auto_regen_count": 0,
+            },
+        ])
+
+        result = self.manager.repair_lost_audio_links()
+        repaired = self.manager.load_chunks()
+
+        self.assertEqual(result["relinked"], 1)
+        self.assertIsNone(repaired[0]["audio_path"])
+        self.assertEqual(repaired[1]["status"], "done")
+        self.assertEqual(repaired[1]["audio_path"], "voicelines/voiceline_u1_narrator.wav")
+        self.assertFalse(os.path.exists(os.path.join(self.root_dir, "voicelines/voiceline_0002_narrator.wav")))
+        self.assertTrue(os.path.exists(os.path.join(self.root_dir, "voicelines/voiceline_u1_narrator.wav")))
+
+    def test_repairs_lost_audio_links_via_asr_nearby_match(self):
+        self._write_wav("voicelines/voiceline_0001_narrator.wav", 0.4)
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "uid": "u0",
+                "speaker": "Narrator",
+                "text": "This line should not be matched by transcription.",
+                "instruct": "",
+                "status": "pending",
+                "audio_path": None,
+                "audio_validation": None,
+                "auto_regen_count": 0,
+                "chapter": "Chapter One",
+            },
+            {
+                "id": 1,
+                "uid": "u1",
+                "speaker": "Narrator",
+                "text": "The recovered line belongs here and should be restored.",
+                "instruct": "",
+                "status": "pending",
+                "audio_path": None,
+                "audio_validation": None,
+                "auto_regen_count": 0,
+                "chapter": "Chapter One",
+            },
+        ])
+
+        original_transcribe = self.manager.transcribe_audio_path
+        original_validate = self.manager._validate_audio_path_for_chunk
+        try:
+            self.manager.transcribe_audio_path = lambda relative_path: {
+                "text": "The recovered line belongs here and should be restored.",
+                "normalized_text": self.manager._normalize_asr_text("The recovered line belongs here and should be restored."),
+            }
+            self.manager._validate_audio_path_for_chunk = lambda chunk, path, dictionary_entries: {
+                "is_valid": False,
+                "error": "Duration sanity failed in test fixture.",
+            }
+
+            result = self.manager.repair_lost_audio_links(use_asr=True)
+            repaired = self.manager.load_chunks()
+
+            self.assertEqual(result["relinked"], 0)
+            self.assertEqual(result["asr_relinked"], 1)
+            self.assertIsNone(repaired[0]["audio_path"])
+            self.assertEqual(repaired[1]["audio_path"], "voicelines/voiceline_u1_narrator.wav")
+            self.assertTrue(repaired[1]["audio_validation"]["matched_via_asr"])
+        finally:
+            self.manager.transcribe_audio_path = original_transcribe
+            self.manager._validate_audio_path_for_chunk = original_validate
+
+    def test_asr_similarity_score_penalizes_partial_subset_matches(self):
+        partial = "She knew the stars"
+        full = "She knew the stars in their multitudes, none could stray from their course and Luna not know it."
+        exact = "She knew the stars in their multitudes, none could stray from their course and Luna not know it."
+
+        partial_score = self.manager._asr_similarity_score(partial, full)
+        exact_score = self.manager._asr_similarity_score(exact, full)
+
+        self.assertLess(partial_score, 0.72)
+        self.assertGreater(exact_score, 0.95)
+        self.assertLess(partial_score, exact_score)
+
+    def test_repair_lost_audio_links_does_not_auto_match_partial_asr_transcript(self):
+        self._write_wav("voicelines/voiceline_0001_narrator.wav", 0.4)
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "uid": "u0",
+                "speaker": "Narrator",
+                "text": "She knew the stars in their multitudes, none could stray from their course and Luna not know it.",
+                "instruct": "",
+                "status": "pending",
+                "audio_path": None,
+                "audio_validation": None,
+                "auto_regen_count": 0,
+                "chapter": "Prologue",
+            },
+            {
+                "id": 1,
+                "uid": "u1",
+                "speaker": "Narrator",
+                "text": "In the stillness of her night, Luna watched the horizon and listened for change.",
+                "instruct": "",
+                "status": "pending",
+                "audio_path": None,
+                "audio_validation": None,
+                "auto_regen_count": 0,
+                "chapter": "Prologue",
+            },
+        ])
+
+        original_transcribe = self.manager.transcribe_audio_path
+        original_validate = self.manager._validate_audio_path_for_chunk
+        try:
+            self.manager.transcribe_audio_path = lambda relative_path: {
+                "text": "She knew the stars",
+                "normalized_text": self.manager._normalize_asr_text("She knew the stars"),
+            }
+            self.manager._validate_audio_path_for_chunk = lambda chunk, path, dictionary_entries: {
+                "is_valid": False,
+                "error": "Duration sanity failed in test fixture.",
+            }
+
+            result = self.manager.repair_lost_audio_links(use_asr=True)
+            repaired = self.manager.load_chunks()
+
+            self.assertEqual(result["asr_relinked"], 0)
+            self.assertIsNone(repaired[0]["audio_path"])
+            self.assertIsNone(repaired[1]["audio_path"])
+        finally:
+            self.manager.transcribe_audio_path = original_transcribe
+            self.manager._validate_audio_path_for_chunk = original_validate
+
+    def test_repair_lost_audio_links_prefers_exact_match_anywhere_in_same_chapter(self):
+        self._write_wav("voicelines/voiceline_0001_narrator.wav", 0.4)
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "uid": "u0",
+                "speaker": "Narrator",
+                "text": "This is the legacy anchor line.",
+                "instruct": "",
+                "status": "pending",
+                "audio_path": None,
+                "audio_validation": None,
+                "auto_regen_count": 0,
+                "chapter": "Prologue",
+            },
+            {
+                "id": 1,
+                "uid": "u1",
+                "speaker": "Narrator",
+                "text": "Another nearby line that should not win.",
+                "instruct": "",
+                "status": "pending",
+                "audio_path": None,
+                "audio_validation": None,
+                "auto_regen_count": 0,
+                "chapter": "Prologue",
+            },
+            {
+                "id": 2,
+                "uid": "u2",
+                "speaker": "Narrator",
+                "text": "The exact chapter match lives farther away and should be recovered.",
+                "instruct": "",
+                "status": "pending",
+                "audio_path": None,
+                "audio_validation": None,
+                "auto_regen_count": 0,
+                "chapter": "Prologue",
+            },
+        ])
+
+        original_transcribe = self.manager.transcribe_audio_path
+        original_validate = self.manager._validate_audio_path_for_chunk
+        original_settings = self.manager._load_asr_settings
+        try:
+            self.manager.transcribe_audio_path = lambda relative_path: {
+                "text": "The exact chapter match lives farther away and should be recovered.",
+                "normalized_text": self.manager._normalize_asr_text("The exact chapter match lives farther away and should be recovered."),
+            }
+            self.manager._validate_audio_path_for_chunk = lambda chunk, path, dictionary_entries: {
+                "is_valid": False,
+                "error": "Duration sanity failed in test fixture.",
+            }
+            self.manager._load_asr_settings = lambda: {
+                "enabled": True,
+                "model": "small.en",
+                "language": "en",
+                "device": "auto",
+                "compute_type": "auto",
+                "beam_size": 1,
+                "repair_window": 1,
+                "confidence_threshold": 0.72,
+                "confidence_margin": 0.08,
+            }
+
+            result = self.manager.repair_lost_audio_links(use_asr=True)
+            repaired = self.manager.load_chunks()
+
+            self.assertEqual(result["asr_relinked"], 1)
+            self.assertIsNone(repaired[0]["audio_path"])
+            self.assertIsNone(repaired[1]["audio_path"])
+            self.assertEqual(repaired[2]["audio_path"], "voicelines/voiceline_u2_narrator.wav")
+            self.assertTrue(repaired[2]["audio_validation"]["exact_chapter_match"])
+        finally:
+            self.manager.transcribe_audio_path = original_transcribe
+            self.manager._validate_audio_path_for_chunk = original_validate
+            self.manager._load_asr_settings = original_settings
+
+    def test_repair_lost_audio_links_requires_exact_speaker_match_for_asr(self):
+        self._write_wav("voicelines/voiceline_0001_narrator.wav", 0.4)
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "uid": "u0",
+                "speaker": "Voice",
+                "text": "This exact text should not be assigned to the wrong speaker.",
+                "instruct": "",
+                "status": "pending",
+                "audio_path": None,
+                "audio_validation": None,
+                "auto_regen_count": 0,
+                "chapter": "Prologue",
+            },
+        ])
+
+        original_transcribe = self.manager.transcribe_audio_path
+        original_validate = self.manager._validate_audio_path_for_chunk
+        try:
+            self.manager.transcribe_audio_path = lambda relative_path: {
+                "text": "This exact text should not be assigned to the wrong speaker.",
+                "normalized_text": self.manager._normalize_asr_text("This exact text should not be assigned to the wrong speaker."),
+            }
+            self.manager._validate_audio_path_for_chunk = lambda chunk, path, dictionary_entries: {
+                "is_valid": False,
+                "error": "Duration sanity failed in test fixture.",
+            }
+
+            result = self.manager.repair_lost_audio_links(use_asr=True)
+            repaired = self.manager.load_chunks()
+
+            self.assertEqual(result["asr_relinked"], 0)
+            self.assertIsNone(repaired[0]["audio_path"])
+        finally:
+            self.manager.transcribe_audio_path = original_transcribe
+            self.manager._validate_audio_path_for_chunk = original_validate
 
 
 if __name__ == "__main__":

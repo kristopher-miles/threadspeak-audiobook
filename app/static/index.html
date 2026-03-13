@@ -521,8 +521,22 @@
                             <button class="btn btn-outline-primary btn-sm" id="btn-process-script">
                                 <i class="fas fa-play-circle me-1"></i>Process Script
                             </button>
+                            <button class="btn btn-outline-warning btn-sm" id="btn-pause-processing">
+                                <i class="fas fa-pause me-1"></i>Pause Processing
+                            </button>
+                        </div>
+                        <div class="d-flex flex-wrap gap-3 align-items-center mt-2">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="process-voices-toggle" checked>
+                                <label class="form-check-label" for="process-voices-toggle">Process Voices</label>
+                            </div>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="generate-audio-toggle">
+                                <label class="form-check-label" for="generate-audio-toggle">Generate Audio</label>
+                            </div>
                         </div>
                         <div id="upload-status" class="mt-2"></div>
+                        <div id="processing-workflow-status" class="small text-muted mt-2"></div>
                     </div>
 
                     <div class="d-grid gap-2">
@@ -551,10 +565,15 @@
                     <h5 class="m-0">Saved Scripts</h5>
                 </div>
                 <div class="card-body">
+                    <div class="d-flex flex-wrap gap-2 mb-3">
+                        <button class="btn btn-outline-secondary btn-sm" onclick="downloadProjectArchive()"><i class="fas fa-file-zipper me-1"></i>Save Project ZIP</button>
+                        <button class="btn btn-outline-secondary btn-sm" onclick="triggerProjectArchiveLoad()"><i class="fas fa-folder-open me-1"></i>Load Project ZIP</button>
+                    </div>
                     <div class="input-group mb-3">
                         <input type="text" class="form-control" id="save-script-name" placeholder="Script name (e.g. The Great Gatsby)">
                         <button class="btn btn-outline-primary" onclick="saveScript()"><i class="fas fa-save me-1"></i>Save Current</button>
                     </div>
+                    <input type="file" id="project-archive-input" accept=".zip" style="display:none;" onchange="handleProjectArchiveLoad(this)">
                     <div id="saved-scripts-list">
                         <p class="text-muted mb-0">No saved scripts yet.</p>
                     </div>
@@ -1049,8 +1068,14 @@
                          </table>
                      </div>
                      <div class="d-flex justify-content-end gap-2 mt-3">
+                         <button class="btn btn-outline-success btn-sm" id="btn-repair-lost-audio" onclick="repairLostAudio()">
+                             <i class="fas fa-link me-1"></i>Lost Audio Repair
+                         </button>
                          <button class="btn btn-outline-danger btn-sm" id="btn-repair-legacy-project" onclick="repairLegacyProject()">
                              <i class="fas fa-wrench me-1"></i>Repair Legacy Project
+                         </button>
+                         <button class="btn btn-outline-warning btn-sm" id="btn-invalidate-stale-audio" onclick="invalidateStaleAudio()">
+                             <i class="fas fa-eraser me-1"></i>Invalidate Stale Audio
                          </button>
                          <button class="btn btn-outline-primary btn-sm" id="btn-merge-orphans" onclick="mergeOrphans()">
                              <i class="fas fa-compress-alt me-1"></i>Merge Orphans
@@ -1281,11 +1306,28 @@
 
         // --- API Helpers ---
         const API = {
+            _formatErrorDetail: (detail, fallback) => {
+                if (typeof detail === 'string' && detail.trim()) return detail;
+                if (Array.isArray(detail)) {
+                    const messages = detail.map(item => {
+                        if (typeof item === 'string') return item;
+                        if (!item || typeof item !== 'object') return '';
+                        const loc = Array.isArray(item.loc) ? item.loc.join('.') : '';
+                        const msg = item.msg || item.message || JSON.stringify(item);
+                        return loc ? `${loc}: ${msg}` : msg;
+                    }).filter(Boolean);
+                    if (messages.length) return messages.join('; ');
+                }
+                if (detail && typeof detail === 'object') {
+                    return detail.message || JSON.stringify(detail);
+                }
+                return fallback;
+            },
             _handleError: async (res) => {
                 if (res.ok) return;
                 try {
                     const body = await res.json();
-                    throw new Error(body.detail || res.statusText);
+                    throw new Error(API._formatErrorDetail(body.detail, res.statusText));
                 } catch (e) {
                     if (e.message) throw e;
                     throw new Error(res.statusText);
@@ -1688,6 +1730,88 @@
             return pollLogs('repair', 'script-logs');
         }
 
+        let processingWorkflowPollTimer = null;
+
+        function renderProcessingWorkflowStatus(status) {
+            const el = document.getElementById('processing-workflow-status');
+            const processBtn = document.getElementById('btn-process-script');
+            const pauseBtn = document.getElementById('btn-pause-processing');
+            if (!el || !processBtn || !pauseBtn || !status) return;
+
+            const stageLabelMap = {
+                script: 'Generating script',
+                review: 'Reviewing script',
+                sanity: 'Running sanity check',
+                repair: 'Replacing missing chunks',
+                voices: 'Processing voices',
+                audio: 'Generating audio',
+            };
+            const stageLabel = status.current_stage ? (stageLabelMap[status.current_stage] || status.current_stage) : 'Idle';
+            const options = status.options || {};
+            const completedStages = Array.isArray(status.completed_stages) ? status.completed_stages : [];
+            const optionSummary = [
+                options.process_voices ? 'voices on' : 'voices off',
+                options.generate_audio ? 'audio on' : 'audio off',
+            ].join(', ');
+
+            if (status.running) {
+                processBtn.disabled = true;
+                processBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Processing...';
+                pauseBtn.disabled = false;
+                el.textContent = `Running: ${stageLabel}. Completed: ${completedStages.join(', ') || 'none'}. ${optionSummary}.`;
+            } else if (status.paused) {
+                processBtn.disabled = false;
+                processBtn.innerHTML = '<i class="fas fa-play-circle me-1"></i>Resume Process';
+                pauseBtn.disabled = true;
+                el.textContent = `Paused during ${stageLabel}. Completed: ${completedStages.join(', ') || 'none'}. ${optionSummary}.`;
+            } else {
+                processBtn.disabled = false;
+                processBtn.innerHTML = '<i class="fas fa-play-circle me-1"></i>Process Script';
+                pauseBtn.disabled = true;
+                if (status.last_error) {
+                    el.textContent = status.last_error;
+                } else if (completedStages.length > 0) {
+                    el.textContent = `Last run completed. Completed stages: ${completedStages.join(', ')}.`;
+                } else {
+                    el.textContent = 'Runs script generation, then optionally creates reusable voices and renders audio.';
+                }
+            }
+        }
+
+        async function refreshProcessingWorkflowStatus() {
+            const status = await API.get('/api/status/processing_workflow');
+            renderProcessingWorkflowStatus(status);
+            if (Array.isArray(status.logs) && status.logs.length) {
+                document.getElementById('script-logs').innerText = status.logs.join('\n');
+            }
+            const isActive = !!status.running || !!status.paused;
+            if (isActive && !processingWorkflowPollTimer) {
+                processingWorkflowPollTimer = setInterval(async () => {
+                    try {
+                        const current = await API.get('/api/status/processing_workflow');
+                        renderProcessingWorkflowStatus(current);
+                        if (Array.isArray(current.logs) && current.logs.length) {
+                            document.getElementById('script-logs').innerText = current.logs.join('\n');
+                        }
+                        if (!current.running && !current.paused && processingWorkflowPollTimer) {
+                            clearInterval(processingWorkflowPollTimer);
+                            processingWorkflowPollTimer = null;
+                        }
+                    } catch (e) {
+                        console.error('Processing workflow poll failed', e);
+                        if (processingWorkflowPollTimer) {
+                            clearInterval(processingWorkflowPollTimer);
+                            processingWorkflowPollTimer = null;
+                        }
+                    }
+                }, 1000);
+            } else if (!isActive && processingWorkflowPollTimer) {
+                clearInterval(processingWorkflowPollTimer);
+                processingWorkflowPollTimer = null;
+            }
+            return status;
+        }
+
         document.getElementById('btn-replace-missing-chunks').addEventListener('click', async () => {
             try {
                 await startReplaceMissingChunks();
@@ -1697,22 +1821,30 @@
         });
 
         document.getElementById('btn-process-script').addEventListener('click', async () => {
-            const button = document.getElementById('btn-process-script');
-            const originalHtml = button.innerHTML;
-            button.disabled = true;
-            button.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Processing...';
-
             try {
-                await startGenerateScript();
-                await startReviewScript();
-                await startScriptSanity();
-                await startReplaceMissingChunks();
-                showToast('Process Script completed successfully.', 'success');
+                await API.post('/api/processing/start', {
+                    process_voices: document.getElementById('process-voices-toggle').checked,
+                    generate_audio: document.getElementById('generate-audio-toggle').checked,
+                });
+                await refreshProcessingWorkflowStatus();
+                pollLogs('script', 'script-logs').catch(err => {
+                    console.error('Process script log polling failed', err);
+                });
+                showToast('Processing workflow started.', 'success');
             } catch (e) {
                 showToast('Process Script failed: ' + e.message, 'error');
-            } finally {
-                button.disabled = false;
-                button.innerHTML = originalHtml;
+            }
+        });
+
+        document.getElementById('btn-pause-processing').addEventListener('click', async () => {
+            try {
+                const result = await API.post('/api/processing/pause', {});
+                await refreshProcessingWorkflowStatus();
+                if (result.status === 'pause_requested') {
+                    showToast('Pause requested. Waiting for the current stage to stop safely.', 'warning');
+                }
+            } catch (e) {
+                showToast('Pause request failed: ' + e.message, 'error');
             }
         });
 
@@ -2573,6 +2705,7 @@
         let selectedEditorChapter = WHOLE_PROJECT_CHAPTER_ID;
         let editorChapterAutoSelected = false;
         let audioQueuePollTimer = null;
+        let latestAudioState = null;
         let renderPrepComplete = false;
 
         // Check if any audio is currently playing
@@ -2829,6 +2962,37 @@
             return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[unitIndex]}`;
         }
 
+        function renderEditorProgressBar(chunks, audioState = latestAudioState) {
+            const progressBar = document.getElementById('full-progress-bar');
+            if (!progressBar) return;
+
+            const allChunks = Array.isArray(chunks) ? chunks : [];
+            const nonEmptyChunks = allChunks.filter(chunk => (chunk.text || '').trim());
+            const currentJob = audioState?.current_job || null;
+            const hasActiveAudioWork = Boolean(audioState?.running) && currentJob && (currentJob.total_chunks || 0) > 0;
+
+            if (hasActiveAudioWork) {
+                const processed = Number(currentJob.processed_clips) || 0;
+                const total = Number(currentJob.total_chunks) || 0;
+                const percentage = total > 0 ? Math.max(0, Math.min(100, Math.round((processed / total) * 100))) : 0;
+                progressBar.style.width = `${percentage}%`;
+                progressBar.classList.add('progress-bar-animated', 'progress-bar-striped', 'bg-warning');
+                progressBar.classList.remove('bg-success');
+                progressBar.innerText = `${percentage}% (${processed}/${total})`;
+                progressBar.title = currentJob.label || 'Rendering audio';
+                return;
+            }
+
+            const completed = nonEmptyChunks.filter(chunk => chunk.status === 'done').length;
+            const total = nonEmptyChunks.length;
+            const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
+            progressBar.style.width = `${percentage}%`;
+            progressBar.classList.remove('progress-bar-animated', 'bg-warning');
+            progressBar.classList.add('progress-bar-striped', 'bg-success');
+            progressBar.innerText = `${percentage}% (${completed}/${total})`;
+            progressBar.title = 'Completed audio coverage';
+        }
+
         function renderAudioEstimatePanel(audioState) {
             const metrics = audioState?.metrics || {};
             const etaEl = document.getElementById('editor-estimate-eta');
@@ -2938,9 +3102,11 @@
 
         async function refreshAudioQueueUI() {
             const audioState = await API.get('/api/status/audio');
+            latestAudioState = audioState;
             updateAudioQueueControls(audioState);
             renderAudioQueueStatus(audioState);
             renderAudioEstimatePanel(audioState);
+            renderEditorProgressBar(cachedChunks, audioState);
             return audioState;
         }
 
@@ -3208,6 +3374,63 @@
                 if (button) {
                     button.disabled = false;
                     button.innerHTML = '<i class="fas fa-wrench me-1"></i>Repair Legacy Project';
+                }
+            }
+        };
+
+        window.invalidateStaleAudio = async () => {
+            const button = document.getElementById('btn-invalidate-stale-audio');
+            const confirmed = await showConfirm(
+                'Invalidate only provably stale audio references? This clears chunks that share an audio file with another chunk, while keeping the defensible owner intact.'
+            );
+            if (!confirmed) return;
+
+            try {
+                if (button) {
+                    button.disabled = true;
+                    button.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Invalidating...';
+                }
+
+                const result = await API.post('/api/chunks/invalidate_stale_audio', {});
+                await loadChunks(true);
+                if (result.invalidated > 0) {
+                    showToast(`Invalidated ${result.invalidated} stale audio reference${result.invalidated === 1 ? '' : 's'} across ${result.duplicate_groups} duplicate group${result.duplicate_groups === 1 ? '' : 's'}.`, 'success');
+                } else {
+                    showToast('No stale duplicate audio references were found.', 'warning');
+                }
+            } catch (e) {
+                showToast('Failed to invalidate stale audio: ' + e.message, 'error');
+            } finally {
+                if (button) {
+                    button.disabled = false;
+                    button.innerHTML = '<i class="fas fa-eraser me-1"></i>Invalidate Stale Audio';
+                }
+            }
+        };
+
+        window.repairLostAudio = async () => {
+            const button = document.getElementById('btn-repair-lost-audio');
+            const confirmed = await showConfirm(
+                'Repair lost audio links from the existing clip files on disk? This will first use safe filename matching, then use local ASR transcription to recover additional clips when the match is strong enough.'
+            );
+            if (!confirmed) return;
+
+            try {
+                if (button) {
+                    button.disabled = true;
+                    button.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Relinking...';
+                }
+
+                await API.post('/api/chunks/repair_lost_audio', { use_asr: true });
+                await pollLogs('repair', 'script-logs');
+                await loadChunks(true);
+                showToast('Lost audio repair finished.', 'success', 6000);
+            } catch (e) {
+                showToast('Failed to repair lost audio: ' + e.message, 'error');
+            } finally {
+                if (button) {
+                    button.disabled = false;
+                    button.innerHTML = '<i class="fas fa-link me-1"></i>Lost Audio Repair';
                 }
             }
         };
@@ -3604,6 +3827,7 @@
              try {
                  await repairLegacyProjectBeforeExport();
                  await API.post('/api/merge', {});
+                 markTaskActionRequested('audio', 'merge');
                  // Switch to Result tab and poll
                  document.querySelector('[data-tab="audio"]').click();
                  pollLogs('audio', 'audio-logs');
@@ -3618,6 +3842,7 @@
              try {
                  await repairLegacyProjectBeforeExport();
                  await API.post('/api/merge_optimized', {});
+                 markTaskActionRequested('audio', 'optimized');
                  document.querySelector('[data-tab="audio"]').click();
                  pollLogs('audio', 'audio-logs');
              } catch (e) {
@@ -3737,14 +3962,54 @@
         };
         const activeTaskPolls = new Map();
         const handledTaskCompletions = new Set();
+        const taskCompletionStorage = (() => {
+            try {
+                const probeKey = '__alexandria_task_completion_probe__';
+                sessionStorage.setItem(probeKey, '1');
+                sessionStorage.removeItem(probeKey);
+                return sessionStorage;
+            } catch (_) {
+                return null;
+            }
+        })();
+
+        function buildTaskCompletionKey(kind, taskName, action) {
+            return `alexandria:${kind}:${taskName}:${action}`;
+        }
+
+        function markTaskActionRequested(taskName, action) {
+            if (!taskCompletionStorage) return;
+            taskCompletionStorage.setItem(buildTaskCompletionKey('requested', taskName, action), '1');
+        }
+
+        function clearTaskActionRequested(taskName, action) {
+            if (!taskCompletionStorage) return;
+            taskCompletionStorage.removeItem(buildTaskCompletionKey('requested', taskName, action));
+        }
+
+        function wasTaskActionRequested(taskName, action) {
+            if (!taskCompletionStorage) return false;
+            return taskCompletionStorage.getItem(buildTaskCompletionKey('requested', taskName, action)) === '1';
+        }
+
+        function hasHandledTaskCompletion(taskName, marker) {
+            if (!taskCompletionStorage) return false;
+            return taskCompletionStorage.getItem(buildTaskCompletionKey('handled', taskName, marker)) === '1';
+        }
+
+        function markHandledTaskCompletion(taskName, marker) {
+            if (!taskCompletionStorage) return;
+            taskCompletionStorage.setItem(buildTaskCompletionKey('handled', taskName, marker), '1');
+        }
 
         function shouldHandleTaskCompletion(taskName, marker) {
             if (!marker) return false;
             const key = `${taskName}:${marker}`;
-            if (handledTaskCompletions.has(key)) {
+            if (handledTaskCompletions.has(key) || hasHandledTaskCompletion(taskName, marker)) {
                 return false;
             }
             handledTaskCompletions.add(key);
+            markHandledTaskCompletion(taskName, marker);
             return true;
         }
 
@@ -3767,7 +4032,7 @@
         function finalizeTaskStatus(taskName, status) {
             if (taskName === 'audio' && status.logs.some(l => l.includes("Optimized export complete"))) {
                 const marker = `optimized:${status.merge_progress?.updated_at || status.logs[status.logs.length - 1] || ''}`;
-                if (shouldHandleTaskCompletion(taskName, marker)) {
+                if (wasTaskActionRequested(taskName, 'optimized') && shouldHandleTaskCompletion(taskName, marker)) {
                     const a = document.createElement('a');
                     a.href = `/api/optimized_export?t=${new Date().getTime()}`;
                     a.download = 'optimized_audiobook.zip';
@@ -3775,14 +4040,16 @@
                     a.click();
                     document.body.removeChild(a);
                 }
+                clearTaskActionRequested(taskName, 'optimized');
             } else if (taskName === 'audio' && status.logs.some(l => l.includes("Merge complete"))) {
                 const marker = `merge:${status.merge_progress?.updated_at || status.logs[status.logs.length - 1] || ''}`;
-                if (shouldHandleTaskCompletion(taskName, marker)) {
+                if (wasTaskActionRequested(taskName, 'merge') && shouldHandleTaskCompletion(taskName, marker)) {
                     const audio = document.getElementById('main-audio');
                     audio.src = `/api/audiobook?t=${new Date().getTime()}`;
                     document.getElementById('audio-player-container').style.display = 'block';
                     document.getElementById('download-link').href = audio.src;
                 }
+                clearTaskActionRequested(taskName, 'merge');
             }
             if ((taskName === 'script' || taskName === 'review') && status.logs.some(l => l.includes("completed successfully"))) {
                 const tbody = document.getElementById('chunks-table-body');
@@ -3854,10 +4121,12 @@
 
         window.addEventListener('pageshow', () => {
             reconnectTaskLogs().catch(err => console.error('pageshow reconnect failed', err));
+            refreshProcessingWorkflowStatus().catch(err => console.error('pageshow processing reconnect failed', err));
         });
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden) {
                 reconnectTaskLogs().catch(err => console.error('visibility reconnect failed', err));
+                refreshProcessingWorkflowStatus().catch(err => console.error('visibility processing reconnect failed', err));
             }
         });
 
@@ -3922,6 +4191,89 @@
                 showToast('Error saving script: ' + e.message, 'error');
             }
         }
+
+        window.downloadProjectArchive = async () => {
+            try {
+                const response = await fetch('/api/project_archive');
+                if (!response.ok) {
+                    const raw = await response.text();
+                    let detail = raw;
+                    try {
+                        const parsed = JSON.parse(raw);
+                        detail = parsed.detail || raw;
+                    } catch (_) {}
+                    showToast(detail || 'Failed to save project archive.', 'error');
+                    return;
+                }
+                const blob = await response.blob();
+                const disposition = response.headers.get('Content-Disposition') || '';
+                const match = disposition.match(/filename="?([^"]+)"?/i);
+                const filename = match ? match[1] : 'alexandria_project.zip';
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = filename;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                URL.revokeObjectURL(url);
+            } catch (e) {
+                showToast('Error saving project archive: ' + e.message, 'error');
+            }
+        };
+
+        window.triggerProjectArchiveLoad = () => {
+            const input = document.getElementById('project-archive-input');
+            if (!input) return;
+            input.value = '';
+            input.click();
+        };
+
+        window.handleProjectArchiveLoad = async (input) => {
+            const file = input?.files?.[0];
+            if (!file) return;
+            if (!file.name.toLowerCase().endsWith('.zip')) {
+                showToast('Project archive must be a .zip file.', 'warning');
+                input.value = '';
+                return;
+            }
+            if (!await showConfirm(`Load project archive "${file.name}"? This will replace the current project state and audio segments.`)) {
+                input.value = '';
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const response = await fetch('/api/project_archive/load', {
+                    method: 'POST',
+                    body: formData,
+                });
+                if (!response.ok) {
+                    const raw = await response.text();
+                    let detail = raw;
+                    try {
+                        const parsed = JSON.parse(raw);
+                        detail = parsed.detail || raw;
+                    } catch (_) {}
+                    showToast(detail || 'Failed to load project archive.', 'error');
+                    return;
+                }
+                await response.json();
+                await loadConfig();
+                await loadSavedScripts();
+                await loadVoices();
+                await loadChunks(true);
+                await refreshProcessingWorkflowStatus();
+                await refreshAudioQueueUI().catch(() => null);
+                showToast('Project archive loaded.', 'success');
+            } catch (e) {
+                showToast('Error loading project archive: ' + e.message, 'error');
+            } finally {
+                input.value = '';
+            }
+        };
 
         async function loadScript(name) {
             if (!await showConfirm(`Load "${name}"? This will replace your current script and chunks.`)) return;
@@ -4990,6 +5342,7 @@
         loadDesignedVoices();
         dsbLoadProjects();
         reconnectTaskLogs().catch(err => console.error('initial reconnect failed', err));
+        refreshProcessingWorkflowStatus().catch(err => console.error('initial processing reconnect failed', err));
     </script>
 </body>
 </html>

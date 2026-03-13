@@ -532,6 +532,19 @@ curl -X POST http://127.0.0.1:4200/api/merge
 # Export optimized <=2 hour MP3 parts as a zip
 curl -X POST http://127.0.0.1:4200/api/merge_optimized
 curl http://127.0.0.1:4200/api/optimized_export --output optimized_audiobook.zip
+
+# Check local ASR settings
+curl http://127.0.0.1:4200/api/asr/status
+
+# Transcribe a saved clip locally
+curl -X POST http://127.0.0.1:4200/api/asr/transcribe \
+  -H "Content-Type: application/json" \
+  -d '{"audio_path": "voicelines/voiceline_0001_narrator.mp3"}'
+
+# Repair lost audio using direct matching first, then ASR-assisted recovery
+curl -X POST http://127.0.0.1:4200/api/chunks/repair_lost_audio \
+  -H "Content-Type: application/json" \
+  -d '{"use_asr": true}'
 ```
 
 ### Saved Scripts
@@ -548,6 +561,33 @@ curl -X POST http://127.0.0.1:4200/api/scripts/save \
 curl -X POST http://127.0.0.1:4200/api/scripts/load \
   -H "Content-Type: application/json" \
   -d '{"name": "my-novel"}'
+
+# Download a full project archive (script, current voice assets, source upload, active timeline clips)
+curl http://127.0.0.1:4200/api/project_archive --output alexandria_project.zip
+
+# Load a full project archive ZIP
+curl -X POST http://127.0.0.1:4200/api/project_archive/load \
+  -F "file=@alexandria_project.zip"
+```
+
+Project archives exclude runtime/in-flight files and final merged exports. They also exclude orphaned `voicelines/` files that are no longer referenced by `chunks.json`.
+
+Local ASR uses `faster-whisper` and runs fully on the machine hosting Alexandria. You can override defaults in `app/config.json` with an `asr` block such as:
+
+```json
+{
+  "asr": {
+    "enabled": true,
+    "model": "small.en",
+    "language": "en",
+    "device": "auto",
+    "compute_type": "auto",
+    "beam_size": 1,
+    "repair_window": 12,
+    "confidence_threshold": 0.72,
+    "confidence_margin": 0.08
+  }
+}
 ```
 
 ### Voice Designer
@@ -718,6 +758,10 @@ requests.post(f"{BASE}/api/merge_optimized")
 # ... poll /api/status/audio until "Optimized export complete" appears ...
 with open("optimized_audiobook.zip", "wb") as f:
     f.write(requests.get(f"{BASE}/api/optimized_export").content)
+
+# Save full project state as ZIP
+with open("alexandria_project.zip", "wb") as f:
+    f.write(requests.get(f"{BASE}/api/project_archive").content)
 ```
 
 ## JavaScript Integration
@@ -770,6 +814,10 @@ await fetch(`${BASE}/api/merge`, { method: "POST" });
 await fetch(`${BASE}/api/merge_optimized`, { method: "POST" });
 // ... poll /api/status/audio until complete ...
 // Download zip from GET /api/optimized_export
+
+// Download full project archive ZIP
+const archiveRes = await fetch(`${BASE}/api/project_archive`);
+const archiveBlob = await archiveRes.blob();
 
 // Export to Audacity
 await fetch(`${BASE}/api/export_audacity`, { method: "POST" });
