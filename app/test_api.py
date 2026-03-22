@@ -437,6 +437,10 @@ def test_update_chunk():
     data = r.json()
     if data.get("text") != f"{TEST_PREFIX}updated_text":
         raise TestFailure(f"Chunk text not updated: {data.get('text')}")
+    if data.get("audio_path") is not None:
+        raise TestFailure(f"Chunk audio was not invalidated: {data.get('audio_path')}")
+    if data.get("status") != "pending":
+        raise TestFailure(f"Chunk status was not reset: {data.get('status')}")
 
     # Restore original
     orig = shared.get("chunk0_original", {})

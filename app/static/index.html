@@ -1411,20 +1411,30 @@
 
         // --- Navigation ---
         document.querySelectorAll('.nav-link').forEach(link => {
-            link.addEventListener('click', (e) => {
+            link.addEventListener('click', async (e) => {
+                const target = e.currentTarget;
+                const currentTab = document.querySelector('.nav-link.active')?.dataset.tab || null;
+                const nextTab = target.dataset.tab;
+
+                if (currentTab === 'editor' && nextTab !== 'editor') {
+                    await flushPendingEditorChunkSaves().catch(err => {
+                        console.error('Failed to flush editor saves:', err);
+                    });
+                }
+
                 // Remove active class from all links
                 document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
                 // Add active to clicked
-                e.target.classList.add('active');
+                target.classList.add('active');
 
                 // Hide all tabs
                 document.querySelectorAll('.tab-content').forEach(t => t.style.display = 'none');
                 // Show target tab
-                const targetId = e.target.dataset.tab + '-tab';
+                const targetId = nextTab + '-tab';
                 document.getElementById(targetId).style.display = 'block';
 
                 // Trigger tab specific loads
-                if (e.target.dataset.tab === 'editor') {
+                if (nextTab === 'editor') {
                     syncEditorChunksOnNavigation()
                         .catch(err => console.error('Editor sync error', err))
                         .finally(() => {
@@ -1432,16 +1442,16 @@
                         });
                     refreshAudioQueueUI().catch(err => console.error('Audio queue refresh error', err));
                     ensureAudioQueuePolling();
-                } else if (e.target.dataset.tab === 'voices') {
+                } else if (nextTab === 'voices') {
                     loadVoices();
-                } else if (e.target.dataset.tab === 'dictionary') {
+                } else if (nextTab === 'dictionary') {
                     loadDictionary();
-                } else if (e.target.dataset.tab === 'designer') {
+                } else if (nextTab === 'designer') {
                     loadDesignedVoices();
-                } else if (e.target.dataset.tab === 'training') {
+                } else if (nextTab === 'training') {
                     loadLoraDatasets();
                     loadLoraModels();
-                } else if (e.target.dataset.tab === 'dataset-builder') {
+                } else if (nextTab === 'dataset-builder') {
                     dsbLoadProjects(dsbCurrentProject);
                 }
 
@@ -3166,32 +3176,37 @@
                     }
                 }
 
-                // Update audio player whenever an audio file exists - invalid clips stay playable for debugging.
+                // Update audio player whenever an audio file exists. If the clip
+                // was invalidated, swap back to the "No audio" placeholder right away.
+                const existingAudio = actionContainer.querySelector('audio');
+                const existingNoAudio = actionContainer.querySelector('.text-muted.small');
                 if (chunk.audio_path) {
-                    const existingAudio = actionContainer.querySelector('audio');
-                    const existingNoAudio = actionContainer.querySelector('.text-muted');
                     const newSrc = `/${chunk.audio_path}?t=${Date.now()}`;
                     const nextFingerprint = getChunkAudioFingerprint(chunk);
 
                     if (existingNoAudio) {
-                        // No audio element yet, create one
                         const audioHtml = `<audio class="chunk-audio" data-id="${escapeHtml(chunkRef)}" data-audio-path="${escapeHtml(chunk.audio_path)}" data-audio-fingerprint="${escapeHtml(nextFingerprint)}" controls src="${newSrc}" style="width: 200px; height: 30px;" onplay='stopOthers(${JSON.stringify(chunkRef)})'></audio>`;
                         existingNoAudio.outerHTML = audioHtml;
                     } else if (existingAudio) {
                         const currentFingerprint = existingAudio.dataset.audioFingerprint || '';
-                        if (currentFingerprint !== nextFingerprint) {
+                        if (currentFingerprint !== nextFingerprint || existingAudio.dataset.audioPath !== chunk.audio_path) {
                             existingAudio.dataset.audioPath = chunk.audio_path;
                             existingAudio.dataset.audioFingerprint = nextFingerprint;
                             existingAudio.src = newSrc;
                             existingAudio.load();
                         }
                     }
+                } else if (existingAudio) {
+                    existingAudio.outerHTML = '<span class="text-muted small">No audio</span>';
+                } else if (!existingNoAudio) {
+                    actionContainer.insertAdjacentHTML('beforeend', '<span class="text-muted small">No audio</span>');
                 }
             }
             return true;
         }
 
         window.changeEditorChapter = async (chapterId) => {
+            await flushPendingEditorChunkSaves().catch(err => console.error('Failed to flush editor saves before chapter change:', err));
             selectedEditorChapter = chapterId || WHOLE_PROJECT_CHAPTER_ID;
             stopSequence();
             await loadChunks(true);
@@ -4113,9 +4128,9 @@
                                 <td class="text-center align-middle" style="white-space:nowrap;">
                                     <button class="chunk-expand-btn" onclick="toggleChunkExpand(this)" title="Expand/collapse"><i class="fas fa-chevron-down"></i></button><button class="chunk-expand-btn" onclick='insertChunkAfter(${quotedChunkRef})' title="Insert line below"><i class="fas fa-plus"></i></button><button class="chunk-expand-btn" onclick='deleteChunk(${quotedChunkRef})' title="Delete line"><i class="fas fa-trash" style="color:#dc3545;"></i></button>
                                 </td>
-                                <td><input type="text" class="form-control form-control-sm" value="${chunk.speaker}" onchange='updateChunk(${quotedChunkRef}, "speaker", this.value)'></td>
-                                <td><textarea class="form-control form-control-sm chunk-text" rows="2" onchange='updateChunk(${quotedChunkRef}, "text", this.value)'>${chunk.text}</textarea></td>
-                                <td><textarea class="form-control form-control-sm chunk-instruct" rows="2" onchange='updateChunk(${quotedChunkRef}, "instruct", this.value)' title="Short TTS direction (3-8 words)">${chunk.instruct || ''}</textarea></td>
+                                <td><input type="text" class="form-control form-control-sm" value="${chunk.speaker}" data-editor-field="speaker" oninput='scheduleEditorChunkSave(${quotedChunkRef})' onchange='flushEditorChunkSave(${quotedChunkRef})'></td>
+                                <td><textarea class="form-control form-control-sm chunk-text" rows="2" data-editor-field="text" oninput='scheduleEditorChunkSave(${quotedChunkRef})' onchange='flushEditorChunkSave(${quotedChunkRef})'>${chunk.text}</textarea></td>
+                                <td><textarea class="form-control form-control-sm chunk-instruct" rows="2" data-editor-field="instruct" oninput='scheduleEditorChunkSave(${quotedChunkRef})' onchange='flushEditorChunkSave(${quotedChunkRef})' title="Short TTS direction (3-8 words)">${chunk.instruct || ''}</textarea></td>
                                 <td class="chunk-status-cell"><span class="badge bg-${statusColor}">${chunk.status}</span>${statusDetail}</td>
                                 <td>
                                     <div class="d-flex align-items-center gap-2">
@@ -4562,18 +4577,75 @@
             }
         };
 
+        const _editorChunkSaveTimers = new Map();
+        const _editorChunkSavePromises = new Map();
+        const EDITOR_CHUNK_SAVE_DEBOUNCE_MS = 350;
+
+        function scheduleEditorChunkSave(id) {
+            const key = String(id);
+            const existingTimer = _editorChunkSaveTimers.get(key);
+            if (existingTimer) {
+                clearTimeout(existingTimer);
+            }
+            const timer = setTimeout(() => {
+                _editorChunkSaveTimers.delete(key);
+                if (_editorChunkSavePromises.has(key)) {
+                    return;
+                }
+                const promise = saveRowEdits(key);
+                _editorChunkSavePromises.set(key, promise);
+                promise.then(() => {
+                    _editorChunkSavePromises.delete(key);
+                }).catch(err => {
+                    _editorChunkSavePromises.delete(key);
+                    console.error('Chunk save failed', err);
+                });
+            }, EDITOR_CHUNK_SAVE_DEBOUNCE_MS);
+            _editorChunkSaveTimers.set(key, timer);
+        }
+
+        async function flushEditorChunkSave(id) {
+            const key = String(id);
+            const existingTimer = _editorChunkSaveTimers.get(key);
+            if (existingTimer) {
+                clearTimeout(existingTimer);
+                _editorChunkSaveTimers.delete(key);
+            }
+            const inFlight = _editorChunkSavePromises.get(key);
+            if (inFlight) {
+                return inFlight;
+            }
+            const promise = saveRowEdits(key);
+            _editorChunkSavePromises.set(key, promise);
+            try {
+                return await promise;
+            } finally {
+                _editorChunkSavePromises.delete(key);
+            }
+        }
+
+        async function flushPendingEditorChunkSaves() {
+            const pending = Array.from(new Set([
+                ..._editorChunkSaveTimers.keys(),
+                ..._editorChunkSavePromises.keys(),
+            ]));
+            if (!pending.length) return;
+            for (const id of pending) {
+                await flushEditorChunkSave(id);
+            }
+        }
+
         window.updateChunk = async (id, field, value) => {
             try {
                 const data = {};
                 data[field] = value;
-                await API.post(`/api/chunks/${id}`, data);
+                const updatedChunk = await API.post(`/api/chunks/${id}`, data);
                 const cached = cachedChunks.find(chunk => getChunkRef(chunk) === String(id));
                 if (cached) {
-                    cached[field] = value;
+                    Object.assign(cached, updatedChunk || data);
+                    updateChunkRow(cached);
                     refreshDictionaryCounts(cachedChunks);
                 }
-                // Don't reload entire table to preserve focus, but maybe update status badge if needed
-                // For now, next loadChunks will show updated status (pending)
             } catch (e) {
                 console.error("Update failed", e);
                 showToast("Failed to update chunk", 'error');
@@ -4585,26 +4657,30 @@
             const tr = document.querySelector(`tr[data-id="${id}"]`);
             if (!tr) return;
 
-            const inputs = tr.querySelectorAll('input, textarea');
+            const inputs = tr.querySelectorAll('[data-editor-field]');
             const data = {};
 
             inputs.forEach(input => {
-                const changeHandler = input.getAttribute('onchange');
-                if (changeHandler) {
-                    // Extract field name from onchange="updateChunk(id, 'field', this.value)"
-                    const match = changeHandler.match(/updateChunk\([^,]+,\s*["'](\w+)["']/);
-                    if (match) {
-                        data[match[1]] = input.value;
-                    }
+                const field = input.dataset.editorField;
+                if (field) {
+                    data[field] = input.value;
                 }
             });
 
             // Save all fields at once
             if (Object.keys(data).length > 0) {
                 console.log(`Saving chunk ${id} with data:`, data);
-                await API.post(`/api/chunks/${id}`, data);
+                const updatedChunk = await API.post(`/api/chunks/${id}`, data);
+                const cached = cachedChunks.find(chunk => getChunkRef(chunk) === String(id));
+                if (cached) {
+                    Object.assign(cached, updatedChunk || data);
+                    updateChunkRow(cached);
+                    refreshDictionaryCounts(cachedChunks);
+                }
                 console.log(`Chunk ${id} saved successfully`);
+                return updatedChunk;
             }
+            return null;
         }
 
         window.generateChunk = async (id) => {

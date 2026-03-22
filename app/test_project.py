@@ -2258,8 +2258,14 @@ class RepairLostAudioLinksTests(unittest.TestCase):
         ])
 
         updated = self.manager.update_chunk("u0", {"text": "Updated line."})
+        self.assertIsNone(updated["audio_path"])
+        self.assertIsNone(updated["audio_validation"])
+        self.assertEqual(updated["status"], "pending")
         self.assertNotIn("proofread", updated)
         reloaded = self.manager.load_chunks()
+        self.assertIsNone(reloaded[0]["audio_path"])
+        self.assertIsNone(reloaded[0]["audio_validation"])
+        self.assertEqual(reloaded[0]["status"], "pending")
         self.assertNotIn("proofread", reloaded[0])
 
     def test_prepare_chunk_for_regeneration_removes_old_audio_and_clears_state(self):

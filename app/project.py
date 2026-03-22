@@ -3372,11 +3372,13 @@ class ProjectManager:
             if "instruct" in data: chunk["instruct"] = data["instruct"]
             if "speaker" in data: chunk["speaker"] = data["speaker"]
 
-            # If text/instruct/speaker changed, reset status (but keep old audio until regen)
+            # If text/instruct/speaker changed, invalidate the old audio immediately.
             if "text" in data or "instruct" in data or "speaker" in data:
+                chunk["audio_path"] = None
                 chunk["status"] = "pending"
                 chunk["audio_validation"] = None
                 chunk["auto_regen_count"] = 0
+                chunk.pop("generation_token", None)
                 self._clear_proofread_state(chunk)
 
             print(f"update_chunk({index}): instruct='{chunk.get('instruct', '')}', speaker='{chunk.get('speaker', '')}'")
