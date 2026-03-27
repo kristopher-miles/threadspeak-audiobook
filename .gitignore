@@ -37,13 +37,19 @@ audiobook.mp3
 
 # Generated runtime files
 chunks.json
+paragraphs.json
 audio_queue_state.json
+processing_workflow_state.json
+new_mode_workflow_state.json
 script_sanity_check.json
 script_generation_checkpoint.json
 script_review_checkpoint.json
 temp_batch_*.wav
 temp_chunk_*.wav
 transcription_cache.json
+/merge_audio_*/
+/optimized_export_*/
+/backups/
 app/flash-attention/
 error_screenshot.png
 app/error_screenshot.png
