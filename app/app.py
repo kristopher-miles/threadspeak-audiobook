@@ -25,7 +25,7 @@ from openai import OpenAI
 # Import ProjectManager
 from project import ProjectManager
 from asr import LocalASRUnavailableError
-from default_prompts import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT, load_default_prompts
+from default_prompts import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT, load_default_prompts, DEFAULT_DIALOGUE_IDENTIFICATION_PROMPT, DEFAULT_TEMPERAMENT_EXTRACTION_PROMPT
 from review_prompts import load_review_prompts
 from attribution_prompts import load_attribution_prompts
 from voice_prompt import load_voice_prompt
@@ -68,6 +68,7 @@ PROJECT_ARCHIVE_VERSION = 2
 PROJECT_ARCHIVE_MANIFEST_NAME = "project_archive_manifest.json"
 PROJECT_ARCHIVE_ALLOWED_FILES = {
     "annotated_script.json",
+    "paragraphs.json",
     "voice_config.json",
     "voices.json",
     "chunks.json",
@@ -256,6 +257,10 @@ class GenerationConfig(BaseModel):
     banned_tokens: List[str] = []
     merge_narrators: bool = False
     orphaned_text_to_narrator_on_repair: bool = True
+    legacy_mode: bool = False
+
+class UIConfig(BaseModel):
+    dark_mode: bool = True
 
 class PromptConfig(BaseModel):
     system_prompt: Optional[str] = None
@@ -265,6 +270,19 @@ class PromptConfig(BaseModel):
     attribution_system_prompt: Optional[str] = None
     attribution_user_prompt: Optional[str] = None
     voice_prompt: Optional[str] = None
+    dialogue_identification_system_prompt: Optional[str] = None
+    temperament_extraction_system_prompt: Optional[str] = None
+
+class ExportConfig(BaseModel):
+    silence_between_speakers_ms: int = 500
+    silence_same_speaker_ms: int = 250
+    silence_end_of_chapter_ms: int = 3000
+    silence_paragraph_ms: int = 750
+    normalize_enabled: bool = True
+    normalize_target_lufs_mono: float = -18.0
+    normalize_target_lufs_stereo: float = -16.0
+    normalize_true_peak_dbtp: float = -1.0
+    normalize_lra: float = 11.0
 
 class AppConfig(BaseModel):
     llm: LLMConfig
@@ -272,6 +290,16 @@ class AppConfig(BaseModel):
     prompts: Optional[PromptConfig] = None
     generation: Optional[GenerationConfig] = None
     proofread: Optional[dict] = None
+    export: Optional[ExportConfig] = None
+    ui: Optional[UIConfig] = None
+
+class PreferencesUpdate(BaseModel):
+    legacy_mode: Optional[bool] = None
+    dark_mode: Optional[bool] = None
+
+class GenerationModeLockUpdate(BaseModel):
+    locked: bool = True
+    trigger: Optional[str] = None
 
 class VoiceConfigItem(BaseModel):
     type: str = "custom"
@@ -350,6 +378,10 @@ class VoiceDesignGenerateRequest(BaseModel):
     description: str
     sample_text: Optional[str] = None
     force: bool = False
+
+class VoiceConfigSaveRequest(BaseModel):
+    config: Dict[str, VoiceConfigItem]
+    confirm_invalidation: bool = False
 
 
 class VoiceDescriptionSuggestRequest(BaseModel):
@@ -431,6 +463,11 @@ class ProcessingWorkflowRequest(BaseModel):
     skip_script_stage: bool = False
 
 
+class NewModeWorkflowRequest(BaseModel):
+    process_voices: bool = True
+    generate_audio: bool = False
+
+
 class ScriptGenerationRequest(BaseModel):
     force_reimport: bool = False
     skip_import: bool = False
@@ -444,6 +481,16 @@ ROLLING_AUDIO_SAMPLE_LIMIT = 50
 AUDIO_HEARTBEAT_INTERVAL_SECONDS = 600
 AUDIO_RECOVERY_POLL_SECONDS = 5
 PROCESSING_WORKFLOW_STATE_PATH = os.path.join(ROOT_DIR, "processing_workflow_state.json")
+NEW_MODE_WORKFLOW_STATE_PATH = os.path.join(ROOT_DIR, "new_mode_workflow_state.json")
+NEW_MODE_STAGE_LABELS = {
+    "process_paragraphs": "Process Paragraphs",
+    "assign_dialogue": "Assign Dialogue",
+    "extract_temperament": "Extract Temperament",
+    "create_script": "Create Script",
+    "process_voices": "Process Voices",
+    "render_audio": "Render Audio",
+    "proofread": "Proofread",
+}
 PROCESSING_STAGE_ORDER = ["script", "review", "sanity", "repair", "voices", "audio"]
 PROCESSING_STAGE_MARKERS_KEY = "processing_stage_markers"
 PROCESSING_WORKFLOW_STAGE_LABELS = {
@@ -480,6 +527,23 @@ process_state = {
     "lora_training": {"running": False, "logs": []},
     "dataset_gen": {"running": False, "logs": []},
     "dataset_builder": {"running": False, "logs": [], "cancel": False},
+    "process_paragraphs": {"running": False, "logs": [], "progress": {}},
+    "assign_dialogue": {"running": False, "logs": [], "progress": {}},
+    "extract_temperament": {"running": False, "logs": [], "progress": {}},
+    "create_script": {"running": False, "logs": [], "progress": {}},
+    "new_mode_workflow": {
+        "running": False,
+        "paused": False,
+        "pause_requested": False,
+        "current_stage": None,
+        "completed_stages": [],
+        "options": {"process_voices": True},
+        "logs": [],
+        "last_error": None,
+        "started_at": None,
+        "updated_at": None,
+        "completed_at": None,
+    },
     "processing_workflow": {
         "running": False,
         "paused": False,
@@ -571,6 +635,8 @@ task_state_lock = threading.RLock()
 task_processes = {}
 processing_workflow_lock = threading.RLock()
 processing_workflow_thread = None
+new_mode_workflow_lock = threading.RLock()
+new_mode_workflow_thread = None
 TASK_PROGRESS_PREFIX = "__TASK_PROGRESS__:"
 
 
@@ -1021,6 +1087,8 @@ def _clear_project_derived_state(preserve_input_file=True):
         M4B_PATH,
         AUDIO_QUEUE_STATE_PATH,
         PROCESSING_WORKFLOW_STATE_PATH,
+        NEW_MODE_WORKFLOW_STATE_PATH,
+        os.path.join(ROOT_DIR, "paragraphs.json"),
         SCRIPT_SANITY_PATH,
         os.path.join(ROOT_DIR, "audacity_export.zip"),
         os.path.join(ROOT_DIR, "m4b_cover.jpg"),
@@ -1444,6 +1512,19 @@ def _append_audio_log(message):
 def _append_audio_log_locked(message):
     process_state["audio"]["logs"].append(message)
     _trim_logs(process_state["audio"]["logs"])
+
+
+def _load_export_config() -> ExportConfig:
+    """Load ExportConfig from config.json, falling back to defaults for missing fields."""
+    try:
+        if os.path.exists(CONFIG_PATH):
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            export_raw = raw.get("export") or {}
+            return ExportConfig(**{k: v for k, v in export_raw.items() if k in ExportConfig.model_fields})
+    except Exception:
+        pass
+    return ExportConfig()
 
 
 def _record_audio_recent_job_locked(job):
@@ -2048,10 +2129,23 @@ audio_heartbeat_thread = threading.Thread(target=_audio_heartbeat_daemon, daemon
 audio_heartbeat_thread.start()
 _restore_audio_queue_state()
 
-def run_process(command: List[str], task_name: str, run_id: str):
-    """Run a subprocess and capture logs."""
+def run_process(command: List[str], task_name: str, run_id: str, relay_fn=None):
+    """Run a subprocess and capture logs.
+
+    relay_fn: optional callable(str) called for each logged line in addition
+              to the task-specific log.  Used by workflow runners to mirror
+              subprocess output into a combined workflow log stream.
+    """
     logger.info(f"Starting task {task_name}: {' '.join(command)}")
     success = False
+
+    def _log(message: str):
+        _append_task_log(task_name, run_id, message)
+        if relay_fn:
+            try:
+                relay_fn(message)
+            except Exception:
+                pass
 
     try:
         env = os.environ.copy()
@@ -2083,11 +2177,11 @@ def run_process(command: List[str], task_name: str, run_id: str):
                         _set_task_progress(task_name, run_id, progress)
                         message = (progress or {}).get("message")
                         if message:
-                            _append_task_log(task_name, run_id, str(message))
+                            _log(str(message))
                     except (json.JSONDecodeError, ValueError, TypeError):
-                        _append_task_log(task_name, run_id, log_line)
+                        _log(log_line)
                     continue
-                _append_task_log(task_name, run_id, log_line)
+                _log(log_line)
 
         process.wait()
         if not _task_is_current(task_name, run_id):
@@ -2095,14 +2189,14 @@ def run_process(command: List[str], task_name: str, run_id: str):
         return_code = process.returncode
 
         if return_code == 0:
-            _append_task_log(task_name, run_id, f"Task {task_name} completed successfully.")
+            _log(f"Task {task_name} completed successfully.")
             success = True
         else:
-            _append_task_log(task_name, run_id, f"Task {task_name} failed with return code {return_code}.")
+            _log(f"Task {task_name} failed with return code {return_code}.")
 
     except Exception as e:
         logger.error(f"Error running {task_name}: {e}")
-        _append_task_log(task_name, run_id, f"Error: {str(e)}")
+        _log(f"Error: {str(e)}")
     finally:
         _finish_task_run(task_name, run_id, locals().get("process"))
     return success
@@ -2435,6 +2529,67 @@ def run_lost_audio_repair_task(run_id: str, use_asr: bool):
     return success
 
 
+def _run_assign_dialogue_task(run_id: str, paragraphs_path: str, config_path: str):
+    run_process(
+        [sys.executable, "-u", "assign_dialogue.py", paragraphs_path, config_path],
+        "assign_dialogue",
+        run_id,
+    )
+
+
+def _run_extract_temperament_task(run_id: str, paragraphs_path: str, config_path: str):
+    run_process(
+        [sys.executable, "-u", "extract_temperament.py", paragraphs_path, config_path],
+        "extract_temperament",
+        run_id,
+    )
+
+
+def _run_create_script_task(run_id: str, paragraphs_path: str, voice_config_path: str,
+                            script_output_path: str, chunks_output_path: str):
+    # ── Error correction: retry dialogue-error paragraphs before building script ──
+    try:
+        with open(paragraphs_path, "r", encoding="utf-8") as f:
+            pdata = json.load(f)
+        dialogue_errors = pdata.get("dialogue_errors", [])
+    except Exception:
+        dialogue_errors = []
+
+    retry_attempts = 0
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        tts = cfg.get("tts", {})
+        if tts.get("auto_regenerate_bad_clips", False):
+            retry_attempts = max(0, int(tts.get("auto_regenerate_bad_clip_attempts", 3) or 0))
+    except Exception:
+        pass
+
+    if dialogue_errors and retry_attempts > 0:
+        run_process(
+            [sys.executable, "-u", "assign_dialogue.py",
+             paragraphs_path, CONFIG_PATH, "--retry-errors", str(retry_attempts)],
+            "create_script",
+            run_id,
+        )
+
+    # ── Build the script ──────────────────────────────────────────────────────
+    run_process(
+        [sys.executable, "-u", "create_script.py",
+         paragraphs_path, voice_config_path, script_output_path, chunks_output_path],
+        "create_script",
+        run_id,
+    )
+
+
+def _run_process_paragraphs_task(run_id: str, input_file: str, output_path: str):
+    run_process(
+        [sys.executable, "-u", "process_paragraphs.py", input_file, output_path],
+        "process_paragraphs",
+        run_id,
+    )
+
+
 def _run_generate_script_task(run_id: str):
     state = _load_project_state_payload()
     input_file = state.get("input_file_path")
@@ -2607,6 +2762,26 @@ def _execute_processing_workflow_stage(stage_name):
     if not success:
         raise RuntimeError(f"{PROCESSING_WORKFLOW_STAGE_LABELS.get(stage_name, stage_name)} failed.")
 
+def _maybe_autosave_after_legacy_stage(stage_name: str):
+    if stage_name == "repair":
+        result = _autosave_current_script_for_workflow(
+            purge_existing=False,
+            trigger="legacy_after_repair",
+        )
+        with processing_workflow_lock:
+            _append_processing_workflow_log_locked(
+                f"Auto-saved script '{result['name']}' after Replace Missing Chunks."
+            )
+    elif stage_name == "voices":
+        result = _autosave_current_script_for_workflow(
+            purge_existing=True,
+            trigger="legacy_after_voices",
+        )
+        with processing_workflow_lock:
+            _append_processing_workflow_log_locked(
+                f"Auto-saved script '{result['name']}' after Process Voices (before audio generation)."
+            )
+
 
 def _processing_workflow_runner():
     global processing_workflow_thread
@@ -2627,6 +2802,7 @@ def _processing_workflow_runner():
             try:
                 _execute_processing_workflow_stage(pending_stage)
                 _mark_processing_workflow_stage_complete(pending_stage)
+                _maybe_autosave_after_legacy_stage(pending_stage)
             except WorkflowPauseRequested:
                 _set_processing_workflow_paused(pending_stage)
                 break
@@ -2680,6 +2856,335 @@ def _restore_processing_workflow_state():
 
 _restore_processing_workflow_state()
 
+
+# ── New-mode workflow ──────────────────────────────────────────────────────────
+
+def _new_mode_workflow_initial_state():
+    return {
+        "running": False,
+        "paused": False,
+        "pause_requested": False,
+        "current_stage": None,
+        "completed_stages": [],
+        "options": {"process_voices": True, "generate_audio": False},
+        "logs": [],
+        "last_error": None,
+        "started_at": None,
+        "updated_at": None,
+        "completed_at": None,
+    }
+
+
+def _new_mode_stage_sequence(options=None) -> list:
+    options = options or process_state["new_mode_workflow"].get("options") or {}
+    stages = ["process_paragraphs", "assign_dialogue", "extract_temperament", "create_script"]
+    if options.get("process_voices", True):
+        stages.append("process_voices")
+    if options.get("generate_audio", False):
+        stages.append("render_audio")
+        stages.append("proofread")
+    return stages
+
+
+def _persist_new_mode_workflow_state_locked():
+    _atomic_json_write(NEW_MODE_WORKFLOW_STATE_PATH, process_state["new_mode_workflow"])
+
+
+def _append_new_mode_workflow_log_locked(message: str):
+    process_state["new_mode_workflow"]["logs"].append(message)
+    _trim_logs(process_state["new_mode_workflow"]["logs"])
+    process_state["new_mode_workflow"]["updated_at"] = time.time()
+    _persist_new_mode_workflow_state_locked()
+
+
+def _new_mode_workflow_is_pause_requested() -> bool:
+    with new_mode_workflow_lock:
+        return bool(process_state["new_mode_workflow"].get("pause_requested"))
+
+
+def _derived_new_mode_completed_stages(options=None) -> list:
+    """Detect already-complete stages from file state (used on fresh start)."""
+    options = options or {}
+    paragraphs_path = os.path.join(ROOT_DIR, "paragraphs.json")
+    chunks_path = CHUNKS_PATH
+    script_path = os.path.join(ROOT_DIR, "annotated_script.json")
+
+    pdata: dict = {}
+    if os.path.exists(paragraphs_path):
+        try:
+            with open(paragraphs_path, "r", encoding="utf-8") as f:
+                pdata = json.load(f)
+        except Exception:
+            pass
+
+    completed = []
+    if pdata.get("paragraphs"):
+        completed.append("process_paragraphs")
+    if pdata.get("dialogue_assignment_complete"):
+        completed.append("assign_dialogue")
+    if pdata.get("temperament_extraction_complete"):
+        completed.append("extract_temperament")
+    if os.path.exists(script_path) and os.path.exists(chunks_path):
+        completed.append("create_script")
+
+    # process_voices: all voice entries in voice_config have a ref_audio file
+    if options.get("process_voices", True) and os.path.exists(VOICE_CONFIG_PATH):
+        try:
+            with open(VOICE_CONFIG_PATH, "r", encoding="utf-8") as f:
+                vc = json.load(f)
+            if isinstance(vc, dict) and vc:
+                all_have_audio = all(
+                    bool((v.get("ref_audio") or "").strip())
+                    and os.path.exists(os.path.join(ROOT_DIR, v["ref_audio"].strip()))
+                    for v in vc.values()
+                    if isinstance(v, dict) and not (v.get("alias") or "").strip()
+                )
+                if all_have_audio:
+                    completed.append("process_voices")
+        except Exception:
+            pass
+
+    return completed
+
+
+def _set_new_mode_workflow_paused(stage_name=None):
+    with new_mode_workflow_lock:
+        process_state["new_mode_workflow"]["running"] = False
+        process_state["new_mode_workflow"]["paused"] = True
+        process_state["new_mode_workflow"]["pause_requested"] = False
+        if stage_name is not None:
+            process_state["new_mode_workflow"]["current_stage"] = stage_name
+        _append_new_mode_workflow_log_locked(
+            "Processing paused. Click 'Process Script' again to resume."
+        )
+
+
+def _set_new_mode_workflow_failed(stage_name: str, message: str):
+    with new_mode_workflow_lock:
+        process_state["new_mode_workflow"]["running"] = False
+        process_state["new_mode_workflow"]["paused"] = False
+        process_state["new_mode_workflow"]["pause_requested"] = False
+        process_state["new_mode_workflow"]["current_stage"] = stage_name
+        process_state["new_mode_workflow"]["last_error"] = message
+        _append_new_mode_workflow_log_locked(f"ERROR: {message}")
+
+
+def _set_new_mode_workflow_completed():
+    with new_mode_workflow_lock:
+        process_state["new_mode_workflow"]["running"] = False
+        process_state["new_mode_workflow"]["paused"] = False
+        process_state["new_mode_workflow"]["pause_requested"] = False
+        process_state["new_mode_workflow"]["current_stage"] = None
+        process_state["new_mode_workflow"]["last_error"] = None
+        process_state["new_mode_workflow"]["completed_at"] = time.time()
+        options = process_state["new_mode_workflow"].get("options") or {}
+        if options.get("generate_audio"):
+            _append_new_mode_workflow_log_locked(
+                "All steps complete. Book is ready for export."
+            )
+        else:
+            _append_new_mode_workflow_log_locked(
+                "All steps complete. Script is ready in the Editor tab."
+            )
+
+
+def _run_new_mode_workflow_stage(stage_name: str):
+    """Run a single new-mode stage as a subprocess, blocking until done.
+
+    Raises WorkflowPauseRequested if pause was requested.
+    Raises RuntimeError if the subprocess fails.
+    """
+    with new_mode_workflow_lock:
+        process_state["new_mode_workflow"]["current_stage"] = stage_name
+        process_state["new_mode_workflow"]["last_error"] = None
+        _append_new_mode_workflow_log_locked(
+            f"=== {NEW_MODE_STAGE_LABELS.get(stage_name, stage_name)} ==="
+        )
+
+    def relay(message: str):
+        with new_mode_workflow_lock:
+            _append_new_mode_workflow_log_locked(message)
+
+    paragraphs_path = os.path.join(ROOT_DIR, "paragraphs.json")
+    config_path = os.path.join(BASE_DIR, "config.json")
+
+    if stage_name == "process_voices":
+        # Voices task uses the "voices" task slot, not the stage name
+        run_id = _start_task_run("voices")
+        success = run_voice_processing_task(
+            run_id,
+            stop_check=_new_mode_workflow_is_pause_requested,
+            relay_fn=relay,
+        )
+    elif stage_name == "render_audio":
+        # Audio generation uses the audio queue directly — no subprocess slot needed
+        with audio_queue_lock:
+            _refresh_audio_process_state_locked()
+            has_existing_audio_work = bool(audio_current_job is not None or audio_queue)
+
+        if not has_existing_audio_work:
+            indices = _workflow_pending_audio_indices()
+            if not indices:
+                with new_mode_workflow_lock:
+                    _append_new_mode_workflow_log_locked("No pending audio segments. Skipping render.")
+                return
+            settings = _load_audio_worker_settings()
+            kind = "parallel" if settings["tts_cfg"].get("mode") == "external" else "batch_fast"
+            _enqueue_audio_job(kind, indices, label="Workflow audio generation", scope="workflow")
+
+        while True:
+            if _new_mode_workflow_is_pause_requested():
+                _pause_audio_queue_for_workflow()
+                raise WorkflowPauseRequested()
+            with audio_queue_lock:
+                _refresh_audio_process_state_locked()
+                has_audio_work = bool(audio_current_job is not None or audio_queue)
+            if not has_audio_work:
+                break
+            time.sleep(1)
+
+        remaining = _workflow_pending_audio_indices()
+        if remaining:
+            raise RuntimeError(
+                f"Audio generation stopped with {len(remaining)} pending segment(s) remaining."
+            )
+        return
+    else:
+        run_id = _start_task_run(stage_name)
+        if stage_name == "process_paragraphs":
+            state = _load_project_state_payload()
+            input_file = state.get("input_file_path", "")
+            success = run_process(
+                [sys.executable, "-u", "process_paragraphs.py", input_file, paragraphs_path],
+                stage_name, run_id, relay_fn=relay,
+            )
+        elif stage_name == "assign_dialogue":
+            success = run_process(
+                [sys.executable, "-u", "assign_dialogue.py", paragraphs_path, config_path],
+                stage_name, run_id, relay_fn=relay,
+            )
+        elif stage_name == "extract_temperament":
+            success = run_process(
+                [sys.executable, "-u", "extract_temperament.py", paragraphs_path, config_path],
+                stage_name, run_id, relay_fn=relay,
+            )
+        elif stage_name == "create_script":
+            script_path = os.path.join(ROOT_DIR, "annotated_script.json")
+            success = run_process(
+                [sys.executable, "-u", "create_script.py",
+                 paragraphs_path, VOICE_CONFIG_PATH, script_path, CHUNKS_PATH],
+                stage_name, run_id, relay_fn=relay,
+            )
+        elif stage_name == "proofread":
+            success = run_process(
+                [sys.executable, "-u", "proofread_runner.py", ROOT_DIR, "0.8", "__ALL__"],
+                "proofread", run_id, relay_fn=relay,
+            )
+        else:
+            raise RuntimeError(f"Unknown new-mode stage: {stage_name}")
+
+    if _new_mode_workflow_is_pause_requested():
+        raise WorkflowPauseRequested()
+    if not success:
+        raise RuntimeError(
+            f"{NEW_MODE_STAGE_LABELS.get(stage_name, stage_name)} failed."
+        )
+
+def _maybe_autosave_after_new_mode_stage(stage_name: str):
+    if stage_name == "create_script":
+        result = _autosave_current_script_for_workflow(
+            purge_existing=False,
+            trigger="new_mode_after_create_script",
+        )
+        with new_mode_workflow_lock:
+            _append_new_mode_workflow_log_locked(
+                f"Auto-saved script '{result['name']}' after Create Script."
+            )
+    elif stage_name == "process_voices":
+        result = _autosave_current_script_for_workflow(
+            purge_existing=True,
+            trigger="new_mode_after_process_voices",
+        )
+        with new_mode_workflow_lock:
+            _append_new_mode_workflow_log_locked(
+                f"Auto-saved script '{result['name']}' after Process Voices (before audio generation)."
+            )
+
+
+def _new_mode_workflow_runner():
+    global new_mode_workflow_thread
+    try:
+        while True:
+            with new_mode_workflow_lock:
+                state = dict(process_state["new_mode_workflow"])
+            if not state.get("running"):
+                break
+
+            options = state.get("options") or {}
+            completed = list(state.get("completed_stages") or [])
+            pending = next(
+                (s for s in _new_mode_stage_sequence(options) if s not in completed),
+                None,
+            )
+            if pending is None:
+                _set_new_mode_workflow_completed()
+                break
+
+            try:
+                _run_new_mode_workflow_stage(pending)
+                with new_mode_workflow_lock:
+                    done = list(process_state["new_mode_workflow"].get("completed_stages") or [])
+                    if pending not in done:
+                        done.append(pending)
+                    process_state["new_mode_workflow"]["completed_stages"] = done
+                    _append_new_mode_workflow_log_locked(
+                        f"{NEW_MODE_STAGE_LABELS.get(pending, pending)} complete."
+                    )
+                _maybe_autosave_after_new_mode_stage(pending)
+            except WorkflowPauseRequested:
+                _set_new_mode_workflow_paused(pending)
+                break
+            except Exception as e:
+                logger.error("New-mode workflow failed at %s: %s", pending, e)
+                _set_new_mode_workflow_failed(pending, str(e))
+                break
+    finally:
+        with new_mode_workflow_lock:
+            new_mode_workflow_thread = None
+
+
+def _start_new_mode_workflow_thread_locked():
+    global new_mode_workflow_thread
+    if new_mode_workflow_thread is not None and new_mode_workflow_thread.is_alive():
+        return
+    new_mode_workflow_thread = threading.Thread(
+        target=_new_mode_workflow_runner,
+        daemon=True,
+        name="new-mode-workflow",
+    )
+    new_mode_workflow_thread.start()
+
+
+def _restore_new_mode_workflow_state():
+    if not os.path.exists(NEW_MODE_WORKFLOW_STATE_PATH):
+        return
+    try:
+        with open(NEW_MODE_WORKFLOW_STATE_PATH, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        logger.warning("Failed to restore new mode workflow state: %s", e)
+        return
+    restored = _new_mode_workflow_initial_state()
+    restored.update(payload)
+    process_state["new_mode_workflow"] = restored
+    if restored.get("running") and not restored.get("paused"):
+        with new_mode_workflow_lock:
+            _append_new_mode_workflow_log_locked("Recovered workflow after app restart.")
+            _start_new_mode_workflow_thread_locked()
+
+
+_restore_new_mode_workflow_state()
+
 # Endpoints
 
 @app.get("/")
@@ -2719,7 +3224,24 @@ async def get_config():
         },
         "proofread": {
             "certainty_threshold": 1.0
-        }
+        },
+        "generation": {
+            "legacy_mode": False,
+        },
+        "export": {
+            "silence_between_speakers_ms": 500,
+            "silence_same_speaker_ms": 250,
+            "silence_end_of_chapter_ms": 3000,
+            "silence_paragraph_ms": 750,
+            "normalize_enabled": True,
+            "normalize_target_lufs_mono": -18.0,
+            "normalize_target_lufs_stereo": -16.0,
+            "normalize_true_peak_dbtp": -1.0,
+            "normalize_lra": 11.0,
+        },
+        "ui": {
+            "dark_mode": True,
+        },
     }
 
     if not os.path.exists(CONFIG_PATH):
@@ -2767,6 +3289,8 @@ async def get_config():
             prompts["voice_prompt"] = load_voice_prompt()
         except RuntimeError:
             pass
+        prompts["dialogue_identification_system_prompt"] = DEFAULT_DIALOGUE_IDENTIFICATION_PROMPT
+        prompts["temperament_extraction_system_prompt"] = DEFAULT_TEMPERAMENT_EXTRACTION_PROMPT
         config["prompts"] = prompts
         config_changed = True
     else:
@@ -2806,6 +3330,12 @@ async def get_config():
                 config_changed = True
             except RuntimeError:
                 pass
+        if not config["prompts"].get("dialogue_identification_system_prompt"):
+            config["prompts"]["dialogue_identification_system_prompt"] = DEFAULT_DIALOGUE_IDENTIFICATION_PROMPT
+            config_changed = True
+        if not config["prompts"].get("temperament_extraction_system_prompt"):
+            config["prompts"]["temperament_extraction_system_prompt"] = DEFAULT_TEMPERAMENT_EXTRACTION_PROMPT
+            config_changed = True
 
     # Include current input file info if available
     if "proofread" not in config or not isinstance(config.get("proofread"), dict):
@@ -2815,6 +3345,36 @@ async def get_config():
         if config["proofread"].get("certainty_threshold") is None:
             config["proofread"]["certainty_threshold"] = 1.0
             config_changed = True
+
+    export_defaults = default_config["export"]
+    if "export" not in config or not isinstance(config.get("export"), dict):
+        config["export"] = dict(export_defaults)
+        config_changed = True
+    else:
+        for key, value in export_defaults.items():
+            if config["export"].get(key) is None:
+                config["export"][key] = value
+                config_changed = True
+
+    generation_defaults = default_config["generation"]
+    if "generation" not in config or not isinstance(config.get("generation"), dict):
+        config["generation"] = dict(generation_defaults)
+        config_changed = True
+    else:
+        for key, value in generation_defaults.items():
+            if config["generation"].get(key) is None:
+                config["generation"][key] = value
+                config_changed = True
+
+    ui_defaults = default_config["ui"]
+    if "ui" not in config or not isinstance(config.get("ui"), dict):
+        config["ui"] = dict(ui_defaults)
+        config_changed = True
+    else:
+        for key, value in ui_defaults.items():
+            if config["ui"].get(key) is None:
+                config["ui"][key] = value
+                config_changed = True
 
     config["render_prep_complete"] = False
     state_path = os.path.join(ROOT_DIR, "state.json")
@@ -2826,8 +3386,13 @@ async def get_config():
             if input_path and os.path.exists(input_path):
                 config["current_file"] = os.path.basename(input_path)
             config["render_prep_complete"] = bool(state.get("render_prep_complete"))
+            config["generation_mode_locked"] = bool(state.get("generation_mode_locked"))
         except (json.JSONDecodeError, ValueError):
             pass
+    else:
+        config["generation_mode_locked"] = False
+    if "generation_mode_locked" not in config:
+        config["generation_mode_locked"] = False
 
     if config_changed:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -2858,6 +3423,8 @@ async def get_default_prompts():
         result["voice_prompt"] = load_voice_prompt()
     except RuntimeError:
         pass
+    result["dialogue_identification_system_prompt"] = DEFAULT_DIALOGUE_IDENTIFICATION_PROMPT
+    result["temperament_extraction_system_prompt"] = DEFAULT_TEMPERAMENT_EXTRACTION_PROMPT
     return result
 
 @app.post("/api/config")
@@ -2883,12 +3450,57 @@ async def save_config(config: AppConfig):
             except RuntimeError:
                 pass
     payload["prompts"] = prompts
+    if payload.get("ui") is None and isinstance(existing_config.get("ui"), dict):
+        payload["ui"] = existing_config.get("ui")
 
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
     # Reset engine so it picks up new TTS settings on next use
     project_manager.engine = None
     return {"status": "saved"}
+
+@app.post("/api/config/preferences")
+async def save_preferences(update: PreferencesUpdate):
+    existing_config = {}
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                existing_config = json.load(f)
+        except (json.JSONDecodeError, ValueError):
+            existing_config = {}
+
+    generation_cfg = existing_config.get("generation")
+    if not isinstance(generation_cfg, dict):
+        generation_cfg = {}
+    ui_cfg = existing_config.get("ui")
+    if not isinstance(ui_cfg, dict):
+        ui_cfg = {}
+
+    if update.legacy_mode is not None:
+        generation_cfg["legacy_mode"] = bool(update.legacy_mode)
+    if update.dark_mode is not None:
+        ui_cfg["dark_mode"] = bool(update.dark_mode)
+
+    existing_config["generation"] = generation_cfg
+    existing_config["ui"] = ui_cfg
+
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(existing_config, f, indent=2, ensure_ascii=False)
+
+    return {"status": "saved"}
+
+@app.post("/api/generation_mode_lock")
+async def set_generation_mode_lock(update: GenerationModeLockUpdate):
+    state = _load_project_state_payload()
+    state["generation_mode_locked"] = bool(update.locked)
+    if update.trigger:
+        state["generation_mode_lock_trigger"] = str(update.trigger)
+    _save_project_state_payload(state)
+    return {
+        "status": "saved",
+        "locked": bool(state.get("generation_mode_locked")),
+        "trigger": state.get("generation_mode_lock_trigger"),
+    }
 
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...)):
@@ -2973,6 +3585,8 @@ async def reset_project():
         M4B_PATH,
         AUDIO_QUEUE_STATE_PATH,
         PROCESSING_WORKFLOW_STATE_PATH,
+        NEW_MODE_WORKFLOW_STATE_PATH,
+        os.path.join(ROOT_DIR, "paragraphs.json"),
         SCRIPT_SANITY_PATH,
         os.path.join(ROOT_DIR, "audacity_export.zip"),
         os.path.join(ROOT_DIR, "m4b_cover.jpg"),
@@ -3015,7 +3629,8 @@ async def reset_project():
     with project_manager._transcription_cache_lock:
         project_manager._transcription_cache = None
 
-    for task_name in ("script", "voices", "proofread", "review", "sanity", "repair", "audacity_export", "m4b_export"):
+    for task_name in ("script", "voices", "proofread", "review", "sanity", "repair", "audacity_export", "m4b_export",
+                      "process_paragraphs", "assign_dialogue", "extract_temperament", "create_script"):
         process_state[task_name]["logs"] = []
         process_state[task_name]["running"] = False
         if "progress" in process_state[task_name]:
@@ -3025,10 +3640,175 @@ async def reset_project():
         process_state["processing_workflow"] = _new_processing_workflow_state()
         _persist_processing_workflow_state_locked()
 
+    with new_mode_workflow_lock:
+        process_state["new_mode_workflow"] = _new_mode_workflow_initial_state()
+        _persist_new_mode_workflow_state_locked()
+
     project_manager.engine = None
 
     logger.info("Project state reset")
     return {"status": "reset", "removed": removed}
+
+@app.post("/api/assign_dialogue")
+async def start_assign_dialogue(background_tasks: BackgroundTasks):
+    _ensure_task_not_running("assign_dialogue", "Dialogue assignment is already running.")
+
+    paragraphs_path = os.path.join(ROOT_DIR, "paragraphs.json")
+    if not os.path.exists(paragraphs_path):
+        raise HTTPException(
+            status_code=400,
+            detail="No paragraph data found. Run 'Process Paragraphs' first.",
+        )
+    try:
+        with open(paragraphs_path, "r", encoding="utf-8") as f:
+            pdata = json.load(f)
+        if not pdata.get("paragraphs"):
+            raise ValueError("empty")
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Paragraph data is empty or corrupt. Re-run 'Process Paragraphs'.",
+        )
+
+    config_path = os.path.join(BASE_DIR, "config.json")
+    run_id = _start_task_run("assign_dialogue")
+    background_tasks.add_task(_run_assign_dialogue_task, run_id, paragraphs_path, config_path)
+    return {"status": "started", "run_id": run_id}
+
+
+@app.post("/api/extract_temperament")
+async def start_extract_temperament(background_tasks: BackgroundTasks):
+    _ensure_task_not_running("extract_temperament", "Temperament extraction is already running.")
+
+    paragraphs_path = os.path.join(ROOT_DIR, "paragraphs.json")
+    if not os.path.exists(paragraphs_path):
+        raise HTTPException(
+            status_code=400,
+            detail="No paragraph data found. Run 'Process Paragraphs' first.",
+        )
+    try:
+        with open(paragraphs_path, "r", encoding="utf-8") as f:
+            pdata = json.load(f)
+        if not pdata.get("paragraphs"):
+            raise ValueError("empty")
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Paragraph data is empty or corrupt. Re-run 'Process Paragraphs'.",
+        )
+
+    config_path = os.path.join(BASE_DIR, "config.json")
+    run_id = _start_task_run("extract_temperament")
+    background_tasks.add_task(_run_extract_temperament_task, run_id, paragraphs_path, config_path)
+    return {"status": "started", "run_id": run_id}
+
+
+@app.get("/api/script_info")
+async def get_script_info():
+    """Return a lightweight summary of the current script state."""
+    script_path = os.path.join(ROOT_DIR, "annotated_script.json")
+    if not os.path.exists(script_path):
+        return {"entry_count": 0}
+    try:
+        with open(script_path, "r", encoding="utf-8") as f:
+            doc = json.load(f)
+        entries = doc.get("entries", []) if isinstance(doc, dict) else doc
+        return {"entry_count": len(entries) if isinstance(entries, list) else 0}
+    except Exception:
+        return {"entry_count": 0}
+
+
+@app.post("/api/reset_new_mode")
+async def reset_new_mode():
+    """Clear the script, chunks, and voice config so Create Script can start fresh."""
+    removed = []
+    for path in (
+        os.path.join(ROOT_DIR, "annotated_script.json"),
+        CHUNKS_PATH,
+        VOICE_CONFIG_PATH,
+    ):
+        if os.path.exists(path):
+            os.remove(path)
+            removed.append(os.path.basename(path))
+    # Also reset the in-memory task state so _ensure_task_not_running won't block
+    with task_state_lock:
+        state = process_state.get("create_script")
+        if state:
+            state["running"] = False
+            state["logs"] = []
+            state["progress"] = {}
+    return {"status": "reset", "removed": removed}
+
+
+@app.post("/api/create_script")
+async def start_create_script(background_tasks: BackgroundTasks):
+    _ensure_task_not_running("create_script", "Script creation is already running.")
+
+    paragraphs_path    = os.path.join(ROOT_DIR, "paragraphs.json")
+    voice_config_path  = VOICE_CONFIG_PATH
+    script_output_path = os.path.join(ROOT_DIR, "annotated_script.json")
+    chunks_output_path = CHUNKS_PATH
+
+    if not os.path.exists(paragraphs_path):
+        raise HTTPException(
+            status_code=400,
+            detail="No paragraph data found. Run 'Process Paragraphs' first.",
+        )
+    try:
+        with open(paragraphs_path, "r", encoding="utf-8") as f:
+            pdata = json.load(f)
+        if not pdata.get("paragraphs"):
+            raise ValueError("empty")
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Paragraph data is empty or corrupt. Re-run 'Process Paragraphs'.",
+        )
+
+    run_id = _start_task_run("create_script")
+    background_tasks.add_task(
+        _run_create_script_task, run_id,
+        paragraphs_path, voice_config_path, script_output_path, chunks_output_path,
+    )
+    return {"status": "started", "run_id": run_id}
+
+
+@app.post("/api/process_paragraphs")
+async def start_process_paragraphs(background_tasks: BackgroundTasks):
+    _ensure_task_not_running("process_paragraphs", "Paragraph processing is already running.")
+
+    # Hard-fail if an annotated script already exists with entries
+    script_path = os.path.join(ROOT_DIR, "annotated_script.json")
+    if os.path.exists(script_path):
+        try:
+            with open(script_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            entries = data.get("entries") if isinstance(data, dict) else data
+            if isinstance(entries, list) and len(entries) > 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Generating a new audiobook script requires erasing the old one first.",
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # Unreadable or corrupt file — allow proceeding
+
+    # Resolve input file from state.json
+    state_path = os.path.join(ROOT_DIR, "state.json")
+    if not os.path.exists(state_path):
+        raise HTTPException(status_code=400, detail="No input file selected. Please upload a book first.")
+    with open(state_path, "r", encoding="utf-8") as f:
+        state = json.load(f)
+    input_file = state.get("input_file_path")
+    if not input_file or not os.path.exists(input_file):
+        raise HTTPException(status_code=400, detail="No input file found. Please upload a book first.")
+
+    output_path = os.path.join(ROOT_DIR, "paragraphs.json")
+    run_id = _start_task_run("process_paragraphs")
+    background_tasks.add_task(_run_process_paragraphs_task, run_id, input_file, output_path)
+    return {"status": "started", "run_id": run_id}
+
 
 @app.post("/api/generate_script")
 async def generate_script(request: ScriptGenerationRequest, background_tasks: BackgroundTasks):
@@ -3190,10 +3970,72 @@ async def pause_processing_workflow():
         _request_active_stage_pause(stage_name)
     return {"status": "pause_requested", "current_stage": stage_name}
 
+
+@app.post("/api/new_mode_workflow/start")
+async def start_new_mode_workflow(request: NewModeWorkflowRequest):
+    options = {"process_voices": bool(request.process_voices), "generate_audio": bool(request.generate_audio)}
+    with new_mode_workflow_lock:
+        state = process_state["new_mode_workflow"]
+        if state.get("running") and not state.get("paused"):
+            raise HTTPException(status_code=409, detail="New mode workflow is already running.")
+
+        if state.get("paused"):
+            # Resume: update options (in case toggle changed) but keep completed stages
+            state["running"] = True
+            state["paused"] = False
+            state["pause_requested"] = False
+            state["last_error"] = None
+            state["options"] = options
+            _append_new_mode_workflow_log_locked("Resuming...")
+        else:
+            # Fresh start: detect already-complete stages from file state
+            completed = _derived_new_mode_completed_stages(options)
+            process_state["new_mode_workflow"] = _new_mode_workflow_initial_state() | {
+                "running": True,
+                "started_at": time.time(),
+                "options": options,
+                "completed_stages": completed,
+            }
+            _append_new_mode_workflow_log_locked("Starting new mode workflow.")
+            if completed:
+                labels = [NEW_MODE_STAGE_LABELS.get(s, s) for s in completed]
+                _append_new_mode_workflow_log_locked(
+                    f"Skipping already complete: {', '.join(labels)}."
+                )
+
+        _start_new_mode_workflow_thread_locked()
+    return dict(process_state["new_mode_workflow"])
+
+
+@app.post("/api/new_mode_workflow/pause")
+async def pause_new_mode_workflow():
+    with new_mode_workflow_lock:
+        state = process_state["new_mode_workflow"]
+        if not state.get("running"):
+            if state.get("paused"):
+                return {"status": "paused"}
+            return {"status": "idle"}
+        if not state.get("pause_requested"):
+            state["pause_requested"] = True
+            _append_new_mode_workflow_log_locked(
+                "Pause requested. Waiting for current stage to finish safely..."
+            )
+        stage = state.get("current_stage")
+
+    # Stop the current stage so pause takes effect promptly
+    if stage:
+        if stage == "render_audio":
+            _pause_audio_queue_for_workflow()
+        else:
+            _terminate_task_process_if_running(stage)
+    return {"status": "pause_requested", "current_stage": stage}
+
+
 @app.get("/api/voices")
 async def get_voices():
     # Parse voices directly from the current script (no stale cache)
     voices_list = []
+    line_counts: dict[str, int] = {}
     if os.path.exists(SCRIPT_PATH):
         try:
             script_data = _load_project_script_document()["entries"]
@@ -3202,6 +4044,7 @@ async def get_voices():
                 speaker = (entry.get("speaker") or entry.get("type") or "").strip()
                 if speaker:
                     voices_set.add(speaker)
+                    line_counts[speaker] = line_counts.get(speaker, 0) + 1
             voices_list = sorted(voices_set)
             # Update voices.json for compatibility with other tools
             with open(VOICES_PATH, "w", encoding="utf-8") as f:
@@ -3218,6 +4061,20 @@ async def get_voices():
         with open(VOICE_CONFIG_PATH, "r", encoding="utf-8") as f:
             voice_config = json.load(f)
 
+    # Count paragraphs per speaker from paragraphs.json (new pipeline only)
+    para_counts: dict[str, int] = {}
+    paragraphs_path = os.path.join(ROOT_DIR, "paragraphs.json")
+    if os.path.exists(paragraphs_path):
+        try:
+            with open(paragraphs_path, "r", encoding="utf-8") as f:
+                para_doc = json.load(f)
+            for p in para_doc.get("paragraphs", []):
+                spk = (p.get("speaker") or "").strip()
+                if spk:
+                    para_counts[spk] = para_counts.get(spk, 0) + 1
+        except Exception:
+            pass
+
     result = []
     chunks = project_manager.load_chunks()
     for voice_name in voices_list:
@@ -3231,6 +4088,8 @@ async def get_voices():
             "config": config,
             "suggested_sample_text": sample_suggestion,
             "design_clone_loaded": design_clone_loaded,
+            "line_count": line_counts.get(voice_name, 0),
+            "paragraph_count": para_counts.get(voice_name, 0),
         })
     return result
 
@@ -3280,6 +4139,26 @@ async def save_voice_config(config_data: Dict[str, VoiceConfigItem]):
     return {"status": "saved"}
 
 
+@app.post("/api/voices/save_config")
+async def save_voice_config_with_invalidation(request: VoiceConfigSaveRequest):
+    running_task = _any_project_task_running()
+    if running_task:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot update voices while {running_task} work is running",
+        )
+
+    new_config = {
+        voice_name: config_item.model_dump()
+        for voice_name, config_item in (request.config or {}).items()
+    }
+    result = project_manager.save_voice_config_with_invalidation(
+        new_config,
+        confirm_invalidation=bool(request.confirm_invalidation),
+    )
+    return result
+
+
 def suggest_voice_description_sync(speaker: str):
     speaker = (speaker or "").strip()
     if not speaker:
@@ -3318,7 +4197,7 @@ def suggest_voice_description_sync(speaker: str):
     }
 
 
-def run_voice_processing_task(run_id: str, stop_check=None):
+def run_voice_processing_task(run_id: str, stop_check=None, relay_fn=None):
     success = False
 
     def ensure_active():
@@ -3330,6 +4209,11 @@ def run_voice_processing_task(run_id: str, stop_check=None):
     def log(message: str):
         ensure_active()
         _append_task_log("voices", run_id, message)
+        if relay_fn:
+            try:
+                relay_fn(message)
+            except Exception:
+                pass
 
     try:
         if not os.path.exists(SCRIPT_PATH):
@@ -3434,6 +4318,7 @@ def run_voice_processing_task(run_id: str, stop_check=None):
                     sample_text=sample_text,
                     force=False,
                     voice_config=updated_config,
+                    export_config=_load_export_config(),
                 )
                 updated_config = materialized["voice_config"]
                 created_count += 1
@@ -3496,6 +4381,7 @@ async def generate_voice_design_clone(request: VoiceDesignGenerateRequest):
             description=request.description,
             sample_text=request.sample_text,
             force=bool(request.force),
+            export_config=_load_export_config(),
         )
     except Exception as e:
         logger.error(f"Voice design clone generation failed for {speaker}: {e}")
@@ -3513,11 +4399,133 @@ async def generate_voice_design_clone(request: VoiceDesignGenerateRequest):
         "generated_ref_text": result["generated_ref_text"],
     }
 
+
+@app.post("/api/voices/clear_uploaded")
+async def clear_uploaded_voices_for_current_script():
+    running_task = _any_project_task_running()
+    if running_task:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot clear uploaded voices while {running_task} work is running",
+        )
+
+    script_title = (project_manager._current_script_title() or "").strip() or "Project"
+    normalized_title = _normalize_saved_voice_name(script_title) or _normalize_saved_voice_name("Project")
+    normalized_title_prefix = f"{normalized_title}."
+
+    current_speakers = set()
+    if os.path.exists(SCRIPT_PATH):
+        try:
+            entries = _load_project_script_document()["entries"]
+            for entry in entries:
+                speaker = (entry.get("speaker") or entry.get("type") or "").strip()
+                normalized = _normalize_saved_voice_name(speaker)
+                if normalized:
+                    current_speakers.add(normalized)
+        except Exception:
+            pass
+
+    clone_manifest = _load_manifest(CLONE_VOICES_MANIFEST)
+    kept_entries = []
+    removed_entries = []
+
+    for entry in clone_manifest:
+        entry_script_title = _normalize_saved_voice_name(entry.get("script_title", ""))
+        entry_name = _normalize_saved_voice_name(entry.get("name", ""))
+        entry_speaker = _normalize_saved_voice_name(entry.get("speaker", ""))
+        is_generated = bool(entry.get("generated"))
+
+        title_match = bool(entry_script_title) and entry_script_title == normalized_title
+        prefixed_name_match = bool(entry_name) and entry_name.startswith(normalized_title_prefix)
+        temp_speaker_match = (
+            normalized_title == _normalize_saved_voice_name("Project")
+            and is_generated
+            and bool(entry_speaker)
+            and entry_speaker in current_speakers
+        )
+
+        if title_match or prefixed_name_match or temp_speaker_match:
+            removed_entries.append(entry)
+        else:
+            kept_entries.append(entry)
+
+    removed_relative_paths = []
+    removed_files = 0
+    for entry in removed_entries:
+        filename = (entry.get("filename") or "").strip()
+        if not filename:
+            continue
+        rel_path = f"clone_voices/{filename}"
+        removed_relative_paths.append(rel_path)
+        abs_path = os.path.join(CLONE_VOICES_DIR, filename)
+        if os.path.exists(abs_path):
+            try:
+                os.remove(abs_path)
+                removed_files += 1
+            except OSError:
+                pass
+
+    if len(kept_entries) != len(clone_manifest):
+        _save_manifest(CLONE_VOICES_MANIFEST, kept_entries)
+
+    updated_voice_config = False
+    if os.path.exists(VOICE_CONFIG_PATH):
+        try:
+            with open(VOICE_CONFIG_PATH, "r", encoding="utf-8") as f:
+                voice_config = json.load(f)
+        except (json.JSONDecodeError, ValueError):
+            voice_config = {}
+
+        removed_set = set(removed_relative_paths)
+        for speaker, cfg in (voice_config or {}).items():
+            if not isinstance(cfg, dict):
+                continue
+            ref_audio = (cfg.get("ref_audio") or "").strip()
+            if ref_audio and ref_audio in removed_set:
+                cfg["ref_audio"] = ""
+                if "generated_ref_text" in cfg:
+                    cfg["generated_ref_text"] = ""
+                updated_voice_config = True
+
+        if updated_voice_config:
+            with open(VOICE_CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(voice_config, f, indent=2, ensure_ascii=False)
+
+    if project_manager.engine and hasattr(project_manager.engine, "clear_clone_prompt_cache"):
+        try:
+            project_manager.engine.clear_clone_prompt_cache()
+        except Exception:
+            pass
+
+    return {
+        "status": "ok",
+        "script_title": script_title,
+        "removed_manifest_entries": len(removed_entries),
+        "removed_files": removed_files,
+        "updated_voice_config": updated_voice_config,
+    }
+
+def _export_download_basename():
+    """Return a filesystem-safe base name for export downloads, using the saved script name when available."""
+    try:
+        state = _load_project_state_payload()
+        name = (state.get("loaded_script_name") or "").strip()
+        if not name:
+            input_path = (state.get("input_file_path") or "").strip()
+            if input_path:
+                name = os.path.splitext(os.path.basename(input_path))[0].strip()
+        if name:
+            return re.sub(r"[^A-Za-z0-9_\-]+", "_", name).strip("_") or "audiobook"
+    except Exception:
+        pass
+    return "audiobook"
+
 @app.get("/api/audiobook")
 async def get_audiobook():
     if not os.path.exists(AUDIOBOOK_PATH):
         raise HTTPException(status_code=404, detail="Audiobook not found")
-    return FileResponse(AUDIOBOOK_PATH, filename="audiobook.mp3", media_type="audio/mpeg")
+    download_name = f"{_export_download_basename()}.mp3"
+    return FileResponse(AUDIOBOOK_PATH, filename=download_name, media_type="audio/mpeg")
 
 # --- Chunk Management Endpoints ---
 
@@ -3586,6 +4594,43 @@ async def repair_legacy_chunks(request: ChunkRepairLegacyRequest):
     if repaired is None:
         raise HTTPException(status_code=400, detail="Failed to repair legacy chunk order")
     return {"status": "ok", "total": len(repaired)}
+
+@app.post("/api/chunks/reset_to_pending")
+async def reset_chunks_to_pending(request: BatchGenerateRequest):
+    """Force-reset the given chunks to pending status.
+
+    Cancels any running audio job first (using the existing cancel logic so
+    generation tokens are invalidated), then resets every requested chunk
+    regardless of its current status.  This gives the user instant visual
+    feedback before the new generation job is enqueued.
+    """
+    with audio_queue_condition:
+        # Clear the queue and abandon any running job atomically
+        now = time.time()
+        while audio_queue:
+            job = audio_queue.pop(0)
+            job["status"] = "cancelled"
+            job["finished_at"] = now
+            _record_audio_recent_job_locked(job)
+        if audio_current_job is not None:
+            _abandon_audio_job_locked(
+                audio_current_job,
+                audio_current_job.get("run_token"),
+                "Regenerate All reset",
+                status="cancelled",
+            )
+        _refresh_audio_process_state_locked(persist=True)
+
+    chunks = project_manager.load_chunks()
+    resolved = []
+    for ref in (request.indices or []):
+        idx = project_manager.resolve_chunk_index(ref, chunks)
+        if idx is not None and 0 <= idx < len(chunks):
+            resolved.append(idx)
+
+    reset_count = project_manager.force_reset_chunks_to_pending(resolved)
+    return {"status": "ok", "reset": reset_count}
+
 
 @app.post("/api/chunks/invalidate_stale_audio")
 async def invalidate_stale_audio():
@@ -3668,6 +4713,22 @@ async def start_proofread(request: ProofreadRequest, background_tasks: Backgroun
     )
     return {"status": "started", "run_id": run_id}
 
+@app.post("/api/proofread/auto")
+async def start_proofread_auto(request: ProofreadRequest, background_tasks: BackgroundTasks):
+    """Trigger a background proofread run that can run concurrently with audio generation.
+    Only blocked by an already-running proofread, not by audio work."""
+    _ensure_task_not_running("proofread", "Proofread is already running")
+    run_id = _start_task_run("proofread")
+    chapter_arg = (request.chapter or "").strip() or "__ALL__"
+    threshold = max(0.0, min(float(request.threshold or 0.0), 1.0))
+    background_tasks.add_task(
+        run_process,
+        [sys.executable, "-u", "proofread_runner.py", ROOT_DIR, str(threshold), chapter_arg],
+        "proofread",
+        run_id,
+    )
+    return {"status": "started", "run_id": run_id}
+
 @app.post("/api/proofread/clear_failures")
 async def clear_proofread_failures(request: ProofreadClearFailuresRequest):
     running_task = _any_project_task_running()
@@ -3703,6 +4764,17 @@ async def validate_proofread_clip(index: str, request: ProofreadValidateRequest)
     threshold = max(0.0, min(float(request.threshold or 0.0), 1.0))
     try:
         chunk = project_manager.manually_validate_proofread_clip(index, threshold=threshold)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if chunk is None:
+        raise HTTPException(status_code=404, detail="Invalid chunk id")
+    return {"status": "ok", "chunk": chunk}
+
+@app.post("/api/proofread/{index}/reject")
+async def reject_proofread_clip(index: str, request: ProofreadValidateRequest):
+    threshold = max(0.0, min(float(request.threshold or 0.0), 1.0))
+    try:
+        chunk = project_manager.manually_reject_proofread_clip(index, threshold=threshold)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if chunk is None:
@@ -3827,8 +4899,14 @@ async def merge_audio_endpoint(background_tasks: BackgroundTasks):
                     process_state["audio"]["logs"].append("Writing optimized export zip...")
                 elif stage == "exporting":
                     process_state["audio"]["logs"].append("Exporting final audiobook file...")
+                elif stage == "normalizing":
+                    process_state["audio"]["logs"].append("Applying loudness normalization...")
 
-            success, msg = project_manager.merge_audio(progress_callback=on_progress)
+            success, msg = project_manager.merge_audio(
+                progress_callback=on_progress,
+                log_callback=_append_audio_log_locked,
+                export_config=_load_export_config(),
+            )
             if success:
                 process_state["audio"]["logs"].append(f"Merge complete: {msg}")
             else:
@@ -3885,8 +4963,14 @@ async def merge_optimized_audio_endpoint(background_tasks: BackgroundTasks):
                     process_state["audio"]["logs"].append(f"Packing optimized part {chapter_index}/{total_chapters}: {chapter_label}")
                 elif stage == "bundling":
                     process_state["audio"]["logs"].append("Writing optimized export zip...")
+                elif stage == "normalizing":
+                    process_state["audio"]["logs"].append(f"Normalizing optimized part {chapter_index}/{total_chapters}...")
 
-            success, msg = project_manager.export_optimized_mp3_zip(progress_callback=on_progress)
+            success, msg = project_manager.export_optimized_mp3_zip(
+                progress_callback=on_progress,
+                log_callback=_append_audio_log_locked,
+                export_config=_load_export_config(),
+            )
             if success:
                 process_state["audio"]["logs"].append(f"Optimized export complete: {msg}")
             else:
@@ -3910,7 +4994,8 @@ async def merge_optimized_audio_endpoint(background_tasks: BackgroundTasks):
 async def get_optimized_export():
     if not os.path.exists(OPTIMIZED_EXPORT_PATH):
         raise HTTPException(status_code=404, detail="Optimized export not found. Generate it first.")
-    return FileResponse(OPTIMIZED_EXPORT_PATH, filename="optimized_audiobook.zip", media_type="application/zip")
+    download_name = f"{_export_download_basename()}.zip"
+    return FileResponse(OPTIMIZED_EXPORT_PATH, filename=download_name, media_type="application/zip")
 
 @app.post("/api/export_audacity")
 async def export_audacity_endpoint(background_tasks: BackgroundTasks):
@@ -3966,7 +5051,11 @@ async def merge_m4b_endpoint(request: M4bExportRequest, background_tasks: Backgr
                 "description": request.description,
                 "cover_path": os.path.join(ROOT_DIR, "m4b_cover.jpg") if os.path.exists(os.path.join(ROOT_DIR, "m4b_cover.jpg")) else "",
             }
-            success, msg = project_manager.merge_m4b(per_chunk_chapters=request.per_chunk_chapters, metadata=meta)
+            success, msg = project_manager.merge_m4b(
+                per_chunk_chapters=request.per_chunk_chapters,
+                metadata=meta,
+                export_config=_load_export_config(),
+            )
             if success:
                 process_state["m4b_export"]["logs"].append(f"Export complete: {msg}")
             else:
@@ -4089,7 +5178,7 @@ async def list_saved_scripts():
     """List all saved scripts in the scripts/ directory."""
     scripts = []
     for f in os.listdir(SCRIPTS_DIR):
-        if f.endswith(".json") and not f.endswith(".voice_config.json"):
+        if f.endswith(".json") and not f.endswith(".voice_config.json") and not f.endswith(".paragraphs.json"):
             name = f[:-5]  # strip .json
             filepath = os.path.join(SCRIPTS_DIR, f)
             companion = os.path.join(SCRIPTS_DIR, f"{name}.voice_config.json")
@@ -4185,24 +5274,74 @@ async def load_project_archive(file: UploadFile = File(...)):
 class ScriptSaveRequest(BaseModel):
     name: str
 
-@app.post("/api/scripts/save")
-async def save_script(request: ScriptSaveRequest):
-    """Save the current annotated_script.json (and voice_config.json) under a name."""
-    if not os.path.exists(SCRIPT_PATH):
-        raise HTTPException(status_code=404, detail="No annotated script to save. Generate a script first.")
+def _delete_saved_script_artifacts(name: str):
+    base = os.path.join(SCRIPTS_DIR, f"{name}.json")
+    if os.path.exists(base):
+        os.remove(base)
+    for suffix in (".voice_config.json", ".paragraphs.json"):
+        companion = os.path.join(SCRIPTS_DIR, f"{name}{suffix}")
+        if os.path.exists(companion):
+            os.remove(companion)
 
-    safe_name = _sanitize_name(request.name)
+def _save_current_script_snapshot(name: str, *, purge_existing: bool = False):
+    if not os.path.exists(SCRIPT_PATH):
+        raise FileNotFoundError("No annotated script to save. Generate a script first.")
+
+    safe_name = _sanitize_name(name)
     if not safe_name:
-        raise HTTPException(status_code=400, detail="Invalid script name.")
+        raise ValueError("Invalid script name.")
 
     dest = os.path.join(SCRIPTS_DIR, f"{safe_name}.json")
+    existed = os.path.exists(dest)
+    if purge_existing and existed:
+        _delete_saved_script_artifacts(safe_name)
+
     shutil.copy2(SCRIPT_PATH, dest)
 
     if os.path.exists(VOICE_CONFIG_PATH):
         shutil.copy2(VOICE_CONFIG_PATH, os.path.join(SCRIPTS_DIR, f"{safe_name}.voice_config.json"))
 
-    logger.info(f"Script saved as '{safe_name}'")
-    return {"status": "saved", "name": safe_name}
+    paragraphs_path = os.path.join(ROOT_DIR, "paragraphs.json")
+    if os.path.exists(paragraphs_path):
+        shutil.copy2(paragraphs_path, os.path.join(SCRIPTS_DIR, f"{safe_name}.paragraphs.json"))
+
+    state = _load_project_state_payload()
+    state["loaded_script_name"] = safe_name
+    _save_project_state_payload(state)
+    return {"name": safe_name, "overwrote": existed}
+
+def _autosave_name_from_input_file():
+    state = _load_project_state_payload()
+    input_path = (state.get("input_file_path") or "").strip()
+    if not input_path:
+        return ""
+    return _sanitize_name(os.path.splitext(os.path.basename(input_path))[0])
+
+def _autosave_current_script_for_workflow(*, purge_existing: bool, trigger: str):
+    auto_name = _autosave_name_from_input_file()
+    if not auto_name:
+        raise RuntimeError("Cannot auto-save script: no imported source file name found.")
+    result = _save_current_script_snapshot(auto_name, purge_existing=purge_existing)
+    logger.info(
+        "Workflow auto-saved script '%s' (trigger=%s, purge_existing=%s)",
+        result["name"],
+        trigger,
+        purge_existing,
+    )
+    return result
+
+@app.post("/api/scripts/save")
+async def save_script(request: ScriptSaveRequest):
+    """Save the current annotated_script.json (and voice_config.json) under a name."""
+    try:
+        result = _save_current_script_snapshot(request.name, purge_existing=False)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    logger.info(f"Script saved as '{result['name']}'")
+    return {"status": "saved", "name": result["name"]}
 
 class ScriptLoadRequest(BaseModel):
     name: str
@@ -4223,12 +5362,20 @@ async def load_script(request: ScriptLoadRequest):
     if os.path.exists(companion):
         shutil.copy2(companion, VOICE_CONFIG_PATH)
 
+    paragraphs_path = os.path.join(ROOT_DIR, "paragraphs.json")
+    paragraphs_companion = os.path.join(SCRIPTS_DIR, f"{request.name}.paragraphs.json")
+    if os.path.exists(paragraphs_companion):
+        shutil.copy2(paragraphs_companion, paragraphs_path)
+    elif os.path.exists(paragraphs_path):
+        os.remove(paragraphs_path)
+
     # Delete chunks so they regenerate from the loaded script
     if os.path.exists(CHUNKS_PATH):
         os.remove(CHUNKS_PATH)
 
     state = _load_project_state_payload()
     state["render_prep_complete"] = False
+    state["loaded_script_name"] = request.name
     state[PROCESSING_STAGE_MARKERS_KEY] = {"script": {"completed_at": time.time()}}
     _save_project_state_payload(state)
 
@@ -4243,9 +5390,10 @@ async def delete_script(name: str):
         raise HTTPException(status_code=404, detail=f"Saved script '{name}' not found.")
 
     os.remove(filepath)
-    companion = os.path.join(SCRIPTS_DIR, f"{name}.voice_config.json")
-    if os.path.exists(companion):
-        os.remove(companion)
+    for suffix in (".voice_config.json", ".paragraphs.json"):
+        companion = os.path.join(SCRIPTS_DIR, f"{name}{suffix}")
+        if os.path.exists(companion):
+            os.remove(companion)
 
     logger.info(f"Script '{name}' deleted")
     return {"status": "deleted", "name": name}
@@ -4359,6 +5507,14 @@ async def voice_design_preview(request: VoiceDesignPreviewRequest):
             sample_text=_apply_project_dictionary(request.sample_text),
             language=request.language,
         )
+        normalized, normalize_result = await asyncio.to_thread(
+            project_manager._normalize_audio_file,
+            wav_path,
+            _load_export_config(),
+            True,
+        )
+        if not normalized:
+            raise RuntimeError(f"Failed to normalize voice design preview: {normalize_result}")
         # Return relative URL for the static mount
         filename = os.path.basename(wav_path)
         return {"status": "ok", "audio_url": f"/designed_voices/previews/{filename}"}
@@ -4385,6 +5541,13 @@ async def voice_design_save(request: VoiceDesignSaveRequest):
     dest_path = os.path.join(DESIGNED_VOICES_DIR, dest_filename)
 
     shutil.copy2(preview_path, dest_path)
+    normalized, normalize_result = project_manager._normalize_audio_file(
+        dest_path,
+        export_config=_load_export_config(),
+        allow_short_single_pass=True,
+    )
+    if not normalized:
+        raise HTTPException(status_code=500, detail=f"Failed to normalize saved voice clip: {normalize_result}")
 
     # Update manifest
     manifest = _load_manifest(DESIGNED_VOICES_MANIFEST)

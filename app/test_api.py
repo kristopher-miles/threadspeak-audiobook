@@ -134,6 +134,8 @@ def test_save_config_roundtrip():
         "tts": {**original.get("tts", {}), "language": "_test_roundtrip_lang"},
         "prompts": original.get("prompts"),
         "generation": original.get("generation"),
+        "proofread": original.get("proofread"),
+        "export": original.get("export"),
     }
     test_config["tts"].setdefault("mode", "external")
     test_config["tts"].setdefault("url", "http://127.0.0.1:7860")
@@ -154,6 +156,20 @@ def test_save_config_roundtrip():
     if original.get("generation") and not readback.get("generation"):
         raise TestFailure("Config round-trip failed: generation section dropped")
 
+    # Verify export normalization settings persist
+    if not readback.get("export"):
+        raise TestFailure("Config round-trip failed: export section dropped")
+    export = readback["export"]
+    for key in (
+        "normalize_enabled",
+        "normalize_target_lufs_mono",
+        "normalize_target_lufs_stereo",
+        "normalize_true_peak_dbtp",
+        "normalize_lra",
+    ):
+        if key not in export:
+            raise TestFailure(f"Config round-trip failed: export.{key} missing")
+
     # Verify review prompts persist through config save
     readback_prompts = readback.get("prompts", {})
     if original.get("prompts", {}).get("review_system_prompt"):
@@ -172,6 +188,8 @@ def test_save_config_roundtrip():
         "tts": original.get("tts", {"mode": "external", "url": "http://127.0.0.1:7860", "device": "auto"}),
         "prompts": original.get("prompts"),
         "generation": original.get("generation"),
+        "proofread": original.get("proofread"),
+        "export": original.get("export"),
     }
     post("/api/config", json=restore)
 

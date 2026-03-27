@@ -194,6 +194,11 @@
             color: var(--app-text);
             border-color: var(--app-divider) !important;
         }
+        .prompt-textarea {
+            resize: none;
+            overflow: hidden;
+            min-height: 7rem;
+        }
         .editor-stat-action {
             cursor: pointer;
             border-radius: 10px;
@@ -268,12 +273,22 @@
                     <li class="nav-item"><a class="nav-link nav-pipeline" data-tab="voices">3. Voices</a></li>
                     <li class="nav-item"><a class="nav-link nav-pipeline" data-tab="editor">4. Editor</a></li>
                     <li class="nav-item"><a class="nav-link nav-pipeline" data-tab="proofread">5. Proofread</a></li>
-                    <li class="nav-item"><a class="nav-link nav-pipeline" data-tab="audio">6. Result</a></li>
+                    <li class="nav-item"><a class="nav-link nav-pipeline" data-tab="audio">6. Export</a></li>
                     <li class="nav-item ms-3 border-start border-secondary ps-3"><a class="nav-link nav-advanced" data-tab="designer">Designer</a></li>
                     <li class="nav-item"><a class="nav-link nav-advanced" data-tab="dictionary">Dictionary</a></li>
                     <li class="nav-item"><a class="nav-link nav-advanced" data-tab="dataset-builder">Dataset</a></li>
                     <li class="nav-item"><a class="nav-link nav-advanced" data-tab="training">Training</a></li>
                 </ul>
+                <div class="d-flex align-items-center gap-3 text-light small">
+                    <div class="form-check form-switch mb-0" id="legacy-mode-toggle-wrapper">
+                        <input class="form-check-input" type="checkbox" id="legacy-mode-toggle">
+                        <label class="form-check-label" for="legacy-mode-toggle">Legacy</label>
+                    </div>
+                    <div class="form-check form-switch mb-0">
+                        <input class="form-check-input" type="checkbox" id="dark-mode-toggle" checked onchange="toggleDarkMode(this.checked)">
+                        <label class="form-check-label" for="dark-mode-toggle">Dark</label>
+                    </div>
+                </div>
             </div>
         </div>
     </nav>
@@ -411,6 +426,13 @@
                             </div>
                         </div>
 
+                        <div class="d-flex flex-wrap gap-2">
+                            <button type="submit" class="btn btn-primary"><i class="fas fa-save me-2"></i>Save Configuration</button>
+                            <button type="button" class="btn btn-outline-danger" id="btn-reset-project">
+                                <i class="fas fa-trash-alt me-2"></i>Reset Project
+                            </button>
+                        </div>
+
                         <h5 class="mb-3 mt-4">
                             <a class="text-decoration-none" data-bs-toggle="collapse" href="#promptSettings" role="button" aria-expanded="false">
                                 <i class="fas fa-chevron-right me-2" id="prompt-chevron"></i>Prompt Settings (Advanced)
@@ -463,6 +485,7 @@
                                 <input type="text" class="form-control" id="banned-tokens" placeholder="e.g. <think>, <reasoning>">
                                 <div class="form-text">Comma-separated tokens the LLM is forbidden from generating. Use to disable thinking mode (e.g. <code>&lt;think&gt;</code>).</div>
                             </div>
+                            <div id="setup-legacy-prompt-fields">
                             <div class="mb-3 form-check form-switch">
                                 <input class="form-check-input" type="checkbox" id="merge-narrators">
                                 <label class="form-check-label" for="merge-narrators">Merge consecutive narrator lines</label>
@@ -477,67 +500,64 @@
                             <h6 class="mb-3">Prompt Customization</h6>
                             <div class="mb-3">
                                 <label class="form-label">System Prompt</label>
-                                <textarea class="form-control font-monospace" id="system-prompt" rows="12" style="font-size: 0.85em;"></textarea>
+                                <textarea class="form-control font-monospace prompt-textarea" id="system-prompt" rows="12" style="font-size: 0.85em;"></textarea>
                                 <div class="form-text">Instructions for the LLM on how to convert text to script. Defines output format, rules, and style guidelines.</div>
                             </div>
                             <div class="mb-3">
                                 <label class="form-label">User Prompt Template</label>
-                                <textarea class="form-control font-monospace" id="user-prompt" rows="4" style="font-size: 0.85em;"></textarea>
+                                <textarea class="form-control font-monospace prompt-textarea" id="user-prompt" rows="4" style="font-size: 0.85em;"></textarea>
                                 <div class="form-text">Template for each chunk. Use <code>{context}</code> for chunk context and <code>{chunk}</code> for the text content.</div>
                             </div>
                             <hr>
                             <h6 class="mb-3">Review Prompt Customization</h6>
                             <div class="mb-3">
                                 <label class="form-label">Review System Prompt</label>
-                                <textarea class="form-control font-monospace" id="review-system-prompt" rows="12" style="font-size: 0.85em;"></textarea>
+                                <textarea class="form-control font-monospace prompt-textarea" id="review-system-prompt" rows="12" style="font-size: 0.85em;"></textarea>
                                 <div class="form-text">Instructions for the LLM during the script review pass. Defines what errors to fix and how.</div>
                             </div>
                             <div class="mb-3">
                                 <label class="form-label">Review User Prompt Template</label>
-                                <textarea class="form-control font-monospace" id="review-user-prompt" rows="4" style="font-size: 0.85em;"></textarea>
+                                <textarea class="form-control font-monospace prompt-textarea" id="review-user-prompt" rows="4" style="font-size: 0.85em;"></textarea>
                                 <div class="form-text">Template for each review batch. Use <code>{context}</code> for batch context and <code>{batch}</code> for the script entries.</div>
                             </div>
                             <hr>
                             <h6 class="mb-3">Attribution Check Prompt Customization</h6>
                             <div class="mb-3">
                                 <label class="form-label">Attribution Check System Prompt</label>
-                                <textarea class="form-control font-monospace" id="attribution-system-prompt" rows="8" style="font-size: 0.85em;"></textarea>
+                                <textarea class="form-control font-monospace prompt-textarea" id="attribution-system-prompt" rows="8" style="font-size: 0.85em;"></textarea>
                                 <div class="form-text">Used during Sanity Check to decide whether a short omitted phrase is only dialogue attribution and can be ignored.</div>
                             </div>
                             <div class="mb-3">
                                 <label class="form-label">Attribution Check User Prompt Template</label>
-                                <textarea class="form-control font-monospace" id="attribution-user-prompt" rows="6" style="font-size: 0.85em;"></textarea>
+                                <textarea class="form-control font-monospace prompt-textarea" id="attribution-user-prompt" rows="6" style="font-size: 0.85em;"></textarea>
                                 <div class="form-text">Use <code>{chapter}</code>, <code>{left_context}</code>, <code>{missing_text}</code>, and <code>{right_context}</code>.</div>
+                            </div>
                             </div>
                             <hr>
                             <h6 class="mb-3">Voice Design Suggestion Prompt</h6>
                             <div class="mb-3">
                                 <label class="form-label">Voice Suggestion Prompt</label>
-                                <textarea class="form-control font-monospace" id="voice-prompt" rows="8" style="font-size: 0.85em;"></textarea>
+                                <textarea class="form-control font-monospace prompt-textarea" id="voice-prompt" rows="8" style="font-size: 0.85em;"></textarea>
                                 <div class="form-text">Appended after source excerpts when suggesting a base voice description. Use <code>{character_name}</code> to insert the current speaker name.</div>
+                            </div>
+                            <div id="setup-nonlegacy-prompt-fields">
+                                <hr>
+                                <h6 class="mb-3">Dialogue Identification Prompt</h6>
+                                <div class="mb-3">
+                                    <label class="form-label">Dialogue Identification System Prompt</label>
+                                    <textarea class="form-control font-monospace prompt-textarea" id="dialogue-identification-system-prompt" rows="10" style="font-size: 0.85em;"></textarea>
+                                    <div class="form-text">System prompt used when assigning speaker names to dialogue paragraphs. The model is required to respond via the <code>identify_dialogue</code> tool.</div>
+                                </div>
+                                <h6 class="mb-3">Temperament Extraction Prompt</h6>
+                                <div class="mb-3">
+                                    <label class="form-label">Temperament Extraction System Prompt</label>
+                                    <textarea class="form-control font-monospace prompt-textarea" id="temperament-extraction-system-prompt" rows="10" style="font-size: 0.85em;"></textarea>
+                                    <div class="form-text">System prompt used when extracting emotional mood and delivery style for narration and dialogue paragraphs. The model is required to respond via the <code>identify_sentiment</code> tool.</div>
+                                </div>
                             </div>
                             <button type="button" class="btn btn-outline-secondary btn-sm mb-3" onclick="resetPrompts()">
                                 <i class="fas fa-undo me-1"></i>Reset to Defaults
                             </button>
-                        </div>
-
-                        <div class="d-flex flex-wrap gap-2">
-                            <button type="submit" class="btn btn-primary"><i class="fas fa-save me-2"></i>Save Configuration</button>
-                            <button type="button" class="btn btn-outline-danger" id="btn-reset-project">
-                                <i class="fas fa-trash-alt me-2"></i>Reset Project
-                            </button>
-                        </div>
-                        <div class="theme-toggle-card mt-4">
-                            <div class="d-flex flex-wrap justify-content-between align-items-center gap-3">
-                                <div>
-                                    <div class="fw-semibold">Dark Mode</div>
-                                    <div class="small text-muted">Optimized for long editing sessions. Text and surfaces stay readable across the app.</div>
-                                </div>
-                                <div class="form-check form-switch m-0">
-                                    <input class="form-check-input" type="checkbox" id="dark-mode-toggle" checked onchange="toggleDarkMode(this.checked)">
-                                    <label class="form-check-label fw-semibold" for="dark-mode-toggle">Enabled</label>
-                                </div>
-                            </div>
                         </div>
                     </form>
                 </div>
@@ -547,52 +567,92 @@
         <!-- Script Tab -->
         <div id="script-tab" class="tab-content" style="display:none;">
             <div class="card">
-                <div class="card-header">
-                    <h4><span class="step-indicator step-active">2</span>Generate Script</h4>
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h4 class="m-0"><span class="step-indicator step-active">2</span>Generate Script</h4>
                 </div>
                 <div class="card-body">
-                    <div class="mb-4">
+                    <!-- Always visible: file upload -->
+                    <div class="mb-3">
                         <label class="form-label">Select Book/Novel (Text or EPUB)</label>
-                        <div class="d-flex flex-wrap gap-2 align-items-start">
-                            <input type="file" class="form-control flex-grow-1" id="file-upload" accept=".txt,.md,.epub">
+                        <input type="file" class="form-control" id="file-upload" accept=".txt,.md,.epub">
+                        <div id="upload-status" class="mt-2"></div>
+                        <div id="processing-workflow-status" class="small text-muted mt-2"></div>
+                    </div>
+
+                    <!-- Legacy Mode controls (shown when Legacy Mode is ON) -->
+                    <div id="legacy-mode-controls">
+                        <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
                             <button class="btn btn-outline-primary btn-sm" id="btn-process-script">
                                 <i class="fas fa-play-circle me-1"></i>Process Script
                             </button>
                             <button class="btn btn-outline-warning btn-sm" id="btn-pause-processing">
                                 <i class="fas fa-pause me-1"></i>Pause Processing
                             </button>
-                        </div>
-                        <div class="d-flex flex-wrap gap-3 align-items-center mt-2">
-                            <div class="form-check form-switch">
+                            <div class="form-check form-switch mb-0">
                                 <input class="form-check-input" type="checkbox" id="process-voices-toggle" checked>
                                 <label class="form-check-label" for="process-voices-toggle">Process Voices</label>
                             </div>
-                            <div class="form-check form-switch">
+                            <div class="form-check form-switch mb-0">
                                 <input class="form-check-input" type="checkbox" id="generate-audio-toggle">
                                 <label class="form-check-label" for="generate-audio-toggle">Generate Audio</label>
                             </div>
                         </div>
-                        <div id="upload-status" class="mt-2"></div>
-                        <div id="processing-workflow-status" class="small text-muted mt-2"></div>
+                        <div class="d-grid gap-2 mt-3">
+                            <button class="btn btn-success btn-lg" id="btn-gen-script">
+                                <i class="fas fa-magic me-2"></i>Generate Annotated Script
+                            </button>
+                            <small class="text-muted">Sends the book to your LLM to split it into annotated chunks with speaker labels and voice directions.</small>
+                            <button class="btn btn-outline-secondary btn-lg" id="btn-review-script">
+                                <i class="fas fa-check-double me-2"></i>Review Script (Optional)
+                            </button>
+                            <small class="text-muted">Runs a second LLM pass to fix speaker misattributions or formatting issues. Only needed if the generated script has problems.</small>
+                            <button class="btn btn-outline-warning btn-lg" id="btn-script-sanity">
+                                <i class="fas fa-ruler-combined me-2"></i>Sanity Check
+                            </button>
+                            <small class="text-muted">Compares the finished script to the original uploaded source, ignores punctuation/case/spacing, and records only the invalid text spans that need regeneration.</small>
+                            <button class="btn btn-outline-danger btn-lg" id="btn-replace-missing-chunks">
+                                <i class="fas fa-wrench me-2"></i>Replace Missing Chunks
+                            </button>
+                            <small class="text-muted">Regenerates each invalid block from the original source, patches the live script, then reruns the sanity check to confirm parity or report what remains.</small>
+                        </div>
                     </div>
 
-                    <div class="d-grid gap-2">
-                        <button class="btn btn-success btn-lg" id="btn-gen-script">
-                            <i class="fas fa-magic me-2"></i>Generate Annotated Script
-                        </button>
-                        <small class="text-muted">Sends the book to your LLM to split it into annotated chunks with speaker labels and voice directions.</small>
-                        <button class="btn btn-outline-secondary btn-lg" id="btn-review-script">
-                            <i class="fas fa-check-double me-2"></i>Review Script (Optional)
-                        </button>
-                        <small class="text-muted">Runs a second LLM pass to fix speaker misattributions or formatting issues. Only needed if the generated script has problems.</small>
-                        <button class="btn btn-outline-warning btn-lg" id="btn-script-sanity">
-                            <i class="fas fa-ruler-combined me-2"></i>Sanity Check
-                        </button>
-                        <small class="text-muted">Compares the finished script to the original uploaded source, ignores punctuation/case/spacing, and records only the invalid text spans that need regeneration.</small>
-                        <button class="btn btn-outline-danger btn-lg" id="btn-replace-missing-chunks">
-                            <i class="fas fa-wrench me-2"></i>Replace Missing Chunks
-                        </button>
-                        <small class="text-muted">Regenerates each invalid block from the original source, patches the live script, then reruns the sanity check to confirm parity or report what remains.</small>
+                    <!-- New Mode controls (shown when Legacy Mode is OFF) -->
+                    <div id="new-mode-controls" style="display:none;">
+                        <div class="d-grid gap-2 mb-3">
+                            <button class="btn btn-outline-primary btn-lg" id="btn-process-paragraphs-v2">
+                                <i class="fas fa-paragraph me-2"></i>1. Process Paragraphs
+                            </button>
+                            <small class="text-muted">Splits the source document into individual paragraphs and prepares them for dialogue analysis.</small>
+                            <button class="btn btn-outline-secondary btn-lg" id="btn-assign-dialogue-v2">
+                                <i class="fas fa-comments me-2"></i>2. Assign Dialogue
+                            </button>
+                            <small class="text-muted">Analyzes each paragraph to identify speakers and annotate dialogue lines with voice assignments.</small>
+                            <button class="btn btn-outline-secondary btn-lg" id="btn-extract-temperament-v2">
+                                <i class="fas fa-theater-masks me-2"></i>3. Extract Temperament
+                            </button>
+                            <small class="text-muted">Analyzes narration paragraphs to identify emotional mood and delivery style for each one.</small>
+                            <button class="btn btn-outline-secondary btn-lg" id="btn-create-script-v2">
+                                <i class="fas fa-file-lines me-2"></i>4. Create Script
+                            </button>
+                            <small class="text-muted">Builds the audiobook script from processed paragraphs, assigning speakers, moods, and splitting into lines.</small>
+                        </div>
+                        <div class="d-flex flex-wrap gap-2 align-items-center">
+                            <button class="btn btn-primary btn-sm" id="btn-process-script-v2">
+                                <i class="fas fa-play-circle me-1"></i>Process Script
+                            </button>
+                            <button class="btn btn-warning btn-sm" id="btn-pause-processing-v2">
+                                <i class="fas fa-pause me-1"></i>Pause Processing
+                            </button>
+                            <div class="form-check form-switch mb-0">
+                                <input class="form-check-input" type="checkbox" id="process-voices-toggle-v2" checked>
+                                <label class="form-check-label" for="process-voices-toggle-v2">Process Voices</label>
+                            </div>
+                            <div class="form-check form-switch mb-0">
+                                <input class="form-check-input" type="checkbox" id="generate-audio-toggle-v2">
+                                <label class="form-check-label" for="generate-audio-toggle-v2">Generate Audio</label>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -633,6 +693,9 @@
                     <div class="d-flex align-items-center gap-2">
                         <button id="generate-outstanding-voices-btn" class="btn btn-sm btn-outline-primary" onclick="generateOutstandingVoices()">
                             Create Outstanding Voices
+                        </button>
+                        <button id="clear-outstanding-voices-btn" class="btn btn-sm btn-outline-danger" onclick="clearOutstandingVoices()">
+                            Clear All
                         </button>
                         <span id="voice-save-status" class="text-muted small"></span>
                     </div>
@@ -1098,25 +1161,37 @@
                              </tbody>
                          </table>
                      </div>
-                     <div class="d-flex justify-content-end gap-2 mt-3">
-                         <button class="btn btn-outline-success btn-sm" id="btn-repair-lost-audio" onclick="repairLostAudio()">
-                             <i class="fas fa-link me-1"></i>Lost Audio Repair
-                         </button>
-                         <button class="btn btn-outline-secondary btn-sm" id="btn-repair-rejected-audio" onclick="repairRejectedAudio()">
-                             <i class="fas fa-recycle me-1"></i>Recover Rejected Audio
-                         </button>
-                         <button class="btn btn-outline-danger btn-sm" id="btn-repair-legacy-project" onclick="repairLegacyProject()">
-                             <i class="fas fa-wrench me-1"></i>Repair Legacy Project
-                         </button>
-                         <button class="btn btn-outline-warning btn-sm" id="btn-invalidate-stale-audio" onclick="invalidateStaleAudio()">
-                             <i class="fas fa-eraser me-1"></i>Invalidate Stale Audio
-                         </button>
-                         <button class="btn btn-outline-primary btn-sm" id="btn-merge-orphans" onclick="mergeOrphans()">
-                             <i class="fas fa-compress-alt me-1"></i>Merge Orphans
-                         </button>
-                         <button class="btn btn-outline-secondary btn-sm" id="btn-decompose-long-segments" onclick="decomposeLongSegments()">
-                             <i class="fas fa-cut me-1"></i>Decompose Long Segments
-                         </button>
+                     <div class="mt-3">
+                         <div class="d-flex justify-content-end gap-2">
+                             <button class="btn btn-outline-secondary btn-sm" id="btn-auto-proofread" onclick="toggleAutoProofread()">
+                                 <i class="fas fa-spell-check me-1"></i>Auto Proofread
+                             </button>
+                             <button class="btn btn-outline-secondary btn-sm" id="btn-advanced-controls" onclick="toggleAdvancedControls()">
+                                 <i class="fas fa-sliders-h me-1"></i>Advanced Controls
+                             </button>
+                             <div id="legacy-only-buttons" style="display:none; gap:0.5rem;">
+                                 <button class="btn btn-outline-primary btn-sm" id="btn-merge-orphans" onclick="mergeOrphans()">
+                                     <i class="fas fa-compress-alt me-1"></i>Merge Orphans
+                                 </button>
+                                 <button class="btn btn-outline-secondary btn-sm" id="btn-decompose-long-segments" onclick="decomposeLongSegments()">
+                                     <i class="fas fa-cut me-1"></i>Decompose Long Segments
+                                 </button>
+                             </div>
+                         </div>
+                         <div id="advanced-controls-panel" style="display:none; justify-content:flex-end; gap:0.5rem;" class="mt-2">
+                             <button class="btn btn-outline-success btn-sm" id="btn-repair-lost-audio" onclick="repairLostAudio()">
+                                 <i class="fas fa-link me-1"></i>Lost Audio Repair
+                             </button>
+                             <button class="btn btn-outline-secondary btn-sm" id="btn-repair-rejected-audio" onclick="repairRejectedAudio()">
+                                 <i class="fas fa-recycle me-1"></i>Recover Rejected Audio
+                             </button>
+                             <button class="btn btn-outline-danger btn-sm" id="btn-repair-legacy-project" onclick="repairLegacyProject()">
+                                 <i class="fas fa-wrench me-1"></i>Repair Legacy Project
+                             </button>
+                             <button class="btn btn-outline-warning btn-sm" id="btn-invalidate-stale-audio" onclick="invalidateStaleAudio()">
+                                 <i class="fas fa-eraser me-1"></i>Invalidate Stale Audio
+                             </button>
+                         </div>
                      </div>
                 </div>
             </div>
@@ -1225,13 +1300,66 @@
             </div>
         </div>
 
-        <!-- Audio Result Tab -->
+        <!-- Audio Export Tab -->
         <div id="audio-tab" class="tab-content" style="display:none;">
             <div class="card">
                 <div class="card-header">
-                    <h4><span class="step-indicator step-active">6</span>Final Result</h4>
+                    <h4><span class="step-indicator step-active">6</span>Export</h4>
                 </div>
                 <div class="card-body">
+                    <h6 class="mb-3">Audio Assembly</h6>
+                    <div class="row mb-3">
+                        <div class="col">
+                            <label class="form-label">Speaker Change Gap (ms)</label>
+                            <input type="number" class="form-control" id="silence-between-speakers" value="500" min="0" step="50">
+                            <div class="form-text">Pause between clips from different speakers</div>
+                        </div>
+                        <div class="col">
+                            <label class="form-label">Same-Speaker Gap (ms)</label>
+                            <input type="number" class="form-control" id="silence-same-speaker" value="250" min="0" step="50">
+                            <div class="form-text">Pause between consecutive clips from the same speaker</div>
+                        </div>
+                        <div class="col">
+                            <label class="form-label">End-of-Chapter Gap (ms)</label>
+                            <input type="number" class="form-control" id="silence-end-of-chapter" value="3000" min="0" step="100">
+                            <div class="form-text">Pause inserted between chapters</div>
+                        </div>
+                        <div class="col">
+                            <label class="form-label">New Paragraph Gap (ms)</label>
+                            <input type="number" class="form-control" id="silence-paragraph" value="750" min="0" step="50">
+                            <div class="form-text">Pause at paragraph boundaries. Applied in projects using the paragraph pipeline; ignored on legacy projects.</div>
+                        </div>
+                    </div>
+                    <div class="row mb-3">
+                        <div class="col">
+                            <div class="form-check form-switch mt-1">
+                                <input class="form-check-input" type="checkbox" id="normalize-enabled" checked>
+                                <label class="form-check-label" for="normalize-enabled">Normalize Export Loudness</label>
+                            </div>
+                            <div class="form-text">Applies EBU R128 loudness normalization to final exports (merged MP3, optimized parts, and M4B).</div>
+                        </div>
+                        <div class="col">
+                            <label class="form-label">Target LUFS (Mono)</label>
+                            <input type="number" class="form-control" id="normalize-target-lufs-mono" value="-18" min="-30" max="-10" step="0.5">
+                            <div class="form-text">Recommended audiobook target for mono-heavy narration.</div>
+                        </div>
+                        <div class="col">
+                            <label class="form-label">Target LUFS (Stereo)</label>
+                            <input type="number" class="form-control" id="normalize-target-lufs-stereo" value="-16" min="-30" max="-10" step="0.5">
+                            <div class="form-text">Used for stereo outputs.</div>
+                        </div>
+                        <div class="col">
+                            <label class="form-label">True Peak Ceiling (dBTP)</label>
+                            <input type="number" class="form-control" id="normalize-true-peak-dbtp" value="-1" min="-6" max="0" step="0.1">
+                            <div class="form-text">Limits clipping risk on playback devices.</div>
+                        </div>
+                        <div class="col">
+                            <label class="form-label">Target LRA</label>
+                            <input type="number" class="form-control" id="normalize-lra" value="11" min="1" max="20" step="0.5">
+                            <div class="form-text">Loudness range target used by loudnorm.</div>
+                        </div>
+                    </div>
+                    <div class="small text-muted mb-3">Use Save Configuration in Setup to persist changes.</div>
                     <div id="audio-merge-progress" class="theme-panel border rounded p-3 mb-3" style="display:none;">
                         <div class="row g-3">
                             <div class="col-md-3 col-sm-6">
@@ -1526,6 +1654,7 @@
         }
 
         const THEME_STORAGE_KEY = 'alexandria-theme';
+        let generationModeLocked = false;
 
         function applyTheme(theme) {
             const resolvedTheme = theme === 'light' ? 'light' : 'dark';
@@ -1545,7 +1674,89 @@
             const theme = enabled ? 'dark' : 'light';
             localStorage.setItem(THEME_STORAGE_KEY, theme);
             applyTheme(theme);
+            persistNavbarPreferences();
         };
+
+        function autoResizeTextarea(textarea) {
+            if (!textarea) return;
+            if (textarea.offsetParent === null) return;
+            textarea.style.height = 'auto';
+            const minHeight = 112; // ~7rem baseline so prompts never collapse to a single line
+            textarea.style.height = `${Math.max(textarea.scrollHeight, minHeight)}px`;
+        }
+
+        function initPromptTextareaAutosize() {
+            document.querySelectorAll('textarea.prompt-textarea').forEach((textarea) => {
+                if (textarea.dataset.autosizeBound === '1') return;
+                textarea.dataset.autosizeBound = '1';
+                textarea.addEventListener('input', () => autoResizeTextarea(textarea));
+            });
+            requestAnimationFrame(() => refreshPromptTextareaHeights());
+        }
+
+        function refreshPromptTextareaHeights() {
+            document.querySelectorAll('textarea.prompt-textarea').forEach(autoResizeTextarea);
+        }
+
+        function bindAudioProcessingDependency(processVoicesToggleId, generateAudioToggleId) {
+            const processVoicesToggle = document.getElementById(processVoicesToggleId);
+            const generateAudioToggle = document.getElementById(generateAudioToggleId);
+            if (!processVoicesToggle || !generateAudioToggle) return;
+
+            const enforce = (source) => {
+                if (source === 'generate' && generateAudioToggle.checked) {
+                    processVoicesToggle.checked = true;
+                }
+                if (source === 'voices' && !processVoicesToggle.checked && generateAudioToggle.checked) {
+                    generateAudioToggle.checked = false;
+                }
+            };
+
+            generateAudioToggle.addEventListener('change', () => enforce('generate'));
+            processVoicesToggle.addEventListener('change', () => enforce('voices'));
+            enforce('init');
+        }
+
+        async function persistNavbarPreferences() {
+            const legacyToggle = document.getElementById('legacy-mode-toggle');
+            const darkToggle = document.getElementById('dark-mode-toggle');
+            if (!legacyToggle || !darkToggle) return;
+            try {
+                await API.post('/api/config/preferences', {
+                    legacy_mode: !!legacyToggle.checked,
+                    dark_mode: !!darkToggle.checked,
+                });
+            } catch (e) {
+                console.warn('Failed to persist navbar preferences', e);
+            }
+        }
+
+        function applyGenerationModeLock(locked) {
+            generationModeLocked = !!locked;
+            const toggle = document.getElementById('legacy-mode-toggle');
+            const wrapper = document.getElementById('legacy-mode-toggle-wrapper');
+            if (!toggle) return;
+            toggle.disabled = generationModeLocked;
+            if (wrapper) {
+                wrapper.classList.toggle('opacity-50', generationModeLocked);
+                wrapper.title = generationModeLocked
+                    ? 'Reset Project to change generation modes.'
+                    : '';
+            }
+        }
+
+        async function lockGenerationMode(trigger) {
+            if (generationModeLocked) return;
+            try {
+                const result = await API.post('/api/generation_mode_lock', {
+                    locked: true,
+                    trigger: trigger || null,
+                });
+                applyGenerationModeLock(!!result.locked);
+            } catch (e) {
+                console.warn('Failed to lock generation mode', e);
+            }
+        }
 
         // --- Setup Tab ---
 
@@ -1615,6 +1826,12 @@
                     if (config.prompts.voice_prompt) {
                         document.getElementById('voice-prompt').value = config.prompts.voice_prompt;
                     }
+                    if (config.prompts.dialogue_identification_system_prompt) {
+                        document.getElementById('dialogue-identification-system-prompt').value = config.prompts.dialogue_identification_system_prompt;
+                    }
+                    if (config.prompts.temperament_extraction_system_prompt) {
+                        document.getElementById('temperament-extraction-system-prompt').value = config.prompts.temperament_extraction_system_prompt;
+                    }
                 }
 
                 // If review/attribution prompts are still empty, fetch defaults
@@ -1623,7 +1840,8 @@
                     !document.getElementById('review-user-prompt').value ||
                     !document.getElementById('attribution-system-prompt').value ||
                     !document.getElementById('attribution-user-prompt').value ||
-                    !document.getElementById('voice-prompt').value
+                    !document.getElementById('voice-prompt').value ||
+                    !document.getElementById('dialogue-identification-system-prompt').value
                 ) {
                     try {
                         const defaults = await API.get('/api/default_prompts');
@@ -1641,6 +1859,12 @@
                         }
                         if (!document.getElementById('voice-prompt').value && defaults.voice_prompt) {
                             document.getElementById('voice-prompt').value = defaults.voice_prompt;
+                        }
+                        if (!document.getElementById('dialogue-identification-system-prompt').value && defaults.dialogue_identification_system_prompt) {
+                            document.getElementById('dialogue-identification-system-prompt').value = defaults.dialogue_identification_system_prompt;
+                        }
+                        if (!document.getElementById('temperament-extraction-system-prompt').value && defaults.temperament_extraction_system_prompt) {
+                            document.getElementById('temperament-extraction-system-prompt').value = defaults.temperament_extraction_system_prompt;
                         }
                     } catch (e) {
                         console.warn("Could not fetch default review/attribution prompts", e);
@@ -1677,8 +1901,52 @@
                     document.getElementById('orphaned-text-to-narrator-on-repair').checked =
                         config.generation.orphaned_text_to_narrator_on_repair !== false;
                 }
+                {
+                    const toggle = document.getElementById('legacy-mode-toggle');
+                    if (toggle) {
+                        toggle.dataset.suspendPersist = '1';
+                        toggle.checked = !!(config.generation && config.generation.legacy_mode);
+                        toggle.dispatchEvent(new Event('change'));
+                        delete toggle.dataset.suspendPersist;
+                    }
+                }
+                if (config.ui && typeof config.ui.dark_mode === 'boolean') {
+                    const nextTheme = config.ui.dark_mode ? 'dark' : 'light';
+                    localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+                    applyTheme(nextTheme);
+                }
+                applyGenerationModeLock(!!config.generation_mode_locked);
                 if (config.proofread && config.proofread.certainty_threshold != null) {
                     document.getElementById('proofread-threshold').value = config.proofread.certainty_threshold;
+                }
+                if (config.export) {
+                    if (config.export.silence_between_speakers_ms != null) {
+                        document.getElementById('silence-between-speakers').value = config.export.silence_between_speakers_ms;
+                    }
+                    if (config.export.silence_same_speaker_ms != null) {
+                        document.getElementById('silence-same-speaker').value = config.export.silence_same_speaker_ms;
+                    }
+                    if (config.export.silence_end_of_chapter_ms != null) {
+                        document.getElementById('silence-end-of-chapter').value = config.export.silence_end_of_chapter_ms;
+                    }
+                    if (config.export.silence_paragraph_ms != null) {
+                        document.getElementById('silence-paragraph').value = config.export.silence_paragraph_ms;
+                    }
+                    if (config.export.normalize_enabled != null) {
+                        document.getElementById('normalize-enabled').checked = !!config.export.normalize_enabled;
+                    }
+                    if (config.export.normalize_target_lufs_mono != null) {
+                        document.getElementById('normalize-target-lufs-mono').value = config.export.normalize_target_lufs_mono;
+                    }
+                    if (config.export.normalize_target_lufs_stereo != null) {
+                        document.getElementById('normalize-target-lufs-stereo').value = config.export.normalize_target_lufs_stereo;
+                    }
+                    if (config.export.normalize_true_peak_dbtp != null) {
+                        document.getElementById('normalize-true-peak-dbtp').value = config.export.normalize_true_peak_dbtp;
+                    }
+                    if (config.export.normalize_lra != null) {
+                        document.getElementById('normalize-lra').value = config.export.normalize_lra;
+                    }
                 }
 
                 // Show previously loaded file
@@ -1687,6 +1955,7 @@
                         `<span class="text-success"><i class="fas fa-check me-1"></i>Loaded: ${config.current_file}</span>`;
                 }
                 renderPrepComplete = !!config.render_prep_complete;
+                refreshPromptTextareaHeights();
             } catch (e) {
                 console.error("Failed to load config", e);
             }
@@ -1713,6 +1982,12 @@
                 if (defaults.voice_prompt) {
                     document.getElementById('voice-prompt').value = defaults.voice_prompt;
                 }
+                if (defaults.dialogue_identification_system_prompt) {
+                    document.getElementById('dialogue-identification-system-prompt').value = defaults.dialogue_identification_system_prompt;
+                }
+                if (defaults.temperament_extraction_system_prompt) {
+                    document.getElementById('temperament-extraction-system-prompt').value = defaults.temperament_extraction_system_prompt;
+                }
             } catch (e) {
                 console.error("Failed to fetch default prompts", e);
                 showToast("Failed to load default prompts from server.", 'error');
@@ -1729,11 +2004,13 @@
             document.getElementById('orphaned-text-to-narrator-on-repair').checked = true;
             document.getElementById('auto-regenerate-bad-clip-attempts').value = 3;
             document.getElementById('proofread-threshold').value = 1.0;
+            refreshPromptTextareaHeights();
         };
 
         // Toggle chevron on collapse
         document.getElementById('promptSettings')?.addEventListener('show.bs.collapse', () => {
             document.getElementById('prompt-chevron').classList.replace('fa-chevron-right', 'fa-chevron-down');
+            requestAnimationFrame(() => refreshPromptTextareaHeights());
         });
         document.getElementById('promptSettings')?.addEventListener('hide.bs.collapse', () => {
             document.getElementById('prompt-chevron').classList.replace('fa-chevron-down', 'fa-chevron-right');
@@ -1783,7 +2060,9 @@
                     review_user_prompt: document.getElementById('review-user-prompt').value,
                     attribution_system_prompt: document.getElementById('attribution-system-prompt').value,
                     attribution_user_prompt: document.getElementById('attribution-user-prompt').value,
-                    voice_prompt: document.getElementById('voice-prompt').value
+                    voice_prompt: document.getElementById('voice-prompt').value,
+                    dialogue_identification_system_prompt: document.getElementById('dialogue-identification-system-prompt').value,
+                    temperament_extraction_system_prompt: document.getElementById('temperament-extraction-system-prompt').value
                 },
                 generation: {
                     chunk_size: chunkSize,
@@ -1797,10 +2076,25 @@
                         ? document.getElementById('banned-tokens').value.split(',').map(t => t.trim()).filter(t => t)
                         : [],
                     merge_narrators: document.getElementById('merge-narrators').checked,
-                    orphaned_text_to_narrator_on_repair: document.getElementById('orphaned-text-to-narrator-on-repair').checked
+                    orphaned_text_to_narrator_on_repair: document.getElementById('orphaned-text-to-narrator-on-repair').checked,
+                    legacy_mode: document.getElementById('legacy-mode-toggle').checked
                 },
                 proofread: {
                     certainty_threshold: parseFloat(document.getElementById('proofread-threshold').value) || 1.0
+                },
+                export: {
+                    silence_between_speakers_ms: parseInt(document.getElementById('silence-between-speakers').value) || 500,
+                    silence_same_speaker_ms: parseInt(document.getElementById('silence-same-speaker').value) || 250,
+                    silence_end_of_chapter_ms: parseInt(document.getElementById('silence-end-of-chapter').value) || 3000,
+                    silence_paragraph_ms: parseInt(document.getElementById('silence-paragraph').value) || 750,
+                    normalize_enabled: document.getElementById('normalize-enabled').checked,
+                    normalize_target_lufs_mono: parseFloat(document.getElementById('normalize-target-lufs-mono').value) || -18,
+                    normalize_target_lufs_stereo: parseFloat(document.getElementById('normalize-target-lufs-stereo').value) || -16,
+                    normalize_true_peak_dbtp: parseFloat(document.getElementById('normalize-true-peak-dbtp').value) || -1,
+                    normalize_lra: parseFloat(document.getElementById('normalize-lra').value) || 11
+                },
+                ui: {
+                    dark_mode: document.getElementById('dark-mode-toggle').checked
                 }
             };
             try {
@@ -1870,6 +2164,7 @@
         }
 
         document.getElementById('btn-gen-script').addEventListener('click', async () => {
+            await lockGenerationMode('generate_annotated_script');
             const statusEl = document.getElementById('upload-status');
             try {
                 await startGenerateScript();
@@ -1971,16 +2266,22 @@
                 processBtn.disabled = true;
                 processBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Processing...';
                 pauseBtn.disabled = false;
+                processBtn.style.display = 'none';
+                pauseBtn.style.display = '';
                 el.textContent = `Running: ${stageLabel}. Completed: ${completedStages.join(', ') || 'none'}. ${optionSummary}.`;
             } else if (status.paused) {
                 processBtn.disabled = false;
                 processBtn.innerHTML = '<i class="fas fa-play-circle me-1"></i>Resume Process';
                 pauseBtn.disabled = true;
+                processBtn.style.display = '';
+                pauseBtn.style.display = 'none';
                 el.textContent = `Paused during ${stageLabel}. Completed: ${completedStages.join(', ') || 'none'}. ${optionSummary}.`;
             } else {
                 processBtn.disabled = false;
                 processBtn.innerHTML = '<i class="fas fa-play-circle me-1"></i>Process Script';
                 pauseBtn.disabled = true;
+                processBtn.style.display = '';
+                pauseBtn.style.display = 'none';
                 if (status.last_error) {
                     el.textContent = status.last_error;
                 } else if (completedStages.length > 0) {
@@ -2056,6 +2357,7 @@
         });
 
         document.getElementById('btn-process-script').addEventListener('click', async () => {
+            await lockGenerationMode('process_script_legacy');
             try {
                 const ingestionDecision = await resolveScriptIngestionDecision({ continueWorkflow: true });
                 await API.post('/api/processing/start', {
@@ -2089,11 +2391,249 @@
             }
         });
 
+        // --- Advanced Controls toggle ---
+        window.toggleAdvancedControls = function() {
+            const panel = document.getElementById('advanced-controls-panel');
+            const btn = document.getElementById('btn-advanced-controls');
+            const visible = panel.style.display !== 'none';
+            panel.style.display = visible ? 'none' : 'flex';
+            btn.classList.toggle('active', !visible);
+        };
+
+        // --- Auto Proofread toggle ---
+        const AUTO_PROOFREAD_KEY = 'alexandria-auto-proofread';
+        const savedAutoProofread = localStorage.getItem(AUTO_PROOFREAD_KEY);
+        let autoProofreadEnabled = savedAutoProofread === null ? true : savedAutoProofread === 'true';
+        let clipsAtLastAutoProofread = 0;
+
+        function _applyAutoProofreadBtn() {
+            const btn = document.getElementById('btn-auto-proofread');
+            if (!btn) return;
+            btn.classList.toggle('active', autoProofreadEnabled);
+            btn.title = autoProofreadEnabled ? 'Auto Proofread: ON — runs every 25 clips' : 'Auto Proofread: OFF';
+        }
+
+        window.toggleAutoProofread = function() {
+            autoProofreadEnabled = !autoProofreadEnabled;
+            localStorage.setItem(AUTO_PROOFREAD_KEY, autoProofreadEnabled);
+            _applyAutoProofreadBtn();
+        };
+
+        _applyAutoProofreadBtn();
+
+        // --- Legacy Mode Toggle ---
+        (function() {
+            const toggle = document.getElementById('legacy-mode-toggle');
+            const wrapper = document.getElementById('legacy-mode-toggle-wrapper');
+            const legacyControls = document.getElementById('legacy-mode-controls');
+            const newControls = document.getElementById('new-mode-controls');
+            const setupLegacyPromptFields = document.getElementById('setup-legacy-prompt-fields');
+            const setupNonLegacyPromptFields = document.getElementById('setup-nonlegacy-prompt-fields');
+            function applyLegacyMode(isLegacy) {
+                legacyControls.style.display = isLegacy ? '' : 'none';
+                newControls.style.display = isLegacy ? 'none' : '';
+                if (setupLegacyPromptFields) {
+                    setupLegacyPromptFields.style.display = isLegacy ? '' : 'none';
+                }
+                if (setupNonLegacyPromptFields) {
+                    setupNonLegacyPromptFields.style.display = isLegacy ? 'none' : '';
+                }
+                const legacyButtons = document.getElementById('legacy-only-buttons');
+                if (legacyButtons) legacyButtons.style.display = isLegacy ? 'flex' : 'none';
+                requestAnimationFrame(() => refreshPromptTextareaHeights());
+            }
+            toggle.addEventListener('change', () => {
+                if (generationModeLocked) {
+                    showToast('Reset Project to change generation modes.', 'warning');
+                    return;
+                }
+                applyLegacyMode(toggle.checked);
+                if (toggle.dataset.suspendPersist === '1') return;
+                persistNavbarPreferences();
+            });
+            if (wrapper) {
+                wrapper.addEventListener('click', (e) => {
+                    if (!generationModeLocked) return;
+                    showToast('Reset Project to change generation modes.', 'warning');
+                });
+            }
+            applyLegacyMode(toggle.checked);
+        })();
+
+        // --- New Mode stubs ---
+        document.getElementById('btn-process-paragraphs-v2').addEventListener('click', async () => {
+            await lockGenerationMode('process_paragraphs_v2');
+            try {
+                await API.post('/api/process_paragraphs', {});
+                pollLogs('process_paragraphs', 'script-logs');
+                showToast('Paragraph processing started.', 'success');
+            } catch (e) {
+                showToast(e.message || 'Failed to start paragraph processing.', 'error', 7000);
+            }
+        });
+        document.getElementById('btn-assign-dialogue-v2').addEventListener('click', async () => {
+            try {
+                await API.post('/api/assign_dialogue', {});
+                pollLogs('assign_dialogue', 'script-logs');
+                showToast('Dialogue assignment started.', 'success');
+            } catch (e) {
+                showToast(e.message || 'Failed to start dialogue assignment.', 'error', 7000);
+            }
+        });
+        document.getElementById('btn-extract-temperament-v2').addEventListener('click', async () => {
+            try {
+                await API.post('/api/extract_temperament', {});
+                pollLogs('extract_temperament', 'script-logs');
+                showToast('Temperament extraction started.', 'success');
+            } catch (e) {
+                showToast(e.message || 'Failed to start temperament extraction.', 'error', 7000);
+            }
+        });
+        document.getElementById('btn-create-script-v2').addEventListener('click', async () => {
+            await lockGenerationMode('create_script_v2');
+            try {
+                const info = await API.get('/api/script_info');
+                if (info.entry_count > 0) {
+                    if (!confirm(`An existing script with ${info.entry_count} lines was found.\n\nThis will permanently erase the current script and all voice assignments.\n\nContinue?`)) {
+                        return;
+                    }
+                    await API.post('/api/reset_new_mode', {});
+                    // Clear the editor display immediately so the old chunks don't linger
+                    const tbody = document.getElementById('chunks-table-body');
+                    if (tbody) tbody.innerHTML = '';
+                }
+            } catch (e) {
+                showToast(e.message || 'Failed to reset existing script.', 'error', 7000);
+                return;
+            }
+            try {
+                await API.post('/api/create_script', {});
+                pollLogs('create_script', 'script-logs');
+                showToast('Script creation started.', 'success');
+            } catch (e) {
+                showToast(e.message || 'Failed to start script creation.', 'error', 7000);
+            }
+        });
+        function updateNewModeWorkflowButtons(status) {
+            const startBtn = document.getElementById('btn-process-script-v2');
+            const pauseBtn = document.getElementById('btn-pause-processing-v2');
+            if (!startBtn || !pauseBtn) return;
+            const running = !!status?.running;
+            const paused = !!status?.paused;
+            const activeRun = running && !paused;
+            startBtn.disabled = activeRun;
+            startBtn.innerHTML = running && !paused
+                ? '<i class="fas fa-spinner fa-spin me-1"></i>Processing...'
+                : paused
+                    ? '<i class="fas fa-play-circle me-1"></i>Resume Processing'
+                    : '<i class="fas fa-play-circle me-1"></i>Process Script';
+            pauseBtn.disabled = !activeRun;
+            startBtn.style.display = activeRun ? 'none' : '';
+            pauseBtn.style.display = activeRun ? '' : 'none';
+        }
+
+        document.getElementById('btn-process-script-v2').addEventListener('click', async () => {
+            await lockGenerationMode('process_script_v2');
+            try {
+                const processVoices = document.getElementById('process-voices-toggle-v2')?.checked !== false;
+                const generateAudio = document.getElementById('generate-audio-toggle-v2')?.checked === true;
+                await API.post('/api/new_mode_workflow/start', { process_voices: processVoices, generate_audio: generateAudio });
+                pollLogs('new_mode_workflow', 'script-logs');
+                updateNewModeWorkflowButtons({ running: true, paused: false });
+            } catch (e) {
+                showToast(e.message || 'Failed to start processing.', 'error', 7000);
+            }
+        });
+        document.getElementById('btn-pause-processing-v2').addEventListener('click', async () => {
+            try {
+                const result = await API.post('/api/new_mode_workflow/pause', {});
+                if (result.status === 'pause_requested') {
+                    showToast('Pause requested. Current stage will finish before stopping.', 'warning');
+                }
+            } catch (e) {
+                showToast(e.message || 'Failed to request pause.', 'error', 7000);
+            }
+        });
+
+        // Restore workflow button state on page load
+        (async () => {
+            try {
+                const status = await API.get('/api/status/new_mode_workflow');
+                updateNewModeWorkflowButtons(status);
+                if (status.running) {
+                    pollLogs('new_mode_workflow', 'script-logs');
+                }
+            } catch (e) {
+                console.warn('Could not fetch new_mode_workflow status', e);
+            }
+        })();
+
         // --- Voices Tab ---
         const AVAILABLE_VOICES = ["Aiden", "Dylan", "Eric", "Ono_anna", "Ryan", "Serena", "Sohee", "Uncle_fu", "Vivian"];
 
         function normalizeVoiceName(value) {
             return (value || '').trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+        }
+
+        // Suggest aliases for names where one is a substring of another.
+        // The name with fewer paragraphs gets aliased to the one with more.
+        // Only fills empty AKA inputs — never overwrites a user-set alias.
+        function suggestVoiceAliases(voices) {
+            // paragraph_count is 0 for legacy projects (no paragraphs.json) — skip silently
+            const hasCounts = voices.some(v => (v.paragraph_count || 0) > 0);
+            if (!hasCounts) return false;
+
+            // Build a lookup: normalizedName -> voice object
+            const byName = new Map(voices.map(v => [normalizeVoiceName(v.name), v]));
+
+            let anySet = false;
+            const processed = new Set(); // avoid processing the same pair twice
+
+            for (const voice of voices) {
+                const normA = normalizeVoiceName(voice.name);
+
+                for (const other of voices) {
+                    const normB = normalizeVoiceName(other.name);
+                    if (normA === normB) continue;
+
+                    const pairKey = [normA, normB].sort().join('||');
+                    if (processed.has(pairKey)) continue;
+                    processed.add(pairKey);
+
+                    // Check if one name fully appears within the other
+                    const aInB = normB.includes(normA);
+                    const bInA = normA.includes(normB);
+                    if (!aInB && !bInA) continue;
+
+                    // The shorter/contained name is the candidate to alias;
+                    // the one with more paragraphs is the target.
+                    const countA = voice.paragraph_count || 0;
+                    const countB = other.paragraph_count || 0;
+
+                    let aliasName, targetName;
+                    if (countA <= countB) {
+                        aliasName = voice.name;   // fewer (or equal) → alias this one
+                        targetName = other.name;
+                    } else {
+                        aliasName = other.name;
+                        targetName = voice.name;
+                    }
+
+                    // Find the card for the alias candidate and fill its AKA only if empty
+                    const card = Array.from(document.querySelectorAll('.voice-card'))
+                        .find(el => el.dataset.voice === aliasName);
+                    const aliasInput = card?.querySelector('.voice-alias-input');
+                    if (!aliasInput || aliasInput.value.trim()) continue; // already set
+
+                    aliasInput.value = targetName;
+                    anySet = true;
+                }
+            }
+
+            if (anySet) {
+                updateVoiceAliasStates();
+            }
+            return anySet;
         }
 
         function getVoiceAliasTarget(card, nameMap) {
@@ -2147,13 +2687,18 @@
             const safeAlias = escapeHtml(config.alias || '');
             const designSampleText = config.ref_text || voice.suggested_sample_text || '';
             const designLoaded = Boolean((config.ref_audio || '').trim()) && !!voice.design_clone_loaded;
+            const lineCount = Number(voice.line_count || 0);
+            const lineLabel = `${lineCount} ${lineCount === 1 ? 'line' : 'lines'}`;
 
             return `
                 <div class="card voice-card mb-3" data-voice="${safeName}" data-suggested-sample="${escapeHtml(voice.suggested_sample_text || '')}">
                     <div class="card-body">
                         <div class="row">
                             <div class="col-md-3">
-                                <h5 class="card-title voice-primary-content">${safeName}</h5>
+                                <h5 class="card-title voice-primary-content d-flex flex-wrap align-items-center gap-2">
+                                    <span>${safeName}</span>
+                                    <span class="badge text-bg-secondary">${lineLabel}</span>
+                                </h5>
                                 <div class="voice-alias-box mt-2">
                                     <label class="form-label small text-muted mb-1">AKA</label>
                                     <input
@@ -2345,6 +2890,7 @@
             }
             container.innerHTML = voices.map((v, i) => createVoiceCard(v, i)).join('');
             updateVoiceAliasStates();
+            const suggestedAliases = suggestVoiceAliases(voices);
 
             let filledMissingDesignSample = false;
             voices.forEach(voice => {
@@ -2360,9 +2906,10 @@
                 }
             });
 
-            // If any voice has no saved config, save defaults immediately
-            if (filledMissingDesignSample || voices.some(v => !v.config || Object.keys(v.config).length === 0)) {
-                debouncedSaveVoices();
+            // If any voice has no saved config, or aliases were auto-suggested, save immediately
+            if (suggestedAliases || filledMissingDesignSample || voices.some(v => !v.config || Object.keys(v.config).length === 0)) {
+                clearTimeout(_voiceSaveTimer);
+                saveVoicesNow({ promptConfirmation: false }).catch(() => {});
             }
         }
 
@@ -2430,20 +2977,70 @@
         }
 
         let _voiceSaveTimer = null;
-        async function saveVoicesNow() {
+        let _voiceSaveInFlight = null;
+
+        async function saveVoicesNow(options = {}) {
+            const { promptConfirmation = true } = options;
             const cards = document.querySelectorAll('.voice-card');
             if (cards.length === 0) return;
+            if (_voiceSaveInFlight) return _voiceSaveInFlight;
+
             const statusEl = document.getElementById('voice-save-status');
             statusEl.innerHTML = '<i class="fas fa-circle text-warning" style="font-size:0.5em;"></i> unsaved';
-            try {
-                const config = collectVoiceConfig();
-                await API.post('/api/save_voice_config', config);
-                statusEl.innerHTML = '<i class="fas fa-check text-success me-1"></i>saved';
-                setTimeout(() => { statusEl.innerHTML = ''; }, 2000);
-            } catch (e) {
-                statusEl.innerHTML = '<i class="fas fa-times text-danger me-1"></i>save failed';
-                throw e;
-            }
+
+            _voiceSaveInFlight = (async () => {
+                try {
+                    const config = collectVoiceConfig();
+                    let result = await API.post('/api/voices/save_config', {
+                        config,
+                        confirm_invalidation: false,
+                    });
+
+                    if (result.status === 'confirmation_required' && (result.invalidated_clips || 0) > 0) {
+                        if (!promptConfirmation) {
+                            statusEl.innerHTML = '<i class="fas fa-times text-danger me-1"></i>save cancelled';
+                            throw new Error('Voice change cancelled');
+                        }
+
+                        const clipCount = Number(result.invalidated_clips || 0);
+                        const confirmed = await showConfirm(
+                            `This change will invalidate ${clipCount} generated clip${clipCount === 1 ? '' : 's'}. Continue?`
+                        );
+                        if (!confirmed) {
+                            await loadVoices();
+                            statusEl.innerHTML = '<i class="fas fa-times text-danger me-1"></i>save cancelled';
+                            throw new Error('Voice change cancelled');
+                        }
+
+                        result = await API.post('/api/voices/save_config', {
+                            config,
+                            confirm_invalidation: true,
+                        });
+
+                        const invalidatedCount = Number(result.invalidated_clips || 0);
+                        if (invalidatedCount > 0) {
+                            showToast(
+                                `Invalidated ${invalidatedCount} generated clip${invalidatedCount === 1 ? '' : 's'} for the new voice settings.`,
+                                'warning',
+                                5000
+                            );
+                        }
+                    }
+
+                    statusEl.innerHTML = '<i class="fas fa-check text-success me-1"></i>saved';
+                    setTimeout(() => { statusEl.innerHTML = ''; }, 2000);
+                    return result;
+                } catch (e) {
+                    if (!String(e?.message || '').toLowerCase().includes('cancelled')) {
+                        statusEl.innerHTML = '<i class="fas fa-times text-danger me-1"></i>save failed';
+                    }
+                    throw e;
+                } finally {
+                    _voiceSaveInFlight = null;
+                }
+            })();
+
+            return _voiceSaveInFlight;
         }
 
         function debouncedSaveVoices() {
@@ -2497,6 +3094,10 @@
         document.getElementById('voices-list').addEventListener('input', (event) => {
             if (event.target.classList.contains('voice-alias-input')) {
                 updateVoiceAliasStates();
+                return;
+            }
+            if (event.target.classList.contains('ref-audio')) {
+                return;
             }
             debouncedSaveVoices();
         });
@@ -2577,7 +3178,9 @@
                 await saveVoicesNow();
                 showToast(`Generated voice for ${speaker}.`, 'success');
             } catch (e) {
-                showToast(`Voice generation failed: ${e.message}`, 'error');
+                if (!String(e?.message || '').toLowerCase().includes('cancelled')) {
+                    showToast(`Voice generation failed: ${e.message}`, 'error');
+                }
                 syncDesignVoiceRow(card, { loaded: loaded, refAudio: card.querySelector('.design-ref-audio')?.value || '' });
             } finally {
                 const activeCard = btn.closest('.card-body');
@@ -2648,6 +3251,19 @@
 
         window.generateOutstandingVoices = async () => {
             const bulkBtn = document.getElementById('generate-outstanding-voices-btn');
+
+            // Convert any "Custom Voice" cards to "Voice Design" so they get voices generated
+            Array.from(document.querySelectorAll('.voice-card'))
+                .filter(card => !card.classList.contains('alias-active'))
+                .filter(card => card.querySelector('.voice-type:checked')?.value === 'custom')
+                .forEach(card => {
+                    const designRadio = card.querySelector('.voice-type[value="design"]');
+                    if (designRadio) {
+                        designRadio.checked = true;
+                        window.toggleVoiceType(designRadio);
+                    }
+                });
+
             const eligibleSpeakers = Array.from(document.querySelectorAll('.voice-card'))
                 .filter(card => !card.classList.contains('alias-active'))
                 .filter(card => card.querySelector('.voice-type:checked')?.value === 'design')
@@ -2725,6 +3341,31 @@
             } finally {
                 bulkBtn.disabled = false;
                 bulkBtn.textContent = originalText;
+            }
+        };
+
+        window.clearOutstandingVoices = async () => {
+            const clearBtn = document.getElementById('clear-outstanding-voices-btn');
+            const confirmed = await showConfirm(
+                'Delete all uploaded reusable voices tied to this script context and clear those references from the current voice cards?'
+            );
+            if (!confirmed) return;
+
+            clearBtn.disabled = true;
+            const originalText = clearBtn.textContent;
+            clearBtn.textContent = 'Clearing...';
+            try {
+                const result = await API.post('/api/voices/clear_uploaded', {});
+                await loadVoices();
+                showToast(
+                    `Cleared ${result.removed_manifest_entries || 0} voice entr${(result.removed_manifest_entries || 0) === 1 ? 'y' : 'ies'} for "${result.script_title || 'Project'}".`,
+                    'success'
+                );
+            } catch (e) {
+                showToast(`Clear failed: ${e.message}`, 'error');
+            } finally {
+                clearBtn.disabled = false;
+                clearBtn.textContent = originalText;
             }
         };
 
@@ -3362,18 +4003,23 @@
             return `<button class="btn btn-sm btn-outline-danger mt-2" onclick='regenerateProofreadChunk(${JSON.stringify(chunkRef)})'><i class="fas ${icon} me-1"></i>${label}</button>`;
         }
 
-        function shouldShowProofreadValidate(chunk) {
-            return Boolean((chunk?.audio_path || '').trim());
-        }
-
         function getProofreadValidateButtonHtml(chunk, chunkRef) {
-            if (!shouldShowProofreadValidate(chunk)) return '';
+            // Show both buttons on any clip that has been scored (checked) or has audio.
+            // Clips without audio or without a score yet get no buttons.
+            const hasAudio = Boolean((chunk?.audio_path || '').trim());
             const proofread = chunk?.proofread || {};
+            if (!hasAudio || !proofread.checked) return '';
+
             const isValidated = Boolean(proofread.manual_validated);
-            const label = isValidated ? 'Reject' : 'Validate';
-            const icon = isValidated ? 'fa-xmark' : 'fa-check';
-            const buttonClass = isValidated ? 'btn-outline-warning' : 'btn-outline-primary';
-            return `<button class="btn btn-sm ${buttonClass} mt-2 ms-2" onclick='validateProofreadChunk(${JSON.stringify(chunkRef)})'><i class="fas ${icon} me-1"></i>${label}</button>`;
+            const isRejected  = Boolean(proofread.manual_failed);
+
+            const validateClass = isValidated ? 'btn-primary'         : 'btn-outline-primary';
+            const rejectClass   = isRejected  ? 'btn-warning'         : 'btn-outline-warning';
+
+            const validateBtn = `<button class="btn btn-sm ${validateClass} mt-2 ms-2" onclick='validateProofreadChunk(${JSON.stringify(chunkRef)})'><i class="fas fa-check me-1"></i>Validate</button>`;
+            const rejectBtn   = `<button class="btn btn-sm ${rejectClass} mt-2 ms-2" onclick='rejectProofreadChunk(${JSON.stringify(chunkRef)})'><i class="fas fa-xmark me-1"></i>Reject</button>`;
+
+            return validateBtn + rejectBtn;
         }
 
         function getProofreadEditButtonHtml(chunk, chunkRef) {
@@ -3635,6 +4281,48 @@
             renderProofreadTaskStatus(await API.get('/api/status/proofread'));
         };
 
+        async function jumpToNextProofreadFailure(afterChunkRef) {
+            let chunks = Array.isArray(cachedChunks) ? cachedChunks : [];
+            if (!chunks.length) {
+                chunks = await API.get('/api/chunks');
+                cachedChunks = chunks;
+                syncEditorChapterState(chunks);
+                syncProofreadChapterState(chunks);
+            }
+
+            const isFailure = chunk => {
+                const p = chunk?.proofread || {};
+                return Boolean(p.checked) && !Boolean(p.passed);
+            };
+
+            const currentIndex = afterChunkRef != null
+                ? chunks.findIndex(c => getChunkRef(c) === String(afterChunkRef))
+                : -1;
+
+            // Search from the chunk after the current one, then wrap around
+            const candidates = currentIndex >= 0
+                ? [...chunks.slice(currentIndex + 1), ...chunks.slice(0, currentIndex + 1)]
+                : chunks;
+
+            const nextFailure = candidates.find(isFailure);
+            if (!nextFailure) return; // no failures left, stay put
+
+            const chapterId = getChunkChapterName(nextFailure) || WHOLE_PROJECT_CHAPTER_ID;
+            selectedProofreadChapter = chapterId;
+            renderProofreadTable(chunks);
+            syncProofreadChapterState(chunks);
+
+            await new Promise(resolve => requestAnimationFrame(() => resolve()));
+
+            const chunkRef = getChunkRef(nextFailure);
+            const row = document.querySelector(`#proofread-table-body tr[data-proofread-id="${CSS.escape(chunkRef)}"]`);
+            if (!row) return;
+
+            document.querySelectorAll('#proofread-table-body tr.table-primary').forEach(tr => tr.classList.remove('table-primary'));
+            row.classList.add('table-primary');
+            row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+
         window.jumpToFirstProofreadFailure = async () => {
             try {
                 let chunks = Array.isArray(cachedChunks) ? cachedChunks : [];
@@ -3756,20 +4444,27 @@
 
         window.validateProofreadChunk = async (chunkRef) => {
             try {
-                const result = await API.post(`/api/proofread/${encodeURIComponent(chunkRef)}/validate`, {
+                await API.post(`/api/proofread/${encodeURIComponent(chunkRef)}/validate`, {
                     threshold: getProofreadThreshold(),
                 });
-                const proofread = result?.chunk?.proofread || {};
-                showToast(
-                    proofread.manual_failed
-                        ? 'Clip marked as manually failed.'
-                        : 'Clip marked as manually validated.',
-                    proofread.manual_failed ? 'warning' : 'success',
-                    3000
-                );
+                showToast('Clip validated.', 'success', 2000);
                 await loadChunks(false);
+                await jumpToNextProofreadFailure(chunkRef);
             } catch (e) {
                 showToast('Failed to validate clip: ' + e.message, 'error');
+            }
+        };
+
+        window.rejectProofreadChunk = async (chunkRef) => {
+            try {
+                await API.post(`/api/proofread/${encodeURIComponent(chunkRef)}/reject`, {
+                    threshold: getProofreadThreshold(),
+                });
+                showToast('Clip rejected.', 'warning', 2000);
+                await loadChunks(false);
+                await jumpToNextProofreadFailure(chunkRef);
+            } catch (e) {
+                showToast('Failed to reject clip: ' + e.message, 'error');
             }
         };
 
@@ -4008,6 +4703,19 @@
                     clearInterval(audioQueuePollTimer);
                     audioQueuePollTimer = null;
                 }
+                // Auto Proofread: trigger every 25 completed clips while audio is running
+                if (autoProofreadEnabled && audioState?.running) {
+                    const processed = Number(audioState?.metrics?.processed_clips) || 0;
+                    if (processed - clipsAtLastAutoProofread >= 25) {
+                        const proofreadRunning = !!latestProofreadStatus?.running;
+                        if (!proofreadRunning) {
+                            clipsAtLastAutoProofread = processed;
+                            const threshold = getProofreadThreshold();
+                            API.post('/api/proofread/auto', { threshold, chapter: '__ALL__' })
+                                .catch(err => console.warn('Auto proofread trigger failed:', err));
+                        }
+                    }
+                }
             } catch (e) {
                 console.error('Audio queue poll error', e);
                 if (audioQueuePollTimer) {
@@ -4181,6 +4889,10 @@
         };
 
         window.decomposeLongSegments = async () => {
+            if (!document.getElementById('legacy-mode-toggle').checked) {
+                showToast('Decompose Long Segments is disabled in new mode. Use the new-mode pipeline to create the script.', 'warning');
+                return;
+            }
             const button = document.getElementById('btn-decompose-long-segments');
             const chapterOnly = isChapterOnlyEnabled();
             const chapter = chapterOnly && selectedEditorChapter !== WHOLE_PROJECT_CHAPTER_ID
@@ -4216,6 +4928,10 @@
         };
 
         window.mergeOrphans = async () => {
+            if (!document.getElementById('legacy-mode-toggle').checked) {
+                showToast('Merge Orphans is disabled in new mode. Use the new-mode pipeline to create the script.', 'warning');
+                return;
+            }
             const button = document.getElementById('btn-merge-orphans');
             const chapterOnly = isChapterOnlyEnabled();
             const chapter = chapterOnly && selectedEditorChapter !== WHOLE_PROJECT_CHAPTER_ID
@@ -4387,11 +5103,21 @@
                 return;
             }
 
+            const isLegacy = document.getElementById('legacy-mode-toggle')?.checked;
             const chapterOnly = isChapterOnlyEnabled();
             const chapter = chapterOnly && selectedEditorChapter !== WHOLE_PROJECT_CHAPTER_ID
                 ? selectedEditorChapter
                 : null;
             const scopeLabel = chapter ? `chapter "${chapter}"` : (chapterOnly ? 'the whole project' : 'the entire book');
+
+            // Decompose long segments and merge orphans are legacy-only operations.
+            // In non-legacy mode the paragraph pipeline already produces well-sized chunks.
+            if (!isLegacy) {
+                const persistResult = await API.post('/api/render_prep_state', { complete: true });
+                renderPrepComplete = !!persistResult.render_prep_complete;
+                return;
+            }
+
             const mergeResult = await API.post('/api/chunks/merge_orphans', {
                 chapter,
                 min_words: 10,
@@ -4768,8 +5494,16 @@
                     return;
                 }
 
-                // Call batch endpoint for parallel processing
                 const indices = toProcess.map(c => c.id);
+
+                if (regenerateAll) {
+                    // Cancel any running job and immediately reset all target chunks to
+                    // pending so the UI reflects the full reset before generation starts.
+                    await API.post('/api/chunks/reset_to_pending', { indices });
+                    await loadChunks(true);
+                }
+
+                // Call batch endpoint for parallel processing
                 const response = await API.post('/api/generate_batch', {
                     indices,
                     label: regenerateAll ? `Regenerate ${getActionScopeLabel()}` : `Render pending in ${getActionScopeLabel()}`,
@@ -4801,6 +5535,14 @@
                 }
 
                 const indices = toProcess.map(c => c.id);
+
+                if (regenerateAll) {
+                    // Cancel any running job and immediately reset all target chunks to
+                    // pending so the UI reflects the full reset before generation starts.
+                    await API.post('/api/chunks/reset_to_pending', { indices });
+                    await loadChunks(true);
+                }
+
                 const response = await API.post('/api/generate_batch_fast', {
                     indices,
                     label: regenerateAll ? `Batch regenerate ${getActionScopeLabel()}` : `Batch render pending in ${getActionScopeLabel()}`,
@@ -4823,7 +5565,7 @@
                  await repairLegacyProjectBeforeExport();
                  await API.post('/api/merge', {});
                  markTaskActionRequested('audio', 'merge');
-                 // Switch to Result tab and poll
+                 // Switch to Export tab and poll
                  document.querySelector('[data-tab="audio"]').click();
                  pollLogs('audio', 'audio-logs');
              } catch (e) {
@@ -4952,6 +5694,11 @@
             review: 'script-logs',
             sanity: 'script-logs',
             repair: 'script-logs',
+            process_paragraphs: 'script-logs',
+            assign_dialogue: 'script-logs',
+            extract_temperament: 'script-logs',
+            create_script: 'script-logs',
+            new_mode_workflow: 'script-logs',
             proofread: 'proofread-logs',
             audio: 'audio-logs',
             lora_training: 'lora-train-logs',
@@ -5045,6 +5792,9 @@
             if (taskName === 'script') {
                 updateScriptTaskButtons(status);
             }
+            if (taskName === 'new_mode_workflow') {
+                updateNewModeWorkflowButtons(status);
+            }
             if ('value' in el && el.tagName === 'TEXTAREA') {
                 el.value = logs.join('\n');
                 el.scrollTop = el.scrollHeight;
@@ -5086,6 +5836,13 @@
                 loadChunks(false).catch(err => console.error('Failed to refresh chunks after proofreading', err));
             } else if (taskName === 'repair') {
                 loadChunks(false).catch(err => console.error('Failed to refresh chunks after repair', err));
+            } else if (taskName === 'create_script') {
+                loadChunks(true).catch(err => console.error('Failed to refresh chunks after script creation', err));
+            } else if (taskName === 'new_mode_workflow') {
+                updateNewModeWorkflowButtons(status);
+                if (!status.paused && !status.last_error && status.completed_at) {
+                    loadChunks(true).catch(err => console.error('Failed to refresh chunks after workflow', err));
+                }
             }
         }
 
@@ -6365,6 +7122,9 @@
 
         // Init
         applyTheme(getStoredTheme());
+        bindAudioProcessingDependency('process-voices-toggle', 'generate-audio-toggle');
+        bindAudioProcessingDependency('process-voices-toggle-v2', 'generate-audio-toggle-v2');
+        initPromptTextareaAutosize();
         loadConfig();
         loadVoices();
         loadSavedScripts();

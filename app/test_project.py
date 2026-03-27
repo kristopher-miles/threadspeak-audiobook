@@ -8,6 +8,7 @@ import zipfile
 import numpy as np
 import soundfile as sf
 
+import project as project_module
 from project import ProjectManager
 
 
@@ -464,7 +465,12 @@ class MergeAudioTests(unittest.TestCase):
         ])
 
         progress = []
-        success, output_filename = self.manager.merge_audio(progress_callback=progress.append)
+        original_normalize = self.manager._normalize_audio_file
+        self.manager._normalize_audio_file = lambda path, export_config=None: (True, path)
+        try:
+            success, output_filename = self.manager.merge_audio(progress_callback=progress.append)
+        finally:
+            self.manager._normalize_audio_file = original_normalize
 
         self.assertTrue(success)
         self.assertEqual(output_filename, "cloned_audiobook.mp3")
@@ -474,7 +480,41 @@ class MergeAudioTests(unittest.TestCase):
         self.assertIn("preparing", stages)
         self.assertIn("assembling", stages)
         self.assertIn("exporting", stages)
+        self.assertIn("normalizing", stages)
         self.assertEqual(stages[-1], "complete")
+
+    def test_merge_audio_fails_when_normalization_fails(self):
+        self._write_wav("voicelines/clip1.wav", duration_seconds=0.5)
+        self._write_wav("voicelines/clip2.wav", duration_seconds=0.5)
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "speaker": "Narrator",
+                "text": "One.",
+                "instruct": "",
+                "chapter": "Chapter 1",
+                "status": "done",
+                "audio_path": "voicelines/clip1.wav",
+            },
+            {
+                "id": 1,
+                "speaker": "Narrator",
+                "text": "Two.",
+                "instruct": "",
+                "chapter": "Chapter 2",
+                "status": "done",
+                "audio_path": "voicelines/clip2.wav",
+            },
+        ])
+        original_normalize = self.manager._normalize_audio_file
+        self.manager._normalize_audio_file = lambda *args, **kwargs: (False, "simulated loudnorm failure")
+        try:
+            success, message = self.manager.merge_audio()
+        finally:
+            self.manager._normalize_audio_file = original_normalize
+
+        self.assertFalse(success)
+        self.assertIn("Audio normalization failed", message)
 
     def test_optimized_export_creates_ordered_zip_parts(self):
         with open(os.path.join(self.root_dir, "state.json"), "w", encoding="utf-8") as f:
@@ -513,17 +553,188 @@ class MergeAudioTests(unittest.TestCase):
             },
         ])
 
-        success, output_filename = self.manager.export_optimized_mp3_zip(max_part_seconds=1.4)
+        original_normalize = self.manager._normalize_audio_file
+        self.manager._normalize_audio_file = lambda path, export_config=None: (True, path)
+        try:
+            success, output_filename = self.manager.export_optimized_mp3_zip(max_part_seconds=1.4)
+        finally:
+            self.manager._normalize_audio_file = original_normalize
 
         self.assertTrue(success)
         self.assertEqual(output_filename, "optimized_audiobook.zip")
         zip_path = os.path.join(self.root_dir, output_filename)
         self.assertTrue(os.path.exists(zip_path))
         with zipfile.ZipFile(zip_path, "r") as zf:
-            self.assertEqual(
-                zf.namelist(),
-                ["my-great-book-01.mp3", "my-great-book-02.mp3"],
-            )
+            names = zf.namelist()
+            stems = [os.path.splitext(name)[0] for name in names]
+            self.assertGreaterEqual(len(stems), 2)
+            expected_stems = [f"my-great-book-{index:02d}" for index in range(1, len(stems) + 1)]
+            self.assertEqual(stems, expected_stems)
+            self.assertTrue(all(name.endswith((".mp3", ".wav")) for name in names))
+
+    def test_optimized_export_falls_back_to_wav_when_mp3_encoding_fails(self):
+        with open(os.path.join(self.root_dir, "state.json"), "w", encoding="utf-8") as f:
+            json.dump({"input_file_path": os.path.join(self.root_dir, "Fallback Book.txt")}, f)
+
+        self._write_wav("voicelines/clip1.wav", duration_seconds=0.5)
+        self._write_wav("voicelines/clip2.wav", duration_seconds=0.5)
+        self._write_wav("voicelines/clip3.wav", duration_seconds=0.5)
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "speaker": "Narrator",
+                "text": "One.",
+                "instruct": "",
+                "chapter": "Chapter 1",
+                "status": "done",
+                "audio_path": "voicelines/clip1.wav",
+            },
+            {
+                "id": 1,
+                "speaker": "Narrator",
+                "text": "Two.",
+                "instruct": "",
+                "chapter": "Chapter 2",
+                "status": "done",
+                "audio_path": "voicelines/clip2.wav",
+            },
+            {
+                "id": 2,
+                "speaker": "Narrator",
+                "text": "Three.",
+                "instruct": "",
+                "chapter": "Chapter 3",
+                "status": "done",
+                "audio_path": "voicelines/clip3.wav",
+            },
+        ])
+
+        calls = []
+        original_run = self.manager._run_ffmpeg_concat
+
+        def fake_run_ffmpeg_concat(concat_path, output_path, codec_args, progress_tick=None):
+            calls.append((os.path.basename(output_path), tuple(codec_args)))
+            if tuple(codec_args) == ("-c:a", "libmp3lame", "-q:a", "2"):
+                return False, "simulated mp3 failure"
+
+            sample_rate = 24000
+            samples = np.zeros(int(sample_rate * 0.25), dtype=np.float32)
+            sf.write(output_path, samples, sample_rate)
+            return True, output_path
+
+        self.manager._run_ffmpeg_concat = fake_run_ffmpeg_concat
+        original_normalize = self.manager._normalize_audio_file
+        self.manager._normalize_audio_file = lambda path, export_config=None: (True, path)
+        try:
+            success, output_filename = self.manager.export_optimized_mp3_zip(max_part_seconds=1.4)
+        finally:
+            self.manager._run_ffmpeg_concat = original_run
+            self.manager._normalize_audio_file = original_normalize
+
+        self.assertTrue(success)
+        self.assertEqual(output_filename, "optimized_audiobook.zip")
+        zip_path = os.path.join(self.root_dir, output_filename)
+        self.assertTrue(os.path.exists(zip_path))
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            names = zf.namelist()
+            self.assertTrue(names)
+            self.assertTrue(all(name.startswith("fallback-book-") for name in names))
+            self.assertTrue(all(name.endswith(".wav") for name in names))
+        self.assertTrue(any(codec_args == ("-c:a", "libmp3lame", "-q:a", "2") for _, codec_args in calls))
+        self.assertTrue(any(codec_args == ("-c:a", "pcm_s16le") for _, codec_args in calls))
+
+    def test_optimized_export_normalizes_each_part(self):
+        with open(os.path.join(self.root_dir, "state.json"), "w", encoding="utf-8") as f:
+            json.dump({"input_file_path": os.path.join(self.root_dir, "Normalize Parts Book.txt")}, f)
+
+        self._write_wav("voicelines/clip1.wav", duration_seconds=0.5)
+        self._write_wav("voicelines/clip2.wav", duration_seconds=0.5)
+        self._write_wav("voicelines/clip3.wav", duration_seconds=0.5)
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "speaker": "Narrator",
+                "text": "One.",
+                "instruct": "",
+                "chapter": "Chapter 1",
+                "status": "done",
+                "audio_path": "voicelines/clip1.wav",
+            },
+            {
+                "id": 1,
+                "speaker": "Narrator",
+                "text": "Two.",
+                "instruct": "",
+                "chapter": "Chapter 2",
+                "status": "done",
+                "audio_path": "voicelines/clip2.wav",
+            },
+            {
+                "id": 2,
+                "speaker": "Narrator",
+                "text": "Three.",
+                "instruct": "",
+                "chapter": "Chapter 3",
+                "status": "done",
+                "audio_path": "voicelines/clip3.wav",
+            },
+        ])
+        normalize_calls = []
+        original_normalize = self.manager._normalize_audio_file
+
+        def fake_normalize(path, export_config=None):
+            normalize_calls.append(os.path.basename(path))
+            return True, path
+
+        self.manager._normalize_audio_file = fake_normalize
+        try:
+            success, output_filename = self.manager.export_optimized_mp3_zip(max_part_seconds=1.4)
+        finally:
+            self.manager._normalize_audio_file = original_normalize
+
+        self.assertTrue(success)
+        self.assertEqual(output_filename, "optimized_audiobook.zip")
+        self.assertGreaterEqual(len(normalize_calls), 2)
+        self.assertTrue(all(name.startswith("normalize-parts-book-") for name in normalize_calls))
+
+    def test_merge_m4b_normalizes_temp_audio_before_encode(self):
+        self._write_wav("voicelines/clip1.wav", duration_seconds=0.5)
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "speaker": "Narrator",
+                "text": "Chapter one starts here.",
+                "instruct": "",
+                "chapter": "Chapter 1",
+                "status": "done",
+                "audio_path": "voicelines/clip1.wav",
+            },
+        ])
+
+        normalize_calls = []
+        original_normalize = self.manager._normalize_audio_file
+        original_run = project_module.subprocess.run
+
+        def fake_normalize(path, export_config=None):
+            normalize_calls.append(path)
+            return True, path
+
+        class DummyResult:
+            returncode = 0
+            stderr = ""
+
+        self.manager._normalize_audio_file = fake_normalize
+        project_module.subprocess.run = lambda *args, **kwargs: DummyResult()
+        try:
+            success, output_filename = self.manager.merge_m4b()
+        finally:
+            self.manager._normalize_audio_file = original_normalize
+            project_module.subprocess.run = original_run
+
+        self.assertTrue(success)
+        self.assertEqual(output_filename, "audiobook.m4b")
+        self.assertEqual(len(normalize_calls), 1)
+        self.assertTrue(normalize_calls[0].endswith("temp_m4b_combined.wav"))
 
     def test_repair_legacy_chunk_order_rewrites_chunks_from_editor_order(self):
         original = [

@@ -2,6 +2,7 @@ import os
 import json
 import shutil
 import subprocess
+import inspect
 import threading
 import concurrent.futures
 import zipfile
@@ -11,6 +12,7 @@ import time
 import copy
 import tempfile
 import uuid
+from types import SimpleNamespace
 from collections import Counter, defaultdict
 from difflib import SequenceMatcher
 from tts import (
@@ -96,7 +98,7 @@ def _extract_chapter_name(entry):
     return None
 
 
-def _build_chunk(speaker, text, instruct, chapter=None):
+def _build_chunk(speaker, text, instruct, chapter=None, paragraph_id=None):
     chunk = {
         "speaker": speaker,
         "text": text,
@@ -105,6 +107,8 @@ def _build_chunk(speaker, text, instruct, chapter=None):
     }
     if chapter:
         chunk["chapter"] = chapter
+    if paragraph_id:
+        chunk["paragraph_id"] = paragraph_id
     return chunk
 
 
@@ -118,6 +122,7 @@ def group_into_chunks(script_entries, max_chars=MAX_CHUNK_CHARS):
     current_text = script_entries[0].get("text", "")
     current_instruct = script_entries[0].get("instruct", "")
     current_chapter = _extract_chapter_name(script_entries[0])
+    current_paragraph_id = script_entries[0].get("paragraph_id")
 
     for entry in script_entries[1:]:
         speaker = get_speaker(entry)
@@ -125,6 +130,7 @@ def group_into_chunks(script_entries, max_chars=MAX_CHUNK_CHARS):
         instruct = entry.get("instruct", "")
         entry_chapter = _extract_chapter_name(entry)
         effective_chapter = entry_chapter or current_chapter
+        entry_paragraph_id = entry.get("paragraph_id")
 
         # Don't merge structural text (titles, chapter headings, dedications)
         if (speaker == current_speaker and instruct == current_instruct
@@ -134,20 +140,24 @@ def group_into_chunks(script_entries, max_chars=MAX_CHUNK_CHARS):
             combined = current_text + " " + text
             if len(combined) <= max_chars:
                 current_text = combined
+                # Track the latest paragraph_id so the chunk reflects where it ends
+                current_paragraph_id = entry_paragraph_id or current_paragraph_id
             else:
-                chunks.append(_build_chunk(current_speaker, current_text, current_instruct, current_chapter))
+                chunks.append(_build_chunk(current_speaker, current_text, current_instruct, current_chapter, current_paragraph_id))
                 current_text = text
                 current_instruct = instruct
                 current_chapter = effective_chapter
+                current_paragraph_id = entry_paragraph_id
         else:
-            chunks.append(_build_chunk(current_speaker, current_text, current_instruct, current_chapter))
+            chunks.append(_build_chunk(current_speaker, current_text, current_instruct, current_chapter, current_paragraph_id))
             current_speaker = speaker
             current_text = text
             current_instruct = instruct
             current_chapter = effective_chapter
+            current_paragraph_id = entry_paragraph_id
 
     # Don't forget the last chunk
-    chunks.append(_build_chunk(current_speaker, current_text, current_instruct, current_chapter))
+    chunks.append(_build_chunk(current_speaker, current_text, current_instruct, current_chapter, current_paragraph_id))
 
     return chunks
 
@@ -164,6 +174,7 @@ class ProjectManager:
         self.voice_config_path = os.path.join(root_dir, "voice_config.json")
         self.config_path = os.path.join(root_dir, "app", "config.json")
         self.transcription_cache_path = os.path.join(root_dir, "transcription_cache.json")
+        self.paragraphs_path = os.path.join(root_dir, "paragraphs.json")
 
         # Ensure voicelines dir exists
         os.makedirs(self.voicelines_dir, exist_ok=True)
@@ -174,6 +185,20 @@ class ProjectManager:
         self._chunks_lock = threading.Lock()  # Thread-safe file writes
         self._transcription_cache_lock = threading.Lock()
         self._transcription_cache = None
+
+    def load_paragraphs(self):
+        """Return the paragraphs.json document, or None if it does not exist yet."""
+        if not os.path.exists(self.paragraphs_path):
+            return None
+        with open(self.paragraphs_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def save_paragraphs(self, data: dict):
+        """Atomically write paragraphs data to paragraphs.json."""
+        tmp = self.paragraphs_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, self.paragraphs_path)
 
     def _load_voice_config(self):
         if os.path.exists(self.voice_config_path):
@@ -303,6 +328,8 @@ class ProjectManager:
             try:
                 with open(state_path, "r", encoding="utf-8") as f:
                     state = json.load(f)
+                if state.get("loaded_script_name"):
+                    return state["loaded_script_name"].strip()
                 input_path = state.get("input_file_path") or ""
                 if input_path:
                     return os.path.splitext(os.path.basename(input_path))[0].strip()
@@ -474,26 +501,58 @@ class ProjectManager:
             "output_file_size_bytes": os.path.getsize(output_path) if output_path and os.path.exists(output_path) else 0,
         })
 
-    def _create_silence_assets(self, temp_dir):
+    def _create_silence_assets(self, temp_dir, export_config=None):
+        default_ms = getattr(export_config, "silence_between_speakers_ms", DEFAULT_PAUSE_MS)
+        same_ms = getattr(export_config, "silence_same_speaker_ms", SAME_SPEAKER_PAUSE_MS)
+        chapter_end_ms = getattr(export_config, "silence_end_of_chapter_ms", 3000)
+        paragraph_ms = getattr(export_config, "silence_paragraph_ms", 750)
+
         default_silence_path = os.path.join(temp_dir, "pause_default.mp3")
         same_silence_path = os.path.join(temp_dir, "pause_same_speaker.mp3")
-        default_export = AudioSegment.silent(duration=DEFAULT_PAUSE_MS).export(default_silence_path, format="mp3")
-        if hasattr(default_export, "close"):
-            default_export.close()
-        same_export = AudioSegment.silent(duration=SAME_SPEAKER_PAUSE_MS).export(same_silence_path, format="mp3")
-        if hasattr(same_export, "close"):
-            same_export.close()
+        chapter_end_silence_path = os.path.join(temp_dir, "pause_chapter_end.mp3")
+        paragraph_silence_path = os.path.join(temp_dir, "pause_paragraph.mp3")
+
+        def _write(path, duration_ms):
+            exp = AudioSegment.silent(duration=max(0, duration_ms)).export(path, format="mp3")
+            if hasattr(exp, "close"):
+                exp.close()
+
+        _write(default_silence_path, default_ms)
+        _write(same_silence_path, same_ms)
+        _write(chapter_end_silence_path, chapter_end_ms)
+        _write(paragraph_silence_path, paragraph_ms)
+
         return {
             "default_path": default_silence_path,
             "same_path": same_silence_path,
+            "chapter_end_path": chapter_end_silence_path,
+            "paragraph_path": paragraph_silence_path,
             "default_size_bytes": os.path.getsize(default_silence_path),
             "same_size_bytes": os.path.getsize(same_silence_path),
+            "chapter_end_size_bytes": os.path.getsize(chapter_end_silence_path),
+            "paragraph_size_bytes": os.path.getsize(paragraph_silence_path),
         }
 
-    def _export_concat_mp3(self, concat_path, output_path, progress_tick=None):
+    @staticmethod
+    def _pick_silence(prev_item, curr_item, silence_assets, *, is_chapter_boundary=False):
+        """Return (pause_path, pause_size_bytes) for the gap between two timeline items."""
+        if is_chapter_boundary:
+            return silence_assets["chapter_end_path"], silence_assets["chapter_end_size_bytes"]
+        prev_pid = prev_item["chunk"].get("paragraph_id")
+        curr_pid = curr_item["chunk"].get("paragraph_id")
+        if prev_pid and curr_pid and prev_pid != curr_pid:
+            return silence_assets["paragraph_path"], silence_assets["paragraph_size_bytes"]
+        if prev_item["chunk"]["speaker"] == curr_item["chunk"]["speaker"]:
+            return silence_assets["same_path"], silence_assets["same_size_bytes"]
+        return silence_assets["default_path"], silence_assets["default_size_bytes"]
+
+    def _run_ffmpeg_concat(self, concat_path, output_path, codec_args, progress_tick=None):
         command = [
             "ffmpeg",
             "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
             "-f",
             "concat",
             "-safe",
@@ -501,16 +560,19 @@ class ProjectManager:
             "-i",
             concat_path,
             "-vn",
-            "-c:a",
-            "libmp3lame",
-            "-q:a",
-            "2",
+            *codec_args,
             output_path,
         ]
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+
         process = subprocess.Popen(
             command,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
 
         while process.poll() is None:
@@ -518,12 +580,412 @@ class ProjectManager:
                 progress_tick()
             time.sleep(1)
 
-        return process.returncode == 0
+        stderr_text = ""
+        if process.stderr:
+            try:
+                stderr_text = process.stderr.read().decode("utf-8", errors="replace").strip()
+            except Exception:
+                stderr_text = ""
+
+        if process.returncode != 0:
+            return False, stderr_text or f"ffmpeg exited with code {process.returncode}"
+
+        if not os.path.exists(output_path):
+            return False, "ffmpeg completed without creating an output file"
+
+        output_size = os.path.getsize(output_path)
+        if output_size < 1024:
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+            return False, f"ffmpeg produced an invalid file ({output_size} bytes)"
+
+        return True, output_path
+
+    def _export_concat_mp3(self, concat_path, output_path, progress_tick=None):
+        mp3_success, mp3_result = self._run_ffmpeg_concat(
+            concat_path,
+            output_path,
+            ["-c:a", "libmp3lame", "-q:a", "2"],
+            progress_tick=progress_tick,
+        )
+        if mp3_success:
+            return True, mp3_result
+
+        fallback_path = os.path.splitext(output_path)[0] + ".wav"
+        wav_success, wav_result = self._run_ffmpeg_concat(
+            concat_path,
+            fallback_path,
+            ["-c:a", "pcm_s16le"],
+            progress_tick=progress_tick,
+        )
+        if wav_success:
+            print(
+                f"MP3 export failed for {output_path} ({mp3_result}). "
+                f"Falling back to WAV: {wav_result}"
+            )
+            return True, wav_result
+
+        return False, f"{mp3_result}; fallback WAV export also failed: {wav_result}"
 
     def _optimized_export_part_basename(self, part_index):
         title = self._current_script_title().strip() or "Project"
         safe_title = re.sub(r"[^A-Za-z0-9]+", "-", title).strip("-").lower() or "project"
         return f"{safe_title}-{part_index:02d}.mp3"
+
+    @staticmethod
+    def _is_normalization_enabled(export_config):
+        if export_config is None:
+            return True
+        return bool(getattr(export_config, "normalize_enabled", True))
+
+    @staticmethod
+    def _extract_json_object(text):
+        if not text:
+            return None
+        start = text.find("{")
+        while start != -1:
+            depth = 0
+            for idx in range(start, len(text)):
+                char = text[idx]
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        candidate = text[start:idx + 1]
+                        try:
+                            return json.loads(candidate)
+                        except json.JSONDecodeError:
+                            break
+            start = text.find("{", start + 1)
+        return None
+
+    def _detect_channel_count(self, input_path):
+        try:
+            return int(AudioSegment.from_file(input_path).channels or 1)
+        except Exception:
+            return 1
+
+    @staticmethod
+    def _loudnorm_codec_args_for_path(path):
+        ext = os.path.splitext(path)[1].lower()
+        if ext == ".wav":
+            return ["-c:a", "pcm_s16le"]
+        return ["-c:a", "libmp3lame", "-q:a", "2"]
+
+    @staticmethod
+    def _run_ffmpeg_with_progress(command, duration_seconds=None, progress_callback=None):
+        """Run ffmpeg and emit estimated progress derived from out_time_ms."""
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        stderr_lines = []
+        last_percent = -1.0
+        safe_duration = max(float(duration_seconds or 0.0), 0.001)
+
+        while True:
+            line = process.stderr.readline()
+            if not line:
+                if process.poll() is not None:
+                    break
+                continue
+
+            stderr_lines.append(line)
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            if progress_callback and stripped.startswith("out_time_ms="):
+                try:
+                    out_time_seconds = max(0.0, int(stripped.split("=", 1)[1]) / 1_000_000.0)
+                except (TypeError, ValueError):
+                    continue
+                phase_percent = min(100.0, (out_time_seconds / safe_duration) * 100.0)
+                if phase_percent >= last_percent + 1.0 or phase_percent >= 99.9:
+                    last_percent = phase_percent
+                    progress_callback(out_time_seconds, phase_percent)
+
+        stdout_text = ""
+        if process.stdout:
+            try:
+                stdout_text = process.stdout.read() or ""
+            except Exception:
+                stdout_text = ""
+
+        stderr_text = "".join(stderr_lines)
+        if progress_callback:
+            progress_callback(float(duration_seconds or 0.0), 100.0)
+        return process.returncode, stdout_text, stderr_text
+
+    def _resolve_export_normalization_config(self, export_config=None):
+        if export_config is not None:
+            return export_config
+        app_config = self._load_app_config()
+        export_raw = app_config.get("export", {}) if isinstance(app_config, dict) else {}
+        if not isinstance(export_raw, dict):
+            export_raw = {}
+        return SimpleNamespace(**export_raw)
+
+    def _normalize_audio_file(
+        self,
+        input_path,
+        export_config=None,
+        allow_short_single_pass=False,
+        short_seconds_threshold=12.0,
+        progress_callback=None,
+        log_callback=None,
+    ):
+        """Apply two-pass EBU R128 loudness normalization in-place."""
+        export_config = self._resolve_export_normalization_config(export_config)
+        if not self._is_normalization_enabled(export_config):
+            return True, input_path
+
+        if not os.path.exists(input_path):
+            return False, f"Normalization input does not exist: {input_path}"
+
+        duration_seconds = 0.0
+        try:
+            duration_seconds = float(AudioSegment.from_file(input_path).duration_seconds or 0.0)
+        except Exception:
+            duration_seconds = 0.0
+        is_short_clip = duration_seconds > 0 and duration_seconds <= float(short_seconds_threshold)
+
+        channels = self._detect_channel_count(input_path)
+        target_lufs = float(
+            getattr(export_config, "normalize_target_lufs_stereo", -16.0)
+            if channels > 1 else getattr(export_config, "normalize_target_lufs_mono", -18.0)
+        )
+        target_tp = float(getattr(export_config, "normalize_true_peak_dbtp", -1.0))
+        target_lra = float(getattr(export_config, "normalize_lra", 11.0))
+
+        base_filter = (
+            f"loudnorm=I={target_lufs}:TP={target_tp}:LRA={target_lra}:"
+            "print_format=json"
+        )
+        ext = os.path.splitext(input_path)[1]
+
+        progress_log_state = {}
+        progress_emit_state = {"overall_percent": -1.0}
+
+        def _emit_progress(phase, out_time_seconds=0.0, phase_percent=0.0):
+            if progress_callback:
+                phase_percent = max(0.0, min(100.0, float(phase_percent or 0.0)))
+                if phase == "pass1-measure":
+                    overall_percent = phase_percent * 0.5
+                elif phase == "pass2-apply":
+                    overall_percent = 50.0 + (phase_percent * 0.5)
+                else:
+                    overall_percent = phase_percent
+                should_emit = (
+                    overall_percent >= 99.9
+                    or (overall_percent - progress_emit_state["overall_percent"]) >= 1.0
+                )
+                if should_emit:
+                    progress_emit_state["overall_percent"] = overall_percent
+                    progress_callback({
+                        "phase": phase,
+                        "processed_seconds": float(out_time_seconds or 0.0),
+                        "phase_percent": phase_percent,
+                        "overall_percent": overall_percent,
+                    })
+            if log_callback:
+                bucket = int(float(phase_percent or 0.0) // 20) * 20
+                previous_bucket = progress_log_state.get(phase, -10)
+                if bucket > previous_bucket and bucket <= 100:
+                    progress_log_state[phase] = bucket
+                    readable_phase = {
+                        "pass1-measure": "Normalization pass 1/2",
+                        "pass2-apply": "Normalization pass 2/2",
+                        "single-pass": "Normalization single-pass fallback",
+                    }.get(phase, "Normalization")
+                    log_callback(f"{readable_phase}: {bucket}%")
+
+        def _single_pass_normalize(reason):
+            pass1_filter = (
+                f"loudnorm=I={target_lufs}:TP={target_tp}:LRA={target_lra}:"
+                "linear=false:print_format=summary"
+            )
+            temp_output = f"{input_path}.normalized{ext}"
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-progress",
+                "pipe:2",
+                "-nostats",
+                "-loglevel",
+                "error",
+                "-i",
+                input_path,
+                "-vn",
+                "-af",
+                pass1_filter,
+                *self._loudnorm_codec_args_for_path(input_path),
+                temp_output,
+            ]
+            if log_callback:
+                log_callback("Normalization fallback: running single-pass loudnorm for short clip...")
+            returncode, stdout_text, stderr_text = self._run_ffmpeg_with_progress(
+                cmd,
+                duration_seconds=duration_seconds,
+                progress_callback=lambda out_time, pct: _emit_progress("single-pass", out_time, pct),
+            )
+            if returncode != 0:
+                try:
+                    if os.path.exists(temp_output):
+                        os.remove(temp_output)
+                except OSError:
+                    pass
+                stderr_tail = (stderr_text or stdout_text or "").strip()[-600:]
+                return False, f"{reason}; short-clip loudnorm fallback failed: {stderr_tail or f'exit {returncode}'}"
+            if not os.path.exists(temp_output) or os.path.getsize(temp_output) < 1024:
+                try:
+                    if os.path.exists(temp_output):
+                        os.remove(temp_output)
+                except OSError:
+                    pass
+                return False, f"{reason}; short-clip loudnorm fallback produced invalid output"
+            os.replace(temp_output, input_path)
+            return True, input_path
+
+        measure_cmd = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-progress",
+            "pipe:2",
+            "-nostats",
+            "-loglevel",
+            "info",
+            "-i",
+            input_path,
+            "-vn",
+            "-af",
+            base_filter,
+            "-f",
+            "null",
+            "-",
+        ]
+        if log_callback:
+            log_callback("Normalization pass 1/2: measuring integrated loudness...")
+        returncode, stdout_text, stderr_text = self._run_ffmpeg_with_progress(
+            measure_cmd,
+            duration_seconds=duration_seconds,
+            progress_callback=lambda out_time, pct: _emit_progress("pass1-measure", out_time, pct),
+        )
+        if returncode != 0:
+            if allow_short_single_pass and is_short_clip:
+                return _single_pass_normalize("loudnorm pass 1 failed")
+            stderr_tail = (stderr_text or stdout_text or "").strip()[-600:]
+            return False, f"loudnorm pass 1 failed: {stderr_tail or f'exit {returncode}'}"
+
+        measure_text = f"{stderr_text}\n{stdout_text}"
+        measured = self._extract_json_object(measure_text)
+        required_keys = (
+            "input_i",
+            "input_tp",
+            "input_lra",
+            "input_thresh",
+            "target_offset",
+        )
+        if not measured or any(key not in measured for key in required_keys):
+            if allow_short_single_pass and is_short_clip:
+                return _single_pass_normalize("loudnorm pass 1 did not produce valid measurement JSON")
+            return False, "loudnorm pass 1 did not produce valid measurement JSON"
+
+        try:
+            measured_i = float(measured["input_i"])
+            measured_tp = float(measured["input_tp"])
+            measured_lra = float(measured["input_lra"])
+            measured_thresh = float(measured["input_thresh"])
+            target_offset = float(measured["target_offset"])
+        except (TypeError, ValueError):
+            if allow_short_single_pass and is_short_clip:
+                return _single_pass_normalize("loudnorm pass 1 returned non-numeric values")
+            return False, "loudnorm pass 1 returned invalid measurement values"
+
+        pass2_filter = (
+            f"loudnorm=I={target_lufs}:TP={target_tp}:LRA={target_lra}:"
+            f"measured_I={measured_i}:measured_TP={measured_tp}:"
+            f"measured_LRA={measured_lra}:measured_thresh={measured_thresh}:"
+            f"offset={target_offset}:linear=true:print_format=summary"
+        )
+        temp_output = f"{input_path}.normalized{ext}"
+        normalize_cmd = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-progress",
+            "pipe:2",
+            "-nostats",
+            "-loglevel",
+            "error",
+            "-i",
+            input_path,
+            "-vn",
+            "-af",
+            pass2_filter,
+            *self._loudnorm_codec_args_for_path(input_path),
+            temp_output,
+        ]
+        if log_callback:
+            log_callback("Normalization pass 2/2: applying measured loudness correction...")
+        returncode, stdout_text, stderr_text = self._run_ffmpeg_with_progress(
+            normalize_cmd,
+            duration_seconds=duration_seconds,
+            progress_callback=lambda out_time, pct: _emit_progress("pass2-apply", out_time, pct),
+        )
+        if returncode != 0:
+            if allow_short_single_pass and is_short_clip:
+                return _single_pass_normalize("loudnorm pass 2 failed")
+            try:
+                if os.path.exists(temp_output):
+                    os.remove(temp_output)
+            except OSError:
+                pass
+            stderr_tail = (stderr_text or stdout_text or "").strip()[-600:]
+            return False, f"loudnorm pass 2 failed: {stderr_tail or f'exit {returncode}'}"
+
+        if not os.path.exists(temp_output) or os.path.getsize(temp_output) < 1024:
+            try:
+                if os.path.exists(temp_output):
+                    os.remove(temp_output)
+            except OSError:
+                pass
+            return False, "loudnorm pass 2 produced an invalid output file"
+
+        os.replace(temp_output, input_path)
+        return True, input_path
+
+    def _call_normalize_audio_file(self, input_path, export_config=None, progress_callback=None, log_callback=None, **kwargs):
+        """
+        Backward-compatible wrapper around `_normalize_audio_file`.
+        Some tests monkeypatch `_normalize_audio_file` with a narrower signature.
+        """
+        normalize_fn = self._normalize_audio_file
+        call_kwargs = {}
+        try:
+            accepted = set(inspect.signature(normalize_fn).parameters.keys())
+        except (TypeError, ValueError):
+            accepted = set()
+
+        if "export_config" in accepted:
+            call_kwargs["export_config"] = export_config
+        if "progress_callback" in accepted and progress_callback is not None:
+            call_kwargs["progress_callback"] = progress_callback
+        if "log_callback" in accepted and log_callback is not None:
+            call_kwargs["log_callback"] = log_callback
+        for key, value in kwargs.items():
+            if key in accepted:
+                call_kwargs[key] = value
+
+        return normalize_fn(input_path, **call_kwargs)
 
     def _load_generation_settings(self):
         return self._load_app_config().get("generation", {})
@@ -733,7 +1195,7 @@ class ProjectManager:
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2, ensure_ascii=False)
 
-    def materialize_design_voice(self, speaker, description=None, sample_text=None, force=False, voice_config=None):
+    def materialize_design_voice(self, speaker, description=None, sample_text=None, force=False, voice_config=None, export_config=None):
         voice_config = copy.deepcopy(voice_config) if voice_config is not None else self._load_voice_config()
         voice_data = voice_config.setdefault(speaker, {})
         voice_data["type"] = "design"
@@ -766,6 +1228,13 @@ class ProjectManager:
                 raise RuntimeError("TTS engine not initialized")
             wav_path, _ = engine.generate_voice_design(description=description, sample_text=generated_ref_text)
             shutil.copy2(wav_path, abs_audio_path)
+            normalized, normalize_result = self._call_normalize_audio_file(
+                abs_audio_path,
+                export_config=export_config,
+                allow_short_single_pass=True,
+            )
+            if not normalized:
+                raise RuntimeError(f"Failed to normalize generated design voice for '{speaker}': {normalize_result}")
             if hasattr(engine, "clear_clone_prompt_cache"):
                 engine.clear_clone_prompt_cache(speaker)
 
@@ -892,6 +1361,133 @@ class ProjectManager:
             current = target
 
         return original
+
+    @staticmethod
+    def _voice_entry_from_config(voice_config, speaker):
+        if not isinstance(voice_config, dict):
+            return {}
+        entry = voice_config.get(speaker, {})
+        return entry if isinstance(entry, dict) else {}
+
+    @staticmethod
+    def _voice_ref_audio_from_config(voice_config, speaker):
+        entry = ProjectManager._voice_entry_from_config(voice_config, speaker)
+        return str(entry.get("ref_audio") or "").strip()
+
+    def preview_voice_config_invalidation(self, old_config, new_config):
+        """Preview how many generated clips must be invalidated for a voice-config change.
+
+        A clip is considered affected when:
+        1) its resolved alias target changes, or
+        2) the resolved target keeps the same name but its ref_audio changes.
+        """
+        old_config = old_config if isinstance(old_config, dict) else {}
+        new_config = new_config if isinstance(new_config, dict) else {}
+        chunks = self.load_chunks()
+
+        affected_indices = []
+        affected_speakers = set()
+        changed_reasons = Counter()
+
+        for index, chunk in enumerate(chunks):
+            audio_path = str((chunk or {}).get("audio_path") or "").strip()
+            if not audio_path:
+                continue
+
+            speaker = str((chunk or {}).get("speaker") or "").strip()
+            if not speaker:
+                continue
+
+            old_resolved = self.resolve_voice_speaker(speaker, old_config)
+            new_resolved = self.resolve_voice_speaker(speaker, new_config)
+
+            alias_changed = self._normalize_speaker_name(old_resolved) != self._normalize_speaker_name(new_resolved)
+            old_ref_audio = self._voice_ref_audio_from_config(old_config, old_resolved)
+            new_ref_audio = self._voice_ref_audio_from_config(new_config, new_resolved)
+            ref_audio_changed = old_ref_audio != new_ref_audio and (old_ref_audio or new_ref_audio)
+
+            if not (alias_changed or ref_audio_changed):
+                continue
+
+            affected_indices.append(index)
+            affected_speakers.add(speaker)
+            if alias_changed:
+                changed_reasons["alias"] += 1
+            if ref_audio_changed:
+                changed_reasons["ref_audio"] += 1
+
+        return {
+            "invalidated_clips": len(affected_indices),
+            "affected_indices": affected_indices,
+            "affected_speakers": sorted(affected_speakers),
+            "reason_counts": dict(changed_reasons),
+        }
+
+    def invalidate_chunk_audio_indices(self, indices):
+        """Delete audio files and clear chunk audio refs for selected chunk indices."""
+        target_indices = {int(i) for i in (indices or []) if isinstance(i, int) or str(i).isdigit()}
+        if not target_indices:
+            return {"invalidated_clips": 0, "deleted_files": 0}
+
+        deleted_files = 0
+        cleared = 0
+        files_to_delete = set()
+
+        with self._chunks_lock:
+            if not os.path.exists(self.chunks_path):
+                return {"invalidated_clips": 0, "deleted_files": 0}
+
+            with open(self.chunks_path, "r", encoding="utf-8") as f:
+                chunks = json.load(f)
+
+            for index in sorted(target_indices):
+                if not (0 <= index < len(chunks)):
+                    continue
+                chunk = chunks[index]
+                audio_path = str(chunk.get("audio_path") or "").strip()
+                if not audio_path:
+                    continue
+                files_to_delete.add(audio_path)
+                chunk["audio_path"] = None
+                chunk["audio_validation"] = None
+                chunk["status"] = "pending"
+                chunk["auto_regen_count"] = 0
+                chunk.pop("generation_token", None)
+                self._clear_proofread_state(chunk)
+                cleared += 1
+
+            if cleared > 0:
+                self._atomic_json_write(chunks, self.chunks_path)
+
+        root_abs = os.path.abspath(self.root_dir)
+        for relative_path in files_to_delete:
+            full_path = os.path.abspath(os.path.join(self.root_dir, relative_path))
+            if not (full_path == root_abs or full_path.startswith(root_abs + os.sep)):
+                continue
+            if not os.path.exists(full_path):
+                continue
+            try:
+                os.remove(full_path)
+                deleted_files += 1
+            except OSError:
+                pass
+
+        return {"invalidated_clips": cleared, "deleted_files": deleted_files}
+
+    def save_voice_config_with_invalidation(self, new_config, confirm_invalidation=False):
+        new_config = copy.deepcopy(new_config) if isinstance(new_config, dict) else {}
+        old_config = self._load_voice_config()
+        preview = self.preview_voice_config_invalidation(old_config, new_config)
+
+        if preview["invalidated_clips"] > 0 and not confirm_invalidation:
+            return {"status": "confirmation_required", **preview}
+
+        self._save_voice_config(new_config)
+        if preview["invalidated_clips"] <= 0:
+            return {"status": "saved", "invalidated_clips": 0, "deleted_files": 0, **preview}
+
+        applied = self.invalidate_chunk_audio_indices(preview["affected_indices"])
+        return {"status": "saved", **preview, **applied}
 
     def get_engine(self):
         if self.engine:
@@ -1179,7 +1775,8 @@ class ProjectManager:
             return None
         return audio_validation
 
-    def manually_validate_proofread_clip(self, chunk_ref, threshold=1.0):
+    def _manually_mark_proofread_clip(self, chunk_ref, threshold, *, accept: bool):
+        """Shared core for validate (accept=True) and reject (accept=False)."""
         with self._chunks_lock:
             if not os.path.exists(self.chunks_path):
                 return None
@@ -1194,11 +1791,11 @@ class ProjectManager:
             chunk = chunks[index]
             audio_path = (chunk.get("audio_path") or "").strip()
             if not audio_path:
-                raise ValueError("Cannot validate a clip with no audio.")
+                raise ValueError("Cannot mark a clip with no audio.")
 
             full_audio_path = os.path.join(self.root_dir, audio_path)
             if not os.path.exists(full_audio_path):
-                raise ValueError("Cannot validate a clip whose audio file is missing.")
+                raise ValueError("Cannot mark a clip whose audio file is missing.")
 
             existing = dict(chunk.get("proofread") or {})
             now = time.time()
@@ -1214,17 +1811,7 @@ class ProjectManager:
             if "transcript_text" not in proofread_state:
                 proofread_state["transcript_text"] = ""
 
-            if existing.get("manual_validated"):
-                proofread_state.update({
-                    "score": 0.0,
-                    "passed": False,
-                    "error": "Manually marked as failed by user.",
-                    "manual_validated": False,
-                    "manual_failed": True,
-                    "failed_at": now,
-                })
-                proofread_state.pop("validated_at", None)
-            else:
+            if accept:
                 proofread_state.update({
                     "score": 1.0,
                     "passed": True,
@@ -1234,10 +1821,26 @@ class ProjectManager:
                     "validated_at": now,
                 })
                 proofread_state.pop("failed_at", None)
+            else:
+                proofread_state.update({
+                    "score": 0.0,
+                    "passed": False,
+                    "error": "Manually rejected by user.",
+                    "manual_validated": False,
+                    "manual_failed": True,
+                    "failed_at": now,
+                })
+                proofread_state.pop("validated_at", None)
 
             chunk["proofread"] = proofread_state
             self._atomic_json_write(chunks, self.chunks_path)
             return chunk
+
+    def manually_validate_proofread_clip(self, chunk_ref, threshold=1.0):
+        return self._manually_mark_proofread_clip(chunk_ref, threshold, accept=True)
+
+    def manually_reject_proofread_clip(self, chunk_ref, threshold=1.0):
+        return self._manually_mark_proofread_clip(chunk_ref, threshold, accept=False)
 
     def compare_proofread_clip(self, chunk_ref, threshold=1.0):
         with self._chunks_lock:
@@ -1353,6 +1956,14 @@ class ProjectManager:
     @staticmethod
     def _normalize_asr_text(text):
         text = (text or "").lower()
+        # Delete apostrophes/curly-apostrophes so contractions and possessives
+        # collapse into a single token instead of splitting on the apostrophe.
+        # e.g. "can't" → "cant", "they're" → "theyre", "it's" → "its"
+        # Without this, the regex below replaces the apostrophe with a space,
+        # turning "can't" into "can t" (2 tokens) while a transcript that omits
+        # the apostrophe ("cant") stays as 1 token — a false mismatch.
+        text = re.sub(r"['\u2018\u2019\u02bc]", "", text)
+        # Replace every remaining non-alphanumeric character with a space
         text = re.sub(r"[^a-z0-9]+", " ", text)
         return re.sub(r"\s+", " ", text).strip()
 
@@ -2959,6 +3570,33 @@ class ProjectManager:
             self._atomic_json_write(chunks, self.chunks_path)
             return chunks[index]
 
+    def force_reset_chunks_to_pending(self, indices):
+        """Force any chunk in `indices` to pending status regardless of current state.
+
+        Clears audio_path, audio_validation, generation_token and all proofread
+        state so the UI immediately reflects the reset.  Called before a
+        Regenerate-All job is enqueued so the user gets instant feedback.
+        """
+        reset_count = 0
+        with self._chunks_lock:
+            if not os.path.exists(self.chunks_path):
+                return reset_count
+            with open(self.chunks_path, "r", encoding="utf-8") as f:
+                chunks = json.load(f)
+            for index in indices:
+                if not (0 <= index < len(chunks)):
+                    continue
+                chunk = chunks[index]
+                chunk["status"] = "pending"
+                chunk["audio_path"] = None
+                chunk["audio_validation"] = None
+                chunk.pop("generation_token", None)
+                self._clear_proofread_state(chunk)
+                reset_count += 1
+            if reset_count:
+                self._atomic_json_write(chunks, self.chunks_path)
+        return reset_count
+
     def reset_generating_chunks(self, indices=None, generation_token=None, target_status="pending"):
         reset_count = 0
         with self._chunks_lock:
@@ -3007,6 +3645,8 @@ class ProjectManager:
             }
             if source.get("chapter"):
                 new_chunk["chapter"] = source["chapter"]
+            if source.get("paragraph_id"):
+                new_chunk["paragraph_id"] = source["paragraph_id"]
             chunks.insert(after_index + 1, new_chunk)
 
             # Re-number all IDs
@@ -3663,7 +4303,7 @@ class ProjectManager:
             self._cleanup_temp_file(os.path.join(self.root_dir, f"temp_chunk_{index}.wav"))
             return False, str(e)
 
-    def merge_audio(self, progress_callback=None):
+    def merge_audio(self, progress_callback=None, log_callback=None, export_config=None):
         merge_started_at = time.time()
         timeline = self._collect_merge_timeline(progress_callback=progress_callback, merge_started_at=merge_started_at)
 
@@ -3678,33 +4318,56 @@ class ProjectManager:
         concat_path = os.path.join(temp_dir, "concat.txt")
 
         try:
-            silence_assets = self._create_silence_assets(temp_dir)
+            silence_assets = self._create_silence_assets(temp_dir, export_config)
 
             estimated_size_bytes = 0
-            previous_speaker = None
+            previous_item = None
+            total_same = 0
+            total_diff = 0
+            total_para = 0
+            total_chapter_end = 0
 
             with open(concat_path, "w", encoding="utf-8") as concat_file:
                 for chapter_index, (chapter_label, chapter_items) in enumerate(chapter_groups, start=1):
-                    chapter_first_speaker = chapter_items[0]["chunk"]["speaker"] if chapter_items else None
-                    if previous_speaker is not None and chapter_first_speaker is not None:
-                        pause_path = silence_assets["same_path"] if previous_speaker == chapter_first_speaker else silence_assets["default_path"]
-                        pause_size = silence_assets["same_size_bytes"] if previous_speaker == chapter_first_speaker else silence_assets["default_size_bytes"]
+                    if previous_item is not None and chapter_items:
+                        pause_path, pause_size = self._pick_silence(
+                            previous_item, chapter_items[0], silence_assets, is_chapter_boundary=True
+                        )
                         self._write_concat_line(concat_file, pause_path)
                         estimated_size_bytes += pause_size
+                        total_chapter_end += 1
 
-                    chapter_previous_speaker = None
+                    chapter_same = 0
+                    chapter_diff = 0
+                    chapter_para = 0
+                    prev_item_in_chapter = None
                     for item in chapter_items:
-                        speaker = item["chunk"]["speaker"]
-                        if chapter_previous_speaker is not None:
-                            pause_path = silence_assets["same_path"] if chapter_previous_speaker == speaker else silence_assets["default_path"]
-                            pause_size = silence_assets["same_size_bytes"] if chapter_previous_speaker == speaker else silence_assets["default_size_bytes"]
+                        if prev_item_in_chapter is not None:
+                            pause_path, pause_size = self._pick_silence(prev_item_in_chapter, item, silence_assets)
                             self._write_concat_line(concat_file, pause_path)
                             estimated_size_bytes += pause_size
+                            # Tally silence type for diagnostics
+                            prev_pid = prev_item_in_chapter["chunk"].get("paragraph_id")
+                            curr_pid = item["chunk"].get("paragraph_id")
+                            if prev_pid and curr_pid and prev_pid != curr_pid:
+                                chapter_para += 1
+                            elif prev_item_in_chapter["chunk"]["speaker"] == item["chunk"]["speaker"]:
+                                chapter_same += 1
+                            else:
+                                chapter_diff += 1
                         self._write_concat_line(concat_file, item["full_path"])
                         estimated_size_bytes += item["file_size_bytes"]
-                        chapter_previous_speaker = speaker
+                        prev_item_in_chapter = item
 
-                    previous_speaker = chapter_previous_speaker if chapter_previous_speaker is not None else previous_speaker
+                    previous_item = prev_item_in_chapter if prev_item_in_chapter is not None else previous_item
+                    total_same += chapter_same
+                    total_diff += chapter_diff
+                    total_para += chapter_para
+                    if log_callback:
+                        log_callback(
+                            f"  Chapter '{chapter_label}': {chapter_same} same-speaker, "
+                            f"{chapter_diff} speaker-change, {chapter_para} paragraph silences"
+                        )
                     self._emit_merge_progress(
                         progress_callback,
                         merge_started_at,
@@ -3715,6 +4378,12 @@ class ProjectManager:
                         estimated_size_bytes=estimated_size_bytes,
                         output_path=output_path,
                     )
+
+            if log_callback:
+                log_callback(
+                    f"Export totals: {total_chapter_end} chapter-end, {total_same} same-speaker, "
+                    f"{total_diff} speaker-change, {total_para} paragraph silences"
+                )
 
             self._emit_merge_progress(
                 progress_callback,
@@ -3727,7 +4396,7 @@ class ProjectManager:
                 output_path=output_path,
             )
 
-            if not self._export_concat_mp3(
+            success, export_result = self._export_concat_mp3(
                 concat_path,
                 output_path,
                 progress_tick=lambda: self._emit_merge_progress(
@@ -3740,8 +4409,43 @@ class ProjectManager:
                     estimated_size_bytes=estimated_size_bytes,
                     output_path=output_path,
                 ),
-            ):
-                return False, "ffmpeg merge failed"
+            )
+            if not success:
+                return False, f"ffmpeg merge failed: {export_result}"
+
+            output_path = export_result
+            output_filename = os.path.basename(output_path)
+
+            self._emit_merge_progress(
+                progress_callback,
+                merge_started_at,
+                stage="normalizing",
+                chapter_index=len(chapter_groups),
+                total_chapters=len(chapter_groups),
+                chapter_label=chapter_groups[-1][0],
+                estimated_size_bytes=estimated_size_bytes,
+                output_path=output_path,
+            )
+            normalized, normalize_result = self._call_normalize_audio_file(
+                output_path,
+                export_config=export_config,
+                progress_callback=lambda info: self._emit_merge_progress(
+                    progress_callback,
+                    merge_started_at,
+                    stage="normalizing",
+                    chapter_index=len(chapter_groups),
+                    total_chapters=len(chapter_groups),
+                    chapter_label=(
+                        f"{chapter_groups[-1][0]} "
+                        f"({info.get('phase', 'normalizing')}, {int(round(info.get('overall_percent', 0.0)))}%)"
+                    ),
+                    estimated_size_bytes=estimated_size_bytes,
+                    output_path=output_path,
+                ),
+                log_callback=log_callback,
+            )
+            if not normalized:
+                return False, f"Audio normalization failed: {normalize_result}"
 
             self._emit_merge_progress(
                 progress_callback,
@@ -3757,7 +4461,7 @@ class ProjectManager:
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def export_optimized_mp3_zip(self, progress_callback=None, max_part_seconds=7200):
+    def export_optimized_mp3_zip(self, progress_callback=None, log_callback=None, export_config=None, max_part_seconds=7200):
         merge_started_at = time.time()
         timeline = self._collect_merge_timeline(progress_callback=progress_callback, merge_started_at=merge_started_at)
         if not timeline:
@@ -3766,29 +4470,51 @@ class ProjectManager:
         chapter_groups = self._group_timeline_by_chapter(timeline)
         zip_path = os.path.join(self.root_dir, "optimized_audiobook.zip")
         temp_dir = tempfile.mkdtemp(prefix="optimized_export_", dir=self.root_dir)
+        chapter_end_ms = getattr(export_config, "silence_end_of_chapter_ms", 3000)
 
         try:
-            silence_assets = self._create_silence_assets(temp_dir)
+            silence_assets = self._create_silence_assets(temp_dir, export_config)
             chapter_exports = []
             estimated_size_bytes = 0
+            total_same = 0
+            total_diff = 0
+            total_para = 0
 
             for chapter_index, (chapter_label, chapter_items) in enumerate(chapter_groups, start=1):
                 concat_path = os.path.join(temp_dir, f"chapter_{chapter_index:03d}.txt")
                 chapter_output_path = os.path.join(temp_dir, f"chapter_{chapter_index:03d}.mp3")
                 chapter_estimated_size = 0
-                chapter_previous_speaker = None
+                chapter_same = 0
+                chapter_diff = 0
+                chapter_para = 0
+                prev_item_in_chapter = None
 
                 with open(concat_path, "w", encoding="utf-8") as concat_file:
                     for item in chapter_items:
-                        speaker = item["chunk"]["speaker"]
-                        if chapter_previous_speaker is not None:
-                            pause_path = silence_assets["same_path"] if chapter_previous_speaker == speaker else silence_assets["default_path"]
-                            pause_size = silence_assets["same_size_bytes"] if chapter_previous_speaker == speaker else silence_assets["default_size_bytes"]
+                        if prev_item_in_chapter is not None:
+                            pause_path, pause_size = self._pick_silence(prev_item_in_chapter, item, silence_assets)
                             self._write_concat_line(concat_file, pause_path)
                             chapter_estimated_size += pause_size
+                            prev_pid = prev_item_in_chapter["chunk"].get("paragraph_id")
+                            curr_pid = item["chunk"].get("paragraph_id")
+                            if prev_pid and curr_pid and prev_pid != curr_pid:
+                                chapter_para += 1
+                            elif prev_item_in_chapter["chunk"]["speaker"] == item["chunk"]["speaker"]:
+                                chapter_same += 1
+                            else:
+                                chapter_diff += 1
                         self._write_concat_line(concat_file, item["full_path"])
                         chapter_estimated_size += item["file_size_bytes"]
-                        chapter_previous_speaker = speaker
+                        prev_item_in_chapter = item
+
+                total_same += chapter_same
+                total_diff += chapter_diff
+                total_para += chapter_para
+                if log_callback:
+                    log_callback(
+                        f"  Chapter '{chapter_label}': {chapter_same} same-speaker, "
+                        f"{chapter_diff} speaker-change, {chapter_para} paragraph silences"
+                    )
 
                 self._emit_merge_progress(
                     progress_callback,
@@ -3801,9 +4527,11 @@ class ProjectManager:
                     output_path=chapter_output_path,
                 )
 
-                if not self._export_concat_mp3(concat_path, chapter_output_path):
-                    return False, f"Failed to export chapter {chapter_label}"
+                success, export_result = self._export_concat_mp3(concat_path, chapter_output_path)
+                if not success:
+                    return False, f"Failed to export chapter {chapter_label}: {export_result}"
 
+                chapter_output_path = export_result
                 chapter_duration_seconds = AudioSegment.from_file(chapter_output_path).duration_seconds
                 chapter_size_bytes = os.path.getsize(chapter_output_path)
                 estimated_size_bytes += chapter_size_bytes
@@ -3812,9 +4540,18 @@ class ProjectManager:
                     "path": chapter_output_path,
                     "duration_seconds": chapter_duration_seconds,
                     "file_size_bytes": chapter_size_bytes,
+                    "first_item": chapter_items[0],
+                    "last_item": chapter_items[-1],
                     "first_speaker": chapter_items[0]["chunk"]["speaker"],
                     "last_speaker": chapter_items[-1]["chunk"]["speaker"],
                 })
+
+            if log_callback:
+                total_chapter_end = max(0, len(chapter_exports) - 1)
+                log_callback(
+                    f"Export totals: {total_chapter_end} chapter-end, {total_same} same-speaker, "
+                    f"{total_diff} speaker-change, {total_para} paragraph silences"
+                )
 
             part_groups = []
             current_group = []
@@ -3822,8 +4559,7 @@ class ProjectManager:
             for chapter in chapter_exports:
                 chapter_pause_seconds = 0.0
                 if current_group:
-                    previous = current_group[-1]
-                    chapter_pause_seconds = SAME_SPEAKER_PAUSE_MS / 1000.0 if previous["last_speaker"] == chapter["first_speaker"] else DEFAULT_PAUSE_MS / 1000.0
+                    chapter_pause_seconds = chapter_end_ms / 1000.0
                 proposed_duration = current_duration + chapter_pause_seconds + chapter["duration_seconds"]
                 if current_group and proposed_duration > max_part_seconds:
                     part_groups.append(current_group)
@@ -3845,11 +4581,8 @@ class ProjectManager:
                 with open(concat_path, "w", encoding="utf-8") as concat_file:
                     for chapter_offset, chapter in enumerate(part_group):
                         if chapter_offset > 0:
-                            previous = part_group[chapter_offset - 1]
-                            pause_path = silence_assets["same_path"] if previous["last_speaker"] == chapter["first_speaker"] else silence_assets["default_path"]
-                            pause_size = silence_assets["same_size_bytes"] if previous["last_speaker"] == chapter["first_speaker"] else silence_assets["default_size_bytes"]
-                            self._write_concat_line(concat_file, pause_path)
-                            part_estimated_size += pause_size
+                            self._write_concat_line(concat_file, silence_assets["chapter_end_path"])
+                            part_estimated_size += silence_assets["chapter_end_size_bytes"]
                         self._write_concat_line(concat_file, chapter["path"])
                         part_estimated_size += chapter["file_size_bytes"]
 
@@ -3864,7 +4597,7 @@ class ProjectManager:
                     output_path=part_output_path,
                 )
 
-                if not self._export_concat_mp3(
+                success, export_result = self._export_concat_mp3(
                     concat_path,
                     part_output_path,
                     progress_tick=lambda current_path=part_output_path, current_size=part_estimated_size, current_index=part_index: self._emit_merge_progress(
@@ -3877,10 +4610,42 @@ class ProjectManager:
                         estimated_size_bytes=current_size,
                         output_path=current_path,
                     ),
-                ):
-                    return False, f"Failed to export optimized part {part_index}"
+                )
+                if not success:
+                    return False, f"Failed to export optimized part {part_index}: {export_result}"
 
-                part_paths.append((part_output_path, part_basename))
+                part_output_path = export_result
+                self._emit_merge_progress(
+                    progress_callback,
+                    merge_started_at,
+                    stage="normalizing",
+                    chapter_index=part_index,
+                    total_chapters=len(part_groups),
+                    chapter_label=f"Part {part_index} of {len(part_groups)}",
+                    estimated_size_bytes=part_estimated_size,
+                    output_path=part_output_path,
+                )
+                normalized, normalize_result = self._call_normalize_audio_file(
+                    part_output_path,
+                    export_config=export_config,
+                    progress_callback=lambda info, current_path=part_output_path, current_size=part_estimated_size, current_index=part_index: self._emit_merge_progress(
+                        progress_callback,
+                        merge_started_at,
+                        stage="normalizing",
+                        chapter_index=current_index,
+                        total_chapters=len(part_groups),
+                        chapter_label=(
+                            f"Part {current_index} "
+                            f"({info.get('phase', 'normalizing')}, {int(round(info.get('overall_percent', 0.0)))}%)"
+                        ),
+                        estimated_size_bytes=current_size,
+                        output_path=current_path,
+                    ),
+                    log_callback=log_callback,
+                )
+                if not normalized:
+                    return False, f"Failed to normalize optimized part {part_index}: {normalize_result}"
+                part_paths.append((part_output_path, os.path.basename(part_output_path)))
 
             self._emit_merge_progress(
                 progress_callback,
@@ -4013,7 +4778,7 @@ class ProjectManager:
 
         return True, zip_path
 
-    def merge_m4b(self, per_chunk_chapters=False, metadata=None):
+    def merge_m4b(self, per_chunk_chapters=False, metadata=None, export_config=None):
         """Merge audio chunks into an M4B audiobook with chapter markers.
 
         Args:
@@ -4021,16 +4786,20 @@ class ProjectManager:
                 detect chapter headings and group chunks into sections.
             metadata: Optional dict with keys: title, author, narrator, year,
                 description, cover_path (absolute path to cover image).
+            export_config: Optional ExportConfig with silence durations.
 
         Returns:
             tuple: (success: bool, message: str)
         """
         metadata = metadata or {}
+        same_speaker_ms = getattr(export_config, "silence_same_speaker_ms", SAME_SPEAKER_PAUSE_MS)
+        between_speakers_ms = getattr(export_config, "silence_between_speakers_ms", DEFAULT_PAUSE_MS)
+        paragraph_ms = getattr(export_config, "silence_paragraph_ms", 750)
         chunks = self.load_chunks()
 
         # Phase 1 — Compute timeline (same logic as export_audacity)
         timeline = []  # list of (chunk, segment, abs_start_ms)
-        prev_speaker = None
+        prev_chunk = None
         cursor_ms = 0
 
         for chunk in chunks:
@@ -4048,16 +4817,19 @@ class ProjectManager:
                 print(f"Error loading audio for M4B export {path}: {e}")
                 continue
 
-            speaker = chunk["speaker"]
-            if prev_speaker is not None:
-                if speaker == prev_speaker:
-                    cursor_ms += SAME_SPEAKER_PAUSE_MS
+            if prev_chunk is not None:
+                prev_pid = prev_chunk.get("paragraph_id")
+                curr_pid = chunk.get("paragraph_id")
+                if prev_pid and curr_pid and prev_pid != curr_pid:
+                    cursor_ms += paragraph_ms
+                elif chunk["speaker"] == prev_chunk["speaker"]:
+                    cursor_ms += same_speaker_ms
                 else:
-                    cursor_ms += DEFAULT_PAUSE_MS
+                    cursor_ms += between_speakers_ms
 
             timeline.append((chunk, segment, cursor_ms))
             cursor_ms += len(segment)
-            prev_speaker = speaker
+            prev_chunk = chunk
 
         if not timeline:
             return False, "No audio segments found"
@@ -4069,7 +4841,11 @@ class ProjectManager:
         # Phase 3 — Combine audio and export to temp WAV
         audio_segments = [seg for _, seg, _ in timeline]
         speakers = [chunk["speaker"] for chunk, _, _ in timeline]
-        final_audio = combine_audio_with_pauses(audio_segments, speakers)
+        final_audio = combine_audio_with_pauses(
+            audio_segments, speakers,
+            pause_ms=between_speakers_ms,
+            same_speaker_pause_ms=same_speaker_ms,
+        )
 
         temp_wav = os.path.join(self.root_dir, "temp_m4b_combined.wav")
         meta_path = os.path.join(self.root_dir, "temp_m4b_meta.txt")
@@ -4077,6 +4853,9 @@ class ProjectManager:
 
         try:
             final_audio.export(temp_wav, format="wav")
+            normalized, normalize_result = self._call_normalize_audio_file(temp_wav, export_config=export_config)
+            if not normalized:
+                return False, f"Audio normalization failed: {normalize_result}"
 
             # Phase 4 — Write FFmpeg metadata file with book metadata
             meta_lines = [";FFMETADATA1"]
