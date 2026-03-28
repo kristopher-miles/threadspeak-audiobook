@@ -1,0 +1,169 @@
+        <div id="audio-tab" class="tab-content" style="display:none;">
+            <div class="card">
+                <div class="card-header">
+                    <h4><span class="step-indicator step-active">6</span>Export</h4>
+                </div>
+                <div class="card-body">
+                    <h6 class="mb-3">Audio Assembly</h6>
+                    <div class="row mb-3">
+                        <div class="col">
+                            <label class="form-label">Speaker Change Gap (ms)</label>
+                            <input type="number" class="form-control" id="silence-between-speakers" value="500" min="0" step="50">
+                            <div class="form-text">Pause between clips from different speakers</div>
+                        </div>
+                        <div class="col">
+                            <label class="form-label">Same-Speaker Gap (ms)</label>
+                            <input type="number" class="form-control" id="silence-same-speaker" value="250" min="0" step="50">
+                            <div class="form-text">Pause between consecutive clips from the same speaker</div>
+                        </div>
+                        <div class="col">
+                            <label class="form-label">End-of-Chapter Gap (ms)</label>
+                            <input type="number" class="form-control" id="silence-end-of-chapter" value="3000" min="0" step="100">
+                            <div class="form-text">Pause inserted between chapters</div>
+                        </div>
+                        <div class="col">
+                            <label class="form-label">New Paragraph Gap (ms)</label>
+                            <input type="number" class="form-control" id="silence-paragraph" value="750" min="0" step="50">
+                            <div class="form-text">Pause at paragraph boundaries. Applied in projects using the paragraph pipeline; ignored on legacy projects.</div>
+                        </div>
+                    </div>
+                    <div class="row mb-3">
+                        <div class="col">
+                            <div class="form-check form-switch mt-1">
+                                <input class="form-check-input" type="checkbox" id="normalize-enabled" checked>
+                                <label class="form-check-label" for="normalize-enabled">Normalize Export Loudness</label>
+                            </div>
+                            <div class="form-text">Applies EBU R128 loudness normalization to final exports (merged MP3, optimized parts, and M4B).</div>
+                        </div>
+                        <div class="col">
+                            <label class="form-label">Target LUFS (Mono)</label>
+                            <input type="number" class="form-control" id="normalize-target-lufs-mono" value="-18" min="-30" max="-10" step="0.5">
+                            <div class="form-text">Recommended audiobook target for mono-heavy narration.</div>
+                        </div>
+                        <div class="col">
+                            <label class="form-label">Target LUFS (Stereo)</label>
+                            <input type="number" class="form-control" id="normalize-target-lufs-stereo" value="-16" min="-30" max="-10" step="0.5">
+                            <div class="form-text">Used for stereo outputs.</div>
+                        </div>
+                        <div class="col">
+                            <label class="form-label">True Peak Ceiling (dBTP)</label>
+                            <input type="number" class="form-control" id="normalize-true-peak-dbtp" value="-1" min="-6" max="0" step="0.1">
+                            <div class="form-text">Limits clipping risk on playback devices.</div>
+                        </div>
+                        <div class="col">
+                            <label class="form-label">Target LRA</label>
+                            <input type="number" class="form-control" id="normalize-lra" value="11" min="1" max="20" step="0.5">
+                            <div class="form-text">Loudness range target used by loudnorm.</div>
+                        </div>
+                    </div>
+                    <div class="small text-muted mb-3">Use Save Configuration in Setup to persist changes.</div>
+                    <div id="audio-merge-progress" class="theme-panel border rounded p-3 mb-3" style="display:none;">
+                        <div class="row g-3">
+                            <div class="col-md-3 col-sm-6">
+                                <div class="small text-muted">Merge Stage</div>
+                                <div class="fw-semibold" id="audio-merge-stage">Waiting</div>
+                            </div>
+                            <div class="col-md-3 col-sm-6">
+                                <div class="small text-muted">Progress</div>
+                                <div class="fw-semibold" id="audio-merge-chapter-progress">0 / 0</div>
+                            </div>
+                            <div class="col-md-3 col-sm-6">
+                                <div class="small text-muted">Elapsed</div>
+                                <div class="fw-semibold" id="audio-merge-elapsed">0s</div>
+                            </div>
+                            <div class="col-md-3 col-sm-6">
+                                <div class="small text-muted">Merged Duration</div>
+                                <div class="fw-semibold" id="audio-merge-duration">0s</div>
+                            </div>
+                            <div class="col-md-6 col-sm-12">
+                                <div class="small text-muted">Current Chapter</div>
+                                <div class="fw-semibold" id="audio-merge-current-chapter">Waiting for merge to start</div>
+                            </div>
+                            <div class="col-md-3 col-sm-6">
+                                <div class="small text-muted">Working Size</div>
+                                <div class="fw-semibold" id="audio-merge-size">0 B</div>
+                            </div>
+                            <div class="col-md-3 col-sm-6">
+                                <div class="small text-muted">Output File</div>
+                                <div class="fw-semibold" id="audio-merge-output-size">0 B</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="d-flex flex-wrap gap-2 justify-content-center mb-3">
+                        <button class="btn btn-warning" id="btn-merge"><i class="fas fa-file-audio me-1"></i>Merge All</button>
+                        <button class="btn btn-outline-warning" id="btn-merge-optimized"><i class="fas fa-box-archive me-1"></i>Optimized Export</button>
+                    </div>
+                    <div id="audio-player-container" class="text-center" style="display:none;">
+                        <h5>Your Audiobook</h5>
+                        <audio id="main-audio" controls class="w-100 mt-2">
+                            <source src="" type="audio/mpeg">
+                            Your browser does not support the audio element.
+                        </audio>
+                        <a id="download-link" href="#" class="btn btn-outline-dark mt-3" download="audiobook.mp3">
+                            <i class="fas fa-download me-2"></i>Download MP3
+                        </a>
+                        <button class="btn btn-outline-primary mt-3 ms-2" onclick="exportAudacity()">
+                            <i class="fas fa-headphones me-2"></i>Export to Audacity
+                        </button>
+                        <span id="audacity-status" class="ms-2 mt-3 d-inline-block"></span>
+                        <div class="w-100 mt-3">
+                            <a class="text-decoration-none" data-bs-toggle="collapse" href="#m4b-options" role="button" aria-expanded="false">
+                                <i class="fas fa-book-reader me-1"></i>M4B Export Options <i class="fas fa-chevron-down fa-xs ms-1"></i>
+                            </a>
+                            <div class="collapse mt-2" id="m4b-options">
+                                <div class="theme-panel border rounded p-3">
+                                    <div class="row g-2">
+                                        <div class="col-md-6">
+                                            <label class="form-label small mb-1">Title</label>
+                                            <input type="text" class="form-control form-control-sm" id="m4b-title" placeholder="Book title">
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label small mb-1">Author</label>
+                                            <input type="text" class="form-control form-control-sm" id="m4b-author" placeholder="Author name">
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label class="form-label small mb-1">Narrator</label>
+                                            <input type="text" class="form-control form-control-sm" id="m4b-narrator" placeholder="Narrator name">
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Year</label>
+                                            <input type="text" class="form-control form-control-sm" id="m4b-year" placeholder="2025">
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label small mb-1">Description</label>
+                                            <input type="text" class="form-control form-control-sm" id="m4b-description" placeholder="Short description">
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label small mb-1">Cover Image</label>
+                                            <div class="d-flex align-items-center gap-2">
+                                                <input type="file" class="form-control form-control-sm" id="m4b-cover-input" accept="image/*">
+                                                <span id="m4b-cover-status" class="small text-muted"></span>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6 d-flex align-items-end">
+                                            <label class="form-check d-inline-flex align-items-center mb-0" title="Creates a chapter for every chunk instead of grouping by detected headings">
+                                                <input type="checkbox" class="form-check-input me-1" id="m4b-per-chunk">
+                                                <small class="text-muted">Per-chunk chapters</small>
+                                            </label>
+                                        </div>
+                                    </div>
+                                    <div class="mt-2">
+                                        <button class="btn btn-outline-success btn-sm" onclick="exportM4B()">
+                                            <i class="fas fa-book-reader me-1"></i>Export M4B
+                                        </button>
+                                        <span id="m4b-status" class="ms-2 d-inline-block"></span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">Generation Logs</div>
+                <div class="card-body p-0">
+                    <div id="audio-logs" class="log-window"></div>
+                </div>
+            </div>
+        </div>

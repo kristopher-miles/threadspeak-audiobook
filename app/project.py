@@ -1775,7 +1775,15 @@ class ProjectManager:
             return None
         return audio_validation
 
-    def _manually_mark_proofread_clip(self, chunk_ref, threshold, *, accept: bool):
+    def _manually_mark_proofread_clip(
+        self,
+        chunk_ref,
+        threshold,
+        *,
+        accept: bool,
+        toggle_validated_to_failure: bool = False,
+        failure_error: str = "Manually rejected by user.",
+    ):
         """Shared core for validate (accept=True) and reject (accept=False)."""
         with self._chunks_lock:
             if not os.path.exists(self.chunks_path):
@@ -1811,7 +1819,16 @@ class ProjectManager:
             if "transcript_text" not in proofread_state:
                 proofread_state["transcript_text"] = ""
 
-            if accept:
+            effective_accept = accept
+            if (
+                accept
+                and toggle_validated_to_failure
+                and bool(existing.get("manual_validated"))
+                and bool(existing.get("passed"))
+            ):
+                effective_accept = False
+
+            if effective_accept:
                 proofread_state.update({
                     "score": 1.0,
                     "passed": True,
@@ -1825,7 +1842,7 @@ class ProjectManager:
                 proofread_state.update({
                     "score": 0.0,
                     "passed": False,
-                    "error": "Manually rejected by user.",
+                    "error": failure_error,
                     "manual_validated": False,
                     "manual_failed": True,
                     "failed_at": now,
@@ -1837,7 +1854,13 @@ class ProjectManager:
             return chunk
 
     def manually_validate_proofread_clip(self, chunk_ref, threshold=1.0):
-        return self._manually_mark_proofread_clip(chunk_ref, threshold, accept=True)
+        return self._manually_mark_proofread_clip(
+            chunk_ref,
+            threshold,
+            accept=True,
+            toggle_validated_to_failure=True,
+            failure_error="Manually marked as failed by user.",
+        )
 
     def manually_reject_proofread_clip(self, chunk_ref, threshold=1.0):
         return self._manually_mark_proofread_clip(chunk_ref, threshold, accept=False)

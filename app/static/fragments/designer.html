@@ -1,0 +1,63 @@
+        <div id="designer-tab" class="tab-content" style="display:none;">
+            <div class="card mb-3">
+                <div class="card-header">
+                    <h4><span class="step-indicator step-active">4</span>Voice Designer</h4>
+                </div>
+                <div class="card-body">
+                    <p>Design new voices from text descriptions. Generated voices can be saved and used as clone sources in the Voices tab.</p>
+
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">Voice Description</label>
+                            <textarea class="form-control" id="design-description" rows="3" placeholder="A warm, mature female voice with a British accent. Speaks clearly with gentle authority."></textarea>
+                            <div class="form-text">Describe the voice characteristics you want</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">Sample Text</label>
+                            <textarea class="form-control" id="design-sample-text" rows="3" placeholder="The ancient library stood at the crossroads of two forgotten paths, its weathered stone walls covered in ivy.">The ancient library stood at the crossroads of two forgotten paths, its weathered stone walls covered in ivy that had been growing for centuries.</textarea>
+                            <div class="form-text">Text to synthesize with the designed voice</div>
+                        </div>
+                    </div>
+
+                    <div class="d-flex align-items-center gap-3 mb-3">
+                        <button class="btn btn-primary" id="btn-design-preview" onclick="generateDesignPreview()">
+                            <i class="fas fa-magic me-1"></i>Generate Preview
+                        </button>
+                        <span id="design-status" class="text-muted"></span>
+                    </div>
+
+                    <div id="design-preview-container" style="display:none;">
+                        <div class="card bg-light mb-3">
+                            <div class="card-body py-2">
+                                <label class="form-label fw-bold mb-1">Preview</label>
+                                <audio id="design-preview-audio" controls class="w-100"></audio>
+                            </div>
+                        </div>
+
+                        <div class="row g-2 align-items-end">
+                            <div class="col-md-4">
+                                <label class="form-label">Voice Name</label>
+                                <input type="text" class="form-control" id="design-voice-name" placeholder="e.g. Lady Narrator">
+                            </div>
+                            <div class="col-md-2">
+                                <button class="btn btn-success w-100" onclick="saveDesignedVoice()">
+                                    <i class="fas fa-save me-1"></i>Save Voice
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="m-0">Saved Voices</h5>
+                    <button class="btn btn-sm btn-outline-primary" onclick="loadDesignedVoices()"><i class="fas fa-sync me-1"></i>Refresh</button>
+                </div>
+                <div class="card-body">
+                    <div id="designed-voices-list">
+                        <p class="text-muted mb-0">No designed voices yet. Generate and save a preview above.</p>
+                    </div>
+                </div>
+            </div>
+        </div>

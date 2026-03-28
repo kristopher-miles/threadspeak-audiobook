@@ -1,0 +1,119 @@
+        <div id="script-tab" class="tab-content" style="display:none;">
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h4 class="m-0"><span class="step-indicator step-active">2</span>Generate Script</h4>
+                </div>
+                <div class="card-body">
+                    <!-- Always visible: file upload -->
+                    <div class="mb-3">
+                        <label class="form-label">Select Book/Novel (Text or EPUB)</label>
+                        <input type="file" class="form-control" id="file-upload" accept=".txt,.md,.epub">
+                        <div id="upload-status" class="mt-2"></div>
+                        <div id="processing-workflow-status" class="small text-muted mt-2"></div>
+                    </div>
+
+                    <!-- Legacy Mode controls (shown when Legacy Mode is ON) -->
+                    <div id="legacy-mode-controls">
+                        <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+                            <button class="btn btn-outline-primary btn-sm" id="btn-process-script">
+                                <i class="fas fa-play-circle me-1"></i>Process Script
+                            </button>
+                            <button class="btn btn-outline-warning btn-sm" id="btn-pause-processing">
+                                <i class="fas fa-pause me-1"></i>Pause Processing
+                            </button>
+                            <div class="form-check form-switch mb-0">
+                                <input class="form-check-input" type="checkbox" id="process-voices-toggle" checked>
+                                <label class="form-check-label" for="process-voices-toggle">Process Voices</label>
+                            </div>
+                            <div class="form-check form-switch mb-0">
+                                <input class="form-check-input" type="checkbox" id="generate-audio-toggle">
+                                <label class="form-check-label" for="generate-audio-toggle">Generate Audio</label>
+                            </div>
+                        </div>
+                        <div class="d-grid gap-2 mt-3">
+                            <button class="btn btn-success btn-lg" id="btn-gen-script">
+                                <i class="fas fa-magic me-2"></i>Generate Annotated Script
+                            </button>
+                            <small class="text-muted">Sends the book to your LLM to split it into annotated chunks with speaker labels and voice directions.</small>
+                            <button class="btn btn-outline-secondary btn-lg" id="btn-review-script">
+                                <i class="fas fa-check-double me-2"></i>Review Script (Optional)
+                            </button>
+                            <small class="text-muted">Runs a second LLM pass to fix speaker misattributions or formatting issues. Only needed if the generated script has problems.</small>
+                            <button class="btn btn-outline-warning btn-lg" id="btn-script-sanity">
+                                <i class="fas fa-ruler-combined me-2"></i>Sanity Check
+                            </button>
+                            <small class="text-muted">Compares the finished script to the original uploaded source, ignores punctuation/case/spacing, and records only the invalid text spans that need regeneration.</small>
+                            <button class="btn btn-outline-danger btn-lg" id="btn-replace-missing-chunks">
+                                <i class="fas fa-wrench me-2"></i>Replace Missing Chunks
+                            </button>
+                            <small class="text-muted">Regenerates each invalid block from the original source, patches the live script, then reruns the sanity check to confirm parity or report what remains.</small>
+                        </div>
+                    </div>
+
+                    <!-- New Mode controls (shown when Legacy Mode is OFF) -->
+                    <div id="new-mode-controls" style="display:none;">
+                        <div class="d-grid gap-2 mb-3">
+                            <button class="btn btn-outline-primary btn-lg" id="btn-process-paragraphs-v2">
+                                <i class="fas fa-paragraph me-2"></i>1. Process Paragraphs
+                            </button>
+                            <small class="text-muted">Splits the source document into individual paragraphs and prepares them for dialogue analysis.</small>
+                            <button class="btn btn-outline-secondary btn-lg" id="btn-assign-dialogue-v2">
+                                <i class="fas fa-comments me-2"></i>2. Assign Dialogue
+                            </button>
+                            <small class="text-muted">Analyzes each paragraph to identify speakers and annotate dialogue lines with voice assignments.</small>
+                            <button class="btn btn-outline-secondary btn-lg" id="btn-extract-temperament-v2">
+                                <i class="fas fa-theater-masks me-2"></i>3. Extract Temperament
+                            </button>
+                            <small class="text-muted">Analyzes narration paragraphs to identify emotional mood and delivery style for each one.</small>
+                            <button class="btn btn-outline-secondary btn-lg" id="btn-create-script-v2">
+                                <i class="fas fa-file-lines me-2"></i>4. Create Script
+                            </button>
+                            <small class="text-muted">Builds the audiobook script from processed paragraphs, assigning speakers, moods, and splitting into lines.</small>
+                        </div>
+                        <div class="d-flex flex-wrap gap-2 align-items-center">
+                            <button class="btn btn-primary btn-sm" id="btn-process-script-v2">
+                                <i class="fas fa-play-circle me-1"></i>Process Script
+                            </button>
+                            <button class="btn btn-warning btn-sm" id="btn-pause-processing-v2">
+                                <i class="fas fa-pause me-1"></i>Pause Processing
+                            </button>
+                            <div class="form-check form-switch mb-0">
+                                <input class="form-check-input" type="checkbox" id="process-voices-toggle-v2" checked>
+                                <label class="form-check-label" for="process-voices-toggle-v2">Process Voices</label>
+                            </div>
+                            <div class="form-check form-switch mb-0">
+                                <input class="form-check-input" type="checkbox" id="generate-audio-toggle-v2">
+                                <label class="form-check-label" for="generate-audio-toggle-v2">Generate Audio</label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="m-0">Saved Scripts</h5>
+                </div>
+                <div class="card-body">
+                    <div class="d-flex flex-wrap gap-2 mb-3">
+                        <button class="btn btn-outline-secondary btn-sm" onclick="downloadProjectArchive()"><i class="fas fa-file-zipper me-1"></i>Save Project ZIP</button>
+                        <button class="btn btn-outline-secondary btn-sm" onclick="triggerProjectArchiveLoad()"><i class="fas fa-folder-open me-1"></i>Load Project ZIP</button>
+                    </div>
+                    <div class="input-group mb-3">
+                        <input type="text" class="form-control" id="save-script-name" placeholder="Script name (e.g. The Great Gatsby)">
+                        <button class="btn btn-outline-primary" onclick="saveScript()"><i class="fas fa-save me-1"></i>Save Current</button>
+                    </div>
+                    <input type="file" id="project-archive-input" accept=".zip" style="display:none;" onchange="handleProjectArchiveLoad(this)">
+                    <div id="saved-scripts-list">
+                        <p class="text-muted mb-0">No saved scripts yet.</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">Generation Logs</div>
+                <div class="card-body p-0">
+                    <div id="script-logs" class="log-window"></div>
+                </div>
+            </div>
+        </div>

@@ -1,0 +1,125 @@
+        <div id="editor-tab" class="tab-content" style="display:none;">
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                     <h4 class="m-0"><span class="step-indicator step-active">4</span>Audio Editor</h4>
+                     <table class="mb-0" style="border-collapse:separate; border-spacing:8px 0;">
+                        <tr>
+                            <td class="text-center align-top" style="min-width:110px;"><button class="btn btn-primary btn-sm w-100" id="btn-play-seq" onclick="playSequence()"><i class="fas fa-play me-1"></i>Play Sequence</button></td>
+                            <td class="align-middle text-muted px-1">|</td>
+                            <td class="text-center align-top" style="min-width:120px;"><button class="btn btn-success btn-sm w-100" id="btn-batch-fast" onclick="startRender(false)"><i class="fas fa-bolt me-1"></i>Render Pending</button></td>
+                            <td class="align-middle text-muted px-1">|</td>
+                            <td class="text-center align-top" style="min-width:120px;"><button class="btn btn-outline-success btn-sm w-100" id="btn-regen-all" onclick="startRender(true)"><i class="fas fa-redo me-1"></i>Regenerate All</button></td>
+                            <td class="text-center align-top"><button class="btn btn-danger btn-sm w-100" id="btn-cancel-render" onclick="cancelRender()" style="display:none;"><i class="fas fa-stop me-1"></i>Cancel</button></td>
+                        </tr>
+                        <tr>
+                            <td class="text-center text-muted" style="font-size:0.7rem;">Preview generated audio in the current view</td>
+                            <td></td>
+                            <td class="text-center text-muted" style="font-size:0.7rem;">Generate audio for pending segments in the active scope</td>
+                            <td></td>
+                            <td class="text-center text-muted" style="font-size:0.7rem;">Re-render segments in the active scope from scratch</td>
+                            <td></td>
+                        </tr>
+                    </table>
+                </div>
+                <div class="card-body">
+                     <!-- Full Progress Bar -->
+                     <div class="progress mb-3" style="height: 25px;">
+                         <div id="full-progress-bar" class="progress-bar progress-bar-striped bg-success" role="progressbar" style="width: 0%">0%</div>
+                     </div>
+
+                     <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                         <div class="d-flex flex-wrap align-items-center gap-3">
+                             <div class="d-flex align-items-center gap-2">
+                                 <label for="editor-chapter-select" class="form-label mb-0 fw-semibold">Chapter</label>
+                                 <select id="editor-chapter-select" class="form-select form-select-sm" style="min-width: 260px;" oninput="changeEditorChapter(this.value)" onchange="changeEditorChapter(this.value)">
+                                     <option value="__whole_project__">Whole Project</option>
+                                 </select>
+                             </div>
+                             <div class="form-check form-switch mb-0">
+                                 <input class="form-check-input" type="checkbox" id="editor-chapter-only" checked onchange="changeEditorScope()">
+                                 <label class="form-check-label fw-semibold" for="editor-chapter-only">Chapter Only</label>
+                             </div>
+                         </div>
+                         <div class="text-end">
+                             <div id="editor-chapter-summary" class="text-muted small">Showing all segments.</div>
+                             <div id="editor-queue-status" class="text-muted small"></div>
+                         </div>
+                     </div>
+
+                     <div id="editor-estimate-panel" class="theme-panel border rounded p-3 mb-3">
+                         <div class="row g-3">
+                             <div class="col-md-2 col-sm-6">
+                                 <div class="small text-muted">Queue ETA</div>
+                                 <div class="fw-semibold" id="editor-estimate-eta">Waiting for data</div>
+                             </div>
+                             <div class="col-md-2 col-sm-6">
+                                 <div class="small text-muted">Rolling Clip Time</div>
+                                 <div class="fw-semibold" id="editor-estimate-clip-time">Waiting for data</div>
+                             </div>
+                             <div class="col-md-2 col-sm-6">
+                                 <div class="small text-muted">Rolling Speed</div>
+                                 <div class="fw-semibold" id="editor-estimate-speed">Not enough samples</div>
+                             </div>
+                             <div class="col-md-3 col-sm-6">
+                                 <div class="small text-muted">Remaining Queue Words</div>
+                                 <div class="fw-semibold" id="editor-estimate-words">0</div>
+                             </div>
+                            <div class="col-md-3 col-sm-6">
+                                <div class="small text-muted">Errors</div>
+                                <div class="fw-semibold editor-stat-action" id="editor-estimate-errors" onclick="jumpToFirstEditorError()" title="Jump to the first errored segment">0 clips, 0.0%</div>
+                            </div>
+                        </div>
+                     </div>
+
+                     <div class="table-responsive">
+                         <table class="table table-bordered table-hover">
+                             <thead>
+                                 <tr>
+                                     <th width="3%"></th>
+                                     <th width="9%">Speaker</th>
+                                     <th width="40%">Text</th>
+                                     <th width="14%">Instruct</th>
+                                     <th width="7%">Status</th>
+                                     <th width="27%">Audio / Actions</th>
+                                 </tr>
+                             </thead>
+                             <tbody id="chunks-table-body">
+                                 <!-- Rows will be injected here -->
+                             </tbody>
+                         </table>
+                     </div>
+                     <div class="mt-3">
+                         <div class="d-flex justify-content-end gap-2">
+                             <button class="btn btn-outline-secondary btn-sm" id="btn-auto-proofread" onclick="toggleAutoProofread()">
+                                 <i class="fas fa-spell-check me-1"></i>Auto Proofread
+                             </button>
+                             <button class="btn btn-outline-secondary btn-sm" id="btn-advanced-controls" onclick="toggleAdvancedControls()">
+                                 <i class="fas fa-sliders-h me-1"></i>Advanced Controls
+                             </button>
+                             <div id="legacy-only-buttons" style="display:none; gap:0.5rem;">
+                                 <button class="btn btn-outline-primary btn-sm" id="btn-merge-orphans" onclick="mergeOrphans()">
+                                     <i class="fas fa-compress-alt me-1"></i>Merge Orphans
+                                 </button>
+                                 <button class="btn btn-outline-secondary btn-sm" id="btn-decompose-long-segments" onclick="decomposeLongSegments()">
+                                     <i class="fas fa-cut me-1"></i>Decompose Long Segments
+                                 </button>
+                             </div>
+                         </div>
+                         <div id="advanced-controls-panel" style="display:none; justify-content:flex-end; gap:0.5rem;" class="mt-2">
+                             <button class="btn btn-outline-success btn-sm" id="btn-repair-lost-audio" onclick="repairLostAudio()">
+                                 <i class="fas fa-link me-1"></i>Lost Audio Repair
+                             </button>
+                             <button class="btn btn-outline-secondary btn-sm" id="btn-repair-rejected-audio" onclick="repairRejectedAudio()">
+                                 <i class="fas fa-recycle me-1"></i>Recover Rejected Audio
+                             </button>
+                             <button class="btn btn-outline-danger btn-sm" id="btn-repair-legacy-project" onclick="repairLegacyProject()">
+                                 <i class="fas fa-wrench me-1"></i>Repair Legacy Project
+                             </button>
+                             <button class="btn btn-outline-warning btn-sm" id="btn-invalidate-stale-audio" onclick="invalidateStaleAudio()">
+                                 <i class="fas fa-eraser me-1"></i>Invalidate Stale Audio
+                             </button>
+                         </div>
+                     </div>
+                </div>
+            </div>
+        </div>

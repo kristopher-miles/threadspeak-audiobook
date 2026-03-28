@@ -1,0 +1,267 @@
+        <div id="setup-tab" class="tab-content">
+            <div class="card">
+                <div class="card-header">
+                    <h4><span class="step-indicator step-active">1</span>Configuration</h4>
+                </div>
+                <div class="card-body">
+                    <form id="config-form">
+                        <h5 class="mb-3">LLM Settings (Script Generation)</h5>
+                        <div class="mb-3">
+                            <label class="form-label">Base URL</label>
+                            <input type="text" class="form-control" id="llm-url" placeholder="http://localhost:1234/v1">
+                            <div class="form-text">URL for your OpenAI-compatible server (LM Studio, Ollama, etc.)</div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">API Key</label>
+                            <input type="text" class="form-control" id="llm-key" value="local">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Model Name</label>
+                            <input type="text" class="form-control" id="llm-model" placeholder="local-model">
+                        </div>
+
+                        <h5 class="mb-3 mt-4">TTS Settings (Voice Generation)</h5>
+                        <div class="row mb-3">
+                            <div class="col-md-3">
+                                <label class="form-label">TTS Mode</label>
+                                <select class="form-select" id="tts-mode" onchange="toggleTTSMode()">
+                                    <option value="external">External Server</option>
+                                    <option value="local">Local Model</option>
+                                </select>
+                                <div class="form-text">Local loads model in-process; External connects to a Gradio TTS server</div>
+                            </div>
+                            <div class="col-md-5" id="tts-url-group">
+                                <label class="form-label">TTS Server URL</label>
+                                <input type="text" class="form-control" id="tts-url" value="http://127.0.0.1:7860">
+                                <div class="form-text">URL for the Qwen3-TTS Gradio server</div>
+                            </div>
+                            <div class="col-md-4" id="tts-device-group" style="display:none;">
+                                <label class="form-label">Device</label>
+                                <select class="form-select" id="tts-device">
+                                    <option value="auto">Auto (best available)</option>
+                                    <option value="cuda:0">CUDA GPU 0</option>
+                                    <option value="cuda:1">CUDA GPU 1</option>
+                                    <option value="cpu">CPU</option>
+                                </select>
+                                <div class="form-text">Device for local model inference</div>
+                            </div>
+                            <div class="col-md-3" id="tts-language-group">
+                                <label class="form-label">TTS Language</label>
+                                <select class="form-select" id="tts-language">
+                                    <option value="Auto">Auto (detect)</option>
+                                    <option value="English" selected>English</option>
+                                    <option value="Chinese">Chinese</option>
+                                    <option value="French">French</option>
+                                    <option value="German">German</option>
+                                    <option value="Italian">Italian</option>
+                                    <option value="Japanese">Japanese</option>
+                                    <option value="Korean">Korean</option>
+                                    <option value="Portuguese">Portuguese</option>
+                                    <option value="Russian">Russian</option>
+                                    <option value="Spanish">Spanish</option>
+                                </select>
+                                <div class="form-text">Language for audio synthesis only. To generate scripts in another language, edit the prompts under Prompt Settings (Advanced).</div>
+                            </div>
+                            <div class="col-md-2">
+                                <label class="form-label">Parallel Workers</label>
+                                <input type="number" class="form-control" id="parallel-workers" value="2" min="1">
+                                <div class="form-text">Concurrent TTS requests</div>
+                            </div>
+                            <div class="col-md-2">
+                                <label class="form-label">Batch Seed</label>
+                                <input type="number" class="form-control" id="batch-seed" placeholder="-1 (random)">
+                                <div class="form-text">Seed for reproducibility</div>
+                            </div>
+                            <div class="col-md-2">
+                                <label class="form-label">Bad Clip Retries</label>
+                                <div class="d-flex align-items-center gap-2">
+                                    <div class="form-check form-switch m-0">
+                                        <input class="form-check-input" type="checkbox" id="auto-regenerate-bad-clips">
+                                        <label class="form-check-label" for="auto-regenerate-bad-clips">Enabled</label>
+                                    </div>
+                                    <input type="number" class="form-control" id="auto-regenerate-bad-clip-attempts" value="3" min="0" step="1" style="max-width: 96px;">
+                                </div>
+                                <div class="form-text">Attempts controls retry count after an error. Positive numbers retry that many times. `0` or invalid disables retries.</div>
+                            </div>
+                        </div>
+                        <div class="row mb-3" id="tts-local-options" style="display:none;">
+                            <div class="col-md-2">
+                                <div class="form-check form-switch mt-4">
+                                    <input class="form-check-input" type="checkbox" id="compile-codec">
+                                    <label class="form-check-label" for="compile-codec">Compile Codec</label>
+                                </div>
+                                <div class="form-text">torch.compile the audio codec (~3-4x batch speed, slow first run)</div>
+                            </div>
+                            <div class="col-md-2">
+                                <div class="form-check form-switch mt-4">
+                                    <input class="form-check-input" type="checkbox" id="batch-group-by-type">
+                                    <label class="form-check-label" for="batch-group-by-type">Optimize Batch Order</label>
+                                </div>
+                                <div class="form-text">Group by voice type for GPU efficiency (disables sequential order)</div>
+                            </div>
+                            <div class="col-md-2">
+                                <div class="form-check form-switch mt-4">
+                                    <input class="form-check-input" type="checkbox" id="sub-batch-enabled" checked>
+                                    <label class="form-check-label" for="sub-batch-enabled">Sub-batching</label>
+                                </div>
+                                <div class="form-text">Split batches by text length to reduce padding waste</div>
+                            </div>
+                            <div class="col-md-2" id="sub-batch-min-group">
+                                <label class="form-label">Min Sub-batch Size</label>
+                                <input type="number" class="form-control" id="sub-batch-min-size" value="4" min="1">
+                                <div class="form-text">Min chunks before splitting</div>
+                            </div>
+                            <div class="col-md-2" id="sub-batch-ratio-group">
+                                <label class="form-label">Length Ratio</label>
+                                <input type="number" class="form-control" id="sub-batch-ratio" value="5" min="1" step="0.5">
+                                <div class="form-text">Max long/short ratio before split</div>
+                            </div>
+                            <div class="col-md-2" id="sub-batch-max-chars-group">
+                                <label class="form-label">Max Chars/Batch</label>
+                                <input type="number" class="form-control" id="sub-batch-max-chars" value="3000" min="500" step="500">
+                                <div class="form-text">VRAM safety limit per sub-batch. Reduce if you encounter HIP OOM errors or crashes (especially with long reference audio)</div>
+                            </div>
+                            <div class="col-md-2" id="sub-batch-max-items-group">
+                                <label class="form-label">Max Items/Batch</label>
+                                <input type="number" class="form-control" id="sub-batch-max-items" value="0" min="0" step="1">
+                                <div class="form-text">Hard cap on sequences per sub-batch (0 = auto from VRAM estimate)</div>
+                            </div>
+                        </div>
+
+                        <div class="d-flex flex-wrap gap-2">
+                            <button type="submit" class="btn btn-primary"><i class="fas fa-save me-2"></i>Save Configuration</button>
+                            <button type="button" class="btn btn-outline-danger" id="btn-reset-project">
+                                <i class="fas fa-trash-alt me-2"></i>Reset Project
+                            </button>
+                        </div>
+
+                        <h5 class="mb-3 mt-4">
+                            <a class="text-decoration-none" data-bs-toggle="collapse" href="#promptSettings" role="button" aria-expanded="false">
+                                <i class="fas fa-chevron-right me-2" id="prompt-chevron"></i>Prompt Settings (Advanced)
+                            </a>
+                        </h5>
+                        <div class="collapse" id="promptSettings">
+                            <h6 class="mb-3">Generation Settings</h6>
+                            <div class="row mb-3">
+                                <div class="col-md-6">
+                                    <label class="form-label">Chunk Size (characters)</label>
+                                    <input type="number" class="form-control" id="chunk-size" value="3000" min="500">
+                                    <div class="form-text">Size of text chunks sent to LLM (characters). Smaller = more precise, larger = more context.</div>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label">Max Tokens (response)</label>
+                                    <input type="number" class="form-control" id="max-tokens" value="4096" min="256">
+                                    <div class="form-text">Maximum tokens for LLM response. Increase if output is being truncated.</div>
+                                </div>
+                            </div>
+                            <h6 class="mb-3">LLM Sampling Parameters</h6>
+                            <div class="row mb-3">
+                                <div class="col">
+                                    <label class="form-label">Temperature</label>
+                                    <input type="number" class="form-control" id="temperature" value="0.6" min="0" max="2" step="0.05">
+                                    <div class="form-text">Randomness (0 = deterministic)</div>
+                                </div>
+                                <div class="col">
+                                    <label class="form-label">Top P</label>
+                                    <input type="number" class="form-control" id="top-p" value="0.8" min="0" max="1" step="0.05">
+                                    <div class="form-text">Nucleus sampling threshold</div>
+                                </div>
+                                <div class="col">
+                                    <label class="form-label">Top K</label>
+                                    <input type="number" class="form-control" id="top-k" value="20" min="0" max="200" step="1">
+                                    <div class="form-text">Top-K token filtering</div>
+                                </div>
+                                <div class="col">
+                                    <label class="form-label">Min P</label>
+                                    <input type="number" class="form-control" id="min-p" value="0" min="0" max="1" step="0.01">
+                                    <div class="form-text">Minimum probability cutoff</div>
+                                </div>
+                                <div class="col">
+                                    <label class="form-label">Presence Penalty</label>
+                                    <input type="number" class="form-control" id="presence-penalty" value="0" min="-2" max="2" step="0.1">
+                                    <div class="form-text">Penalize repeated topics</div>
+                                </div>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">Banned Tokens</label>
+                                <input type="text" class="form-control" id="banned-tokens" placeholder="e.g. <think>, <reasoning>">
+                                <div class="form-text">Comma-separated tokens the LLM is forbidden from generating. Use to disable thinking mode (e.g. <code>&lt;think&gt;</code>).</div>
+                            </div>
+                            <div id="setup-legacy-prompt-fields">
+                            <div class="mb-3 form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="merge-narrators">
+                                <label class="form-check-label" for="merge-narrators">Merge consecutive narrator lines</label>
+                                <div class="form-text">During script review, combine adjacent NARRATOR entries that share the same instruct into a single longer entry. Disable for better per-line voice direction control.</div>
+                            </div>
+                            <div class="mb-3 form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="orphaned-text-to-narrator-on-repair" checked>
+                                <label class="form-check-label" for="orphaned-text-to-narrator-on-repair">Orphaned text becomes Narrator Text on Repair</label>
+                                <div class="form-text">Enabled by default. Repair still tries the LLM first. If regeneration fails validation and the missing text is outside dialogue, the fallback patch inserts it as NARRATOR text instead of forcing dialogue regeneration.</div>
+                            </div>
+                            <hr>
+                            <h6 class="mb-3">Prompt Customization</h6>
+                            <div class="mb-3">
+                                <label class="form-label">System Prompt</label>
+                                <textarea class="form-control font-monospace prompt-textarea" id="system-prompt" rows="12" style="font-size: 0.85em;"></textarea>
+                                <div class="form-text">Instructions for the LLM on how to convert text to script. Defines output format, rules, and style guidelines.</div>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">User Prompt Template</label>
+                                <textarea class="form-control font-monospace prompt-textarea" id="user-prompt" rows="4" style="font-size: 0.85em;"></textarea>
+                                <div class="form-text">Template for each chunk. Use <code>{context}</code> for chunk context and <code>{chunk}</code> for the text content.</div>
+                            </div>
+                            <hr>
+                            <h6 class="mb-3">Review Prompt Customization</h6>
+                            <div class="mb-3">
+                                <label class="form-label">Review System Prompt</label>
+                                <textarea class="form-control font-monospace prompt-textarea" id="review-system-prompt" rows="12" style="font-size: 0.85em;"></textarea>
+                                <div class="form-text">Instructions for the LLM during the script review pass. Defines what errors to fix and how.</div>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">Review User Prompt Template</label>
+                                <textarea class="form-control font-monospace prompt-textarea" id="review-user-prompt" rows="4" style="font-size: 0.85em;"></textarea>
+                                <div class="form-text">Template for each review batch. Use <code>{context}</code> for batch context and <code>{batch}</code> for the script entries.</div>
+                            </div>
+                            <hr>
+                            <h6 class="mb-3">Attribution Check Prompt Customization</h6>
+                            <div class="mb-3">
+                                <label class="form-label">Attribution Check System Prompt</label>
+                                <textarea class="form-control font-monospace prompt-textarea" id="attribution-system-prompt" rows="8" style="font-size: 0.85em;"></textarea>
+                                <div class="form-text">Used during Sanity Check to decide whether a short omitted phrase is only dialogue attribution and can be ignored.</div>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">Attribution Check User Prompt Template</label>
+                                <textarea class="form-control font-monospace prompt-textarea" id="attribution-user-prompt" rows="6" style="font-size: 0.85em;"></textarea>
+                                <div class="form-text">Use <code>{chapter}</code>, <code>{left_context}</code>, <code>{missing_text}</code>, and <code>{right_context}</code>.</div>
+                            </div>
+                            </div>
+                            <hr>
+                            <h6 class="mb-3">Voice Design Suggestion Prompt</h6>
+                            <div class="mb-3">
+                                <label class="form-label">Voice Suggestion Prompt</label>
+                                <textarea class="form-control font-monospace prompt-textarea" id="voice-prompt" rows="8" style="font-size: 0.85em;"></textarea>
+                                <div class="form-text">Appended after source excerpts when suggesting a base voice description. Use <code>{character_name}</code> to insert the current speaker name.</div>
+                            </div>
+                            <div id="setup-nonlegacy-prompt-fields">
+                                <hr>
+                                <h6 class="mb-3">Dialogue Identification Prompt</h6>
+                                <div class="mb-3">
+                                    <label class="form-label">Dialogue Identification System Prompt</label>
+                                    <textarea class="form-control font-monospace prompt-textarea" id="dialogue-identification-system-prompt" rows="10" style="font-size: 0.85em;"></textarea>
+                                    <div class="form-text">System prompt used when assigning speaker names to dialogue paragraphs. The model is required to respond via the <code>identify_dialogue</code> tool.</div>
+                                </div>
+                                <h6 class="mb-3">Temperament Extraction Prompt</h6>
+                                <div class="mb-3">
+                                    <label class="form-label">Temperament Extraction System Prompt</label>
+                                    <textarea class="form-control font-monospace prompt-textarea" id="temperament-extraction-system-prompt" rows="10" style="font-size: 0.85em;"></textarea>
+                                    <div class="form-text">System prompt used when extracting emotional mood and delivery style for narration and dialogue paragraphs. The model is required to respond via the <code>identify_sentiment</code> tool.</div>
+                                </div>
+                            </div>
+                            <button type="button" class="btn btn-outline-secondary btn-sm mb-3" onclick="resetPrompts()">
+                                <i class="fas fa-undo me-1"></i>Reset to Defaults
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>

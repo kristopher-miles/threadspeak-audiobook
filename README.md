@@ -920,7 +920,10 @@ Alexandria/
 │   ├── project.py             # Chunk management & batch generation
 │   ├── parse_voices.py        # Voice extraction
 │   ├── config.json            # Runtime configuration (gitignored)
-│   ├── static/index.html      # Web UI
+│   ├── static/index.html      # UI shell (navbar + loaders)
+│   ├── static/css/app.css     # Shared UI styles
+│   ├── static/fragments/      # Per-tab HTML partials
+│   └── static/js/             # Modular frontend scripts
 │   └── requirements.txt       # Python dependencies
 ├── builtin_lora/              # Pre-trained LoRA voice presets
 ├── dataset_builder/           # Dataset builder project workspace (gitignored)

@@ -1,0 +1,29 @@
+        <div id="dictionary-tab" class="tab-content" style="display:none;">
+            <div class="card mb-3">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h4 class="m-0">Dictionary</h4>
+                    <span id="dictionary-save-status" class="text-muted small"></span>
+                </div>
+                <div class="card-body">
+                    <p class="mb-3">Dictionary entries replace source words only during synthesis. The editor and script still display the original text.</p>
+                    <div class="d-flex flex-wrap gap-2 mb-3">
+                        <button class="btn btn-outline-secondary btn-sm" onclick="triggerDictionaryImport()"><i class="fas fa-file-import me-1"></i>Import CSV</button>
+                        <button class="btn btn-outline-secondary btn-sm" onclick="exportDictionaryCsv()"><i class="fas fa-file-export me-1"></i>Export CSV</button>
+                        <button class="btn btn-primary btn-sm" onclick="saveDictionary()"><i class="fas fa-save me-1"></i>Save Dictionary</button>
+                    </div>
+                    <input type="file" id="dictionary-import-input" accept=".csv,.tsv,.txt" style="display:none;" onchange="handleDictionaryImport(this)">
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle">
+                            <thead>
+                                <tr>
+                                    <th style="width:40%">Source</th>
+                                    <th style="width:40%">Alias</th>
+                                    <th style="width:20%">Replacements</th>
+                                </tr>
+                            </thead>
+                            <tbody id="dictionary-table-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>

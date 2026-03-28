@@ -5,6 +5,10 @@ module.exports = {
       method: "shell.run",
       params: {
         venv: "env",
+        env: {
+          PINOKIO_SHARE_LOCAL: "{{envs.PINOKIO_SHARE_LOCAL}}",
+          PINOKIO_SHARE_LOCAL_PORT: "{{envs.PINOKIO_SHARE_LOCAL_PORT}}",
+        },
         path: "app",
         message: "python app.py",
         on: [{

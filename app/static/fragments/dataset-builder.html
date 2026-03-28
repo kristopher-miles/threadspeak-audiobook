@@ -1,0 +1,89 @@
+        <div id="dataset-builder-tab" class="tab-content" style="display:none;">
+            <div class="card">
+                <div class="card-header">
+                    <h4><span class="step-indicator step-active">6</span>Dataset Builder</h4>
+                    <p class="text-muted mb-0">Build LoRA training datasets with per-sample generation, preview, and re-generation.</p>
+                </div>
+                <div class="card-body">
+                    <!-- Project Selector -->
+                    <div class="d-flex align-items-center gap-2 mb-3">
+                        <select class="form-select" id="dsb-project-select" style="max-width: 300px;" onchange="dsbOnProjectChange()">
+                            <option value="">-- Select project --</option>
+                        </select>
+                        <button class="btn btn-primary btn-sm" onclick="dsbCreateProject()"><i class="fas fa-plus me-1"></i>New Dataset</button>
+                        <button class="btn btn-outline-danger btn-sm" id="dsb-btn-delete-project" onclick="dsbDeleteProject()" style="display:none;"><i class="fas fa-trash me-1"></i>Delete</button>
+                    </div>
+
+                    <!-- Dataset Config (shown when project selected) -->
+                    <div id="dsb-form-area" style="display:none;">
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-9">
+                            <label class="form-label">Root Voice Description</label>
+                            <input type="text" class="form-control" id="dsb-description" placeholder="e.g. A male tenor with a steady, clean tone, light nasal resonance, and even delivery">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label">Global Seed</label>
+                            <input type="number" class="form-control" id="dsb-global-seed" placeholder="Random" min="-1" value="">
+                            <div class="text-muted" style="font-size: 0.7rem;">Empty = random. Same seed = same voice.</div>
+                        </div>
+                    </div>
+
+                    <!-- Toolbar -->
+                    <div class="d-flex align-items-center gap-2 mb-3">
+                        <button class="btn btn-sm btn-outline-secondary" onclick="dsbAddRow()"><i class="fas fa-plus me-1"></i>Add Row</button>
+                        <label class="btn btn-sm btn-outline-info mb-0">
+                            <i class="fas fa-file-import me-1"></i>Import JSON
+                            <input type="file" accept=".json" onchange="dsbImport(event)" style="display:none;">
+                        </label>
+                        <button class="btn btn-sm btn-outline-info" onclick="dsbExport()"><i class="fas fa-file-export me-1"></i>Export JSON</button>
+                        <div class="ms-auto d-flex gap-2">
+                            <button class="btn btn-sm btn-success" id="dsb-btn-gen-all" onclick="dsbGenerateAll(false)"><i class="fas fa-play me-1"></i>Generate Pending</button>
+                            <button class="btn btn-sm btn-outline-success" id="dsb-btn-regen-all" onclick="dsbGenerateAll(true)"><i class="fas fa-redo me-1"></i>Regen All</button>
+                            <button class="btn btn-sm btn-danger" id="dsb-btn-cancel" onclick="dsbCancel()" style="display:none;"><i class="fas fa-stop me-1"></i>Cancel</button>
+                        </div>
+                    </div>
+
+                    <!-- Progress bar -->
+                    <div class="progress mb-3" style="height: 22px; display: none;" id="dsb-progress-wrap">
+                        <div id="dsb-progress-bar" class="progress-bar progress-bar-striped bg-success" role="progressbar" style="width: 0%">0%</div>
+                    </div>
+
+                    <!-- Spreadsheet table -->
+                    <div class="table-responsive">
+                        <table class="table table-bordered table-hover table-sm">
+                            <thead class="table-light">
+                                <tr>
+                                    <th width="4%">#</th>
+                                    <th width="16%">Emotion / Style</th>
+                                    <th width="34%">Text</th>
+                                    <th width="7%">Seed</th>
+                                    <th width="7%">Status</th>
+                                    <th width="32%">Audio / Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="dsb-table-body">
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- Save section -->
+                    <div class="card mt-3">
+                        <div class="card-body d-flex align-items-center gap-3">
+                            <button class="btn btn-primary" id="dsb-btn-save" onclick="dsbSave()"><i class="fas fa-save me-1"></i>Save as Training Dataset</button>
+                            <div>
+                                <label class="form-label mb-0 me-2">Reference Sample:</label>
+                                <select class="form-select form-select-sm d-inline-block" id="dsb-ref-select" style="width: auto;">
+                                    <option value="0">First completed sample</option>
+                                </select>
+                            </div>
+                            <span id="dsb-save-status" class="text-muted small"></span>
+                        </div>
+                        <div class="text-muted small px-3 pb-2"><i class="fas fa-info-circle me-1"></i>The reference sample is used as the speaker embedding (<code>ref.wav</code>) during LoRA training. Pick a clear, representative line.</div>
+                    </div>
+
+                    <!-- Logs -->
+                    <pre id="dsb-logs" class="bg-dark text-light p-2 rounded mt-3" style="max-height: 150px; overflow-y: auto; font-size: 0.8rem; display: none;"></pre>
+                    </div><!-- /dsb-form-area -->
+                </div>
+            </div>
+        </div>

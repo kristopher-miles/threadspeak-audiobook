@@ -1,0 +1,102 @@
+        <div id="proofread-tab" class="tab-content" style="display:none;">
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h4 class="m-0"><span class="step-indicator step-active">5</span>Proofread</h4>
+                    <div class="d-flex flex-wrap gap-2 align-items-center">
+                        <div class="input-group input-group-sm" style="width: 220px;">
+                            <span class="input-group-text">Certainty</span>
+                            <input type="number" id="proofread-threshold" class="form-control" min="0" max="1" step="0.01" value="1.0" oninput="previewProofreadThreshold()" onchange="saveProofreadThreshold()">
+                        </div>
+                        <button class="btn btn-primary btn-sm" id="btn-proofread-sequence" onclick="startProofreadSequence()">
+                            <i class="fas fa-spell-check me-1"></i>Proofread Sequence
+                        </button>
+                        <button class="btn btn-outline-primary btn-sm" id="btn-proofread-book" onclick="startProofreadEntireBook()">
+                            <i class="fas fa-book-open me-1"></i>Proofread Entire Book
+                        </button>
+                        <button class="btn btn-outline-secondary btn-sm" id="btn-proofread-discard-selection" onclick="discardProofreadSelection()">
+                            <i class="fas fa-eraser me-1"></i>Discard Selection
+                        </button>
+                        <button class="btn btn-outline-danger btn-sm" id="btn-proofread-clear-local" onclick="clearProofreadFailuresLocal()">
+                            <i class="fas fa-trash me-1"></i>Clear Local Failures
+                        </button>
+                        <button class="btn btn-outline-danger btn-sm" id="btn-proofread-clear-book" onclick="clearProofreadFailuresBook()">
+                            <i class="fas fa-trash-alt me-1"></i>Clear Book Failures
+                        </button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                        <div class="d-flex align-items-center gap-2">
+                            <label for="proofread-chapter-select" class="form-label mb-0 fw-semibold">Chapter</label>
+                            <select id="proofread-chapter-select" class="form-select form-select-sm" style="min-width: 260px;" oninput="changeProofreadChapter(this.value)" onchange="changeProofreadChapter(this.value)">
+                                <option value="__whole_project__">Whole Project</option>
+                            </select>
+                        </div>
+                        <div class="text-end">
+                            <div id="proofread-chapter-summary" class="text-muted small">Showing all segments.</div>
+                            <div id="proofread-run-summary" class="text-muted small"></div>
+                        </div>
+                    </div>
+
+                    <div id="proofread-status-panel" class="theme-panel border rounded p-3 mb-3">
+                        <div class="row g-3">
+                            <div class="col-md-3 col-sm-6">
+                                <div class="small text-muted">Phase</div>
+                                <div class="fw-semibold" id="proofread-phase">Idle</div>
+                            </div>
+                            <div class="col-md-3 col-sm-6">
+                                <div class="small text-muted">Progress</div>
+                                <div class="fw-semibold" id="proofread-progress">0 / 0</div>
+                            </div>
+                            <div class="col-md-3 col-sm-6">
+                                <div class="small text-muted">ETA</div>
+                                <div class="fw-semibold" id="proofread-eta">Waiting for data</div>
+                            </div>
+                            <div class="col-md-3 col-sm-6">
+                                <div class="small text-muted">Elapsed</div>
+                                <div class="fw-semibold" id="proofread-elapsed">0s</div>
+                            </div>
+                            <div class="col-md-3 col-sm-6">
+                                <div class="small text-muted">Passed</div>
+                                <div class="fw-semibold" id="proofread-passed">0</div>
+                            </div>
+                            <div class="col-md-3 col-sm-6">
+                                <div class="small text-muted">Failed</div>
+                                <button type="button" class="fw-semibold status-jump-button" id="proofread-failed" onclick="jumpToFirstProofreadFailure()">0</button>
+                            </div>
+                            <div class="col-md-3 col-sm-6">
+                                <div class="small text-muted">Auto-failed</div>
+                                <div class="fw-semibold" id="proofread-auto-failed">0</div>
+                            </div>
+                            <div class="col-md-3 col-sm-6">
+                                <div class="small text-muted">Skipped</div>
+                                <div class="fw-semibold" id="proofread-skipped">0</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="table-responsive">
+                        <table class="table table-bordered table-hover">
+                            <thead>
+                                <tr>
+                                    <th width="7%">Speaker</th>
+                                    <th width="34%">Text</th>
+                                    <th width="10%">Score</th>
+                                    <th width="22%">Transcript</th>
+                                    <th width="27%">Audio / Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="proofread-table-body">
+                                <tr><td colspan="5" class="text-center text-muted">Loading clips...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div class="mt-3">
+                        <div class="small text-muted mb-1">Proofread Logs</div>
+                        <div id="proofread-logs" class="log-window"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+

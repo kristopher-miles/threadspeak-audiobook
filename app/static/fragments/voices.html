@@ -1,0 +1,27 @@
+        <div id="voices-tab" class="tab-content" style="display:none;">
+            <div class="card mb-3">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h4 class="m-0"><span class="step-indicator step-active">3</span>Voice Configuration</h4>
+                    <div class="d-flex align-items-center gap-2">
+                        <button id="generate-outstanding-voices-btn" class="btn btn-sm btn-outline-primary" onclick="generateOutstandingVoices()">
+                            Create Outstanding Voices
+                        </button>
+                        <button id="clear-outstanding-voices-btn" class="btn btn-sm btn-outline-danger" onclick="clearOutstandingVoices()">
+                            Clear All
+                        </button>
+                        <span id="voice-save-status" class="text-muted small"></span>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <p>Voices are detected from the generated script. Changes are saved automatically.</p>
+                    <div id="voices-list"></div>
+                </div>
+            </div>
+
+             <div class="card">
+                <div class="card-header">Voice Parsing Logs</div>
+                <div class="card-body p-0">
+                    <div id="voices-logs" class="log-window" style="height: 150px;"></div>
+                </div>
+            </div>
+        </div>

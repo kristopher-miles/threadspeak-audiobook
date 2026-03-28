@@ -10,6 +10,7 @@ Usage:
 import argparse
 import io
 import json
+import os
 import sys
 import time
 import requests
@@ -19,6 +20,7 @@ import requests
 BASE_URL = ""
 FULL_MODE = False
 TEST_PREFIX = "_test_"
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 results = {"passed": 0, "failed": 0, "skipped": 0}
 failures = []
@@ -296,7 +298,7 @@ def test_get_default_prompts():
 
 
 def test_get_config_persists_missing_voice_prompt_default():
-    config_path = "config.json"
+    config_path = os.path.join(APP_DIR, "config.json")
     with open(config_path, "r", encoding="utf-8") as f:
         original_raw = f.read()
     original = json.loads(original_raw)
