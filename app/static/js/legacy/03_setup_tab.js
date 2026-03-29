@@ -7,6 +7,99 @@
             document.getElementById('tts-local-options').style.display = mode === 'local' ? '' : 'none';
         }
 
+        function coerceConfigBool(value, fallback = false) {
+            if (typeof value === 'boolean') return value;
+            if (value == null) return !!fallback;
+            if (typeof value === 'number') return value !== 0;
+            if (typeof value === 'string') {
+                const text = value.trim().toLowerCase();
+                if (['1', 'true', 'yes', 'on'].includes(text)) return true;
+                if (['0', 'false', 'no', 'off', ''].includes(text)) return false;
+            }
+            return !!value;
+        }
+
+        function parseIntOrDefault(inputId, fallback) {
+            const value = parseInt(document.getElementById(inputId).value, 10);
+            return Number.isNaN(value) ? fallback : value;
+        }
+
+        function parseFloatOrDefault(inputId, fallback) {
+            const value = parseFloat(document.getElementById(inputId).value);
+            return Number.isNaN(value) ? fallback : value;
+        }
+
+        function collectExportConfigFromUI() {
+            return {
+                silence_between_speakers_ms: parseIntOrDefault('silence-between-speakers', 500),
+                silence_same_speaker_ms: parseIntOrDefault('silence-same-speaker', 250),
+                silence_end_of_chapter_ms: parseIntOrDefault('silence-end-of-chapter', 3000),
+                silence_paragraph_ms: parseIntOrDefault('silence-paragraph', 750),
+                trim_clip_silence_enabled: document.getElementById('trim-clip-silence-enabled').checked,
+                trim_silence_threshold_dbfs: parseFloatOrDefault('trim-silence-threshold-dbfs', -50),
+                trim_min_silence_len_ms: parseIntOrDefault('trim-min-silence-len-ms', 150),
+                trim_keep_padding_ms: parseIntOrDefault('trim-keep-padding-ms', 40),
+                normalize_enabled: document.getElementById('normalize-enabled').checked,
+                normalize_target_lufs_mono: parseFloatOrDefault('normalize-target-lufs-mono', -18),
+                normalize_target_lufs_stereo: parseFloatOrDefault('normalize-target-lufs-stereo', -16),
+                normalize_true_peak_dbtp: parseFloatOrDefault('normalize-true-peak-dbtp', -1),
+                normalize_lra: parseFloatOrDefault('normalize-lra', 11)
+            };
+        }
+
+        window.collectExportConfigFromUI = collectExportConfigFromUI;
+        window.persistExportConfigFromUI = async () => {
+            const exportConfig = collectExportConfigFromUI();
+            await API.post('/api/config/export', exportConfig);
+            return exportConfig;
+        };
+
+        function wireExportConfigAutoSave() {
+            const ids = [
+                'silence-between-speakers',
+                'silence-same-speaker',
+                'silence-end-of-chapter',
+                'silence-paragraph',
+                'trim-clip-silence-enabled',
+                'trim-silence-threshold-dbfs',
+                'trim-min-silence-len-ms',
+                'trim-keep-padding-ms',
+                'normalize-enabled',
+                'normalize-target-lufs-mono',
+                'normalize-target-lufs-stereo',
+                'normalize-true-peak-dbtp',
+                'normalize-lra'
+            ];
+            const debounceMap = new Map();
+            const scheduleSave = (id, delayMs = 250) => {
+                const prior = debounceMap.get(id);
+                if (prior) clearTimeout(prior);
+                const token = setTimeout(async () => {
+                    debounceMap.delete(id);
+                    try {
+                        await window.persistExportConfigFromUI();
+                    } catch (e) {
+                        showToast('Failed to save export settings: ' + (e?.message || e), 'error');
+                    }
+                }, delayMs);
+                debounceMap.set(id, token);
+            };
+            for (const id of ids) {
+                const el = document.getElementById(id);
+                if (!el || el.dataset.exportAutosaveBound === '1') continue;
+                el.dataset.exportAutosaveBound = '1';
+                // checkboxes emit reliable change events; numeric fields are safer on input+blur.
+                if (el.type === 'checkbox') {
+                    el.addEventListener('change', () => scheduleSave(id, 0));
+                } else {
+                    el.addEventListener('input', () => scheduleSave(id, 300));
+                    el.addEventListener('change', () => scheduleSave(id, 0));
+                    el.addEventListener('blur', () => scheduleSave(id, 0));
+                }
+            }
+        }
+        wireExportConfigAutoSave();
+
         async function loadConfig() {
             document.getElementById('chunk-size').value = 3000;
             document.getElementById('max-tokens').value = 4096;
@@ -173,7 +266,7 @@
                         document.getElementById('silence-paragraph').value = config.export.silence_paragraph_ms;
                     }
                     if (config.export.trim_clip_silence_enabled != null) {
-                        document.getElementById('trim-clip-silence-enabled').checked = !!config.export.trim_clip_silence_enabled;
+                        document.getElementById('trim-clip-silence-enabled').checked = coerceConfigBool(config.export.trim_clip_silence_enabled, true);
                     }
                     if (config.export.trim_silence_threshold_dbfs != null) {
                         document.getElementById('trim-silence-threshold-dbfs').value = config.export.trim_silence_threshold_dbfs;
@@ -185,7 +278,7 @@
                         document.getElementById('trim-keep-padding-ms').value = config.export.trim_keep_padding_ms;
                     }
                     if (config.export.normalize_enabled != null) {
-                        document.getElementById('normalize-enabled').checked = !!config.export.normalize_enabled;
+                        document.getElementById('normalize-enabled').checked = coerceConfigBool(config.export.normalize_enabled, true);
                     }
                     if (config.export.normalize_target_lufs_mono != null) {
                         document.getElementById('normalize-target-lufs-mono').value = config.export.normalize_target_lufs_mono;
@@ -216,7 +309,7 @@
         // Reset prompts and generation settings to factory defaults
         window.resetPrompts = async () => {
             try {
-                const defaults = await API.get('/api/default_prompts');
+                const defaults = await API.get('/api/factory_default_prompts');
                 document.getElementById('system-prompt').value = defaults.system_prompt;
                 document.getElementById('user-prompt').value = defaults.user_prompt;
                 if (defaults.review_system_prompt) {
@@ -335,19 +428,7 @@
                     certainty_threshold: parseFloat(document.getElementById('proofread-threshold').value) || 1.0
                 },
                 export: {
-                    silence_between_speakers_ms: parseInt(document.getElementById('silence-between-speakers').value) || 500,
-                    silence_same_speaker_ms: parseInt(document.getElementById('silence-same-speaker').value) || 250,
-                    silence_end_of_chapter_ms: parseInt(document.getElementById('silence-end-of-chapter').value) || 3000,
-                    silence_paragraph_ms: parseInt(document.getElementById('silence-paragraph').value) || 750,
-                    trim_clip_silence_enabled: document.getElementById('trim-clip-silence-enabled').checked,
-                    trim_silence_threshold_dbfs: parseFloat(document.getElementById('trim-silence-threshold-dbfs').value) || -50,
-                    trim_min_silence_len_ms: parseInt(document.getElementById('trim-min-silence-len-ms').value) || 150,
-                    trim_keep_padding_ms: parseInt(document.getElementById('trim-keep-padding-ms').value) || 40,
-                    normalize_enabled: document.getElementById('normalize-enabled').checked,
-                    normalize_target_lufs_mono: parseFloat(document.getElementById('normalize-target-lufs-mono').value) || -18,
-                    normalize_target_lufs_stereo: parseFloat(document.getElementById('normalize-target-lufs-stereo').value) || -16,
-                    normalize_true_peak_dbtp: parseFloat(document.getElementById('normalize-true-peak-dbtp').value) || -1,
-                    normalize_lra: parseFloat(document.getElementById('normalize-lra').value) || 11
+                    ...collectExportConfigFromUI()
                 },
                 ui: {
                     dark_mode: document.getElementById('dark-mode-toggle').checked

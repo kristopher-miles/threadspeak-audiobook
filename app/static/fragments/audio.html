@@ -80,7 +80,7 @@
                             <div class="form-text">Loudness range target used by loudnorm.</div>
                         </div>
                     </div>
-                    <div class="small text-muted mb-3">Use Save Configuration in Setup to persist changes.</div>
+                    <div class="small text-muted mb-3">Export settings auto-save when changed and are applied immediately to new exports.</div>
                     <div id="audio-merge-progress" class="theme-panel border rounded p-3 mb-3" style="display:none;">
                         <div class="row g-3">
                             <div class="col-md-3 col-sm-6">
@@ -116,6 +116,10 @@
                     <div class="d-flex flex-wrap gap-2 justify-content-center mb-3">
                         <button class="btn btn-warning" id="btn-merge"><i class="fas fa-file-audio me-1"></i>Merge All</button>
                         <button class="btn btn-outline-warning" id="btn-merge-optimized"><i class="fas fa-box-archive me-1"></i>Optimized Export</button>
+                        <button class="btn btn-outline-info" id="btn-trim-sanity-first-clip"><i class="fas fa-vial me-1"></i>Sanity Trim First Clip</button>
+                        <button class="btn btn-outline-info" id="btn-assemble-sanity-first5"><i class="fas fa-vial me-1"></i>Assemble First 5 Clips</button>
+                        <button class="btn btn-outline-info" id="btn-assemble-sanity-first5-normalized"><i class="fas fa-vial me-1"></i>Assemble + Normalize First 5</button>
+                        <button class="btn btn-outline-secondary" id="btn-clear-trim-cache"><i class="fas fa-broom me-1"></i>Clear Trim Cache</button>
                     </div>
                     <div id="audio-player-container" class="text-center" style="display:none;">
                         <h5>Your Audiobook</h5>

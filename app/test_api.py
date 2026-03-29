@@ -11,8 +11,13 @@ import argparse
 import io
 import json
 import os
+import shutil
+import socket
+import subprocess
 import sys
+import tempfile
 import time
+from urllib.parse import urlparse
 import requests
 try:
     import pytest
@@ -58,10 +63,124 @@ BASE_URL = _discover_base_url()
 FULL_MODE = (os.getenv("ALEXANDRIA_TEST_FULL", "").strip().lower() in {"1", "true", "yes", "on"})
 TEST_PREFIX = "_test_"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_DIR = os.path.dirname(APP_DIR)
+STATE_PATH = os.path.join(REPO_DIR, "state.json")
+UPLOADS_PATH = os.path.join(REPO_DIR, "uploads")
+ACTIVE_APP_DIR = APP_DIR
 
 results = {"passed": 0, "failed": 0, "skipped": 0}
 failures = []
 shared = {}  # state shared between dependent tests
+_SERVER_PROC = None
+_SERVER_TEMP_ROOT = None
+
+
+def _find_free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _start_isolated_test_server():
+    global BASE_URL, REPO_DIR, STATE_PATH, UPLOADS_PATH, ACTIVE_APP_DIR, _SERVER_PROC, _SERVER_TEMP_ROOT
+
+    _SERVER_TEMP_ROOT = tempfile.mkdtemp(prefix="alexandria_api_test_")
+    temp_app_dir = os.path.join(_SERVER_TEMP_ROOT, "app")
+    shutil.copytree(
+        APP_DIR,
+        temp_app_dir,
+        ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache", "*.pyc", "env"),
+    )
+    temp_root = os.path.dirname(temp_app_dir)
+    for filename in (
+        "default_prompts.txt",
+        "review_prompts.txt",
+        "attribution_prompts.txt",
+        "voice_prompt.txt",
+        "dialogue_identification_system_prompt.txt",
+        "temperament_extraction_system_prompt.txt",
+    ):
+        source = os.path.join(REPO_DIR, filename)
+        if os.path.exists(source):
+            shutil.copy2(source, os.path.join(temp_root, filename))
+
+    port = _find_free_port()
+    env = os.environ.copy()
+    env["PINOKIO_SHARE_LOCAL"] = "false"
+    env["PINOKIO_SHARE_LOCAL_PORT"] = str(port)
+    env["PYTHONUNBUFFERED"] = "1"
+
+    _SERVER_PROC = subprocess.Popen(
+        [sys.executable, "app.py"],
+        cwd=temp_app_dir,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    base_url = f"http://127.0.0.1:{port}"
+    deadline = time.time() + 45
+    while time.time() < deadline:
+        if _SERVER_PROC.poll() is not None:
+            output = ""
+            if _SERVER_PROC.stdout:
+                try:
+                    output = _SERVER_PROC.stdout.read() or ""
+                except Exception:
+                    output = ""
+            raise RuntimeError(f"Isolated test server exited early with code {_SERVER_PROC.returncode}.\n{output[-2000:]}")
+        try:
+            r = requests.get(f"{base_url}/", timeout=1.5)
+            if r.status_code < 500:
+                break
+        except Exception:
+            pass
+        time.sleep(0.3)
+    else:
+        raise RuntimeError(f"Timed out waiting for isolated test server at {base_url}")
+
+    BASE_URL = base_url
+    ACTIVE_APP_DIR = temp_app_dir
+    REPO_DIR = os.path.dirname(temp_app_dir)
+    STATE_PATH = os.path.join(REPO_DIR, "state.json")
+    UPLOADS_PATH = os.path.join(REPO_DIR, "uploads")
+
+
+def _stop_isolated_test_server():
+    global _SERVER_PROC, _SERVER_TEMP_ROOT
+
+    proc = _SERVER_PROC
+    _SERVER_PROC = None
+    if proc is not None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=10)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    if _SERVER_TEMP_ROOT and os.path.isdir(_SERVER_TEMP_ROOT):
+        shutil.rmtree(_SERVER_TEMP_ROOT, ignore_errors=True)
+    _SERVER_TEMP_ROOT = None
+
+
+if pytest is not None:
+    @pytest.fixture(scope="module", autouse=True)
+    def _isolated_api_server():
+        use_external = (os.getenv("ALEXANDRIA_TEST_USE_EXTERNAL_SERVER", "").strip().lower() in {"1", "true", "yes", "on"})
+        if not use_external:
+            _start_isolated_test_server()
+        try:
+            yield
+        finally:
+            try:
+                cleanup()
+            except Exception:
+                pass
+            if not use_external:
+                _stop_isolated_test_server()
 
 
 # ── Helpers ──────────────────────────────────────────────────
@@ -138,6 +257,27 @@ def wait_for_task(task, timeout=120, poll_interval=2):
     return False
 
 
+def wait_for_audio_idle(timeout=120, poll_interval=2):
+    """Wait until audio has no running work and no queued jobs."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            r = get("/api/status/audio")
+            if r.status_code == 200:
+                data = r.json()
+                if (
+                    not data.get("running")
+                    and not data.get("merge_running")
+                    and not data.get("current_job")
+                    and not data.get("queue")
+                ):
+                    return True
+        except Exception:
+            pass
+        time.sleep(poll_interval)
+    return False
+
+
 def get(path, **kwargs):
     return requests.get(f"{BASE_URL}{path}", timeout=30, **kwargs)
 
@@ -148,6 +288,46 @@ def post(path, **kwargs):
 
 def delete(path, **kwargs):
     return requests.delete(f"{BASE_URL}{path}", timeout=30, **kwargs)
+
+
+def _is_local_server():
+    try:
+        host = (urlparse(BASE_URL).hostname or "").lower()
+    except Exception:
+        return False
+    return host in {"127.0.0.1", "localhost"}
+
+
+def _cleanup_local_upload_state():
+    if not _is_local_server():
+        return []
+    removed = []
+    if os.path.isdir(UPLOADS_PATH):
+        for name in os.listdir(UPLOADS_PATH):
+            if not name.startswith(TEST_PREFIX):
+                continue
+            path = os.path.join(UPLOADS_PATH, name)
+            if os.path.isfile(path):
+                try:
+                    os.remove(path)
+                    removed.append(f"upload {name}")
+                except Exception:
+                    pass
+    try:
+        if os.path.exists(STATE_PATH):
+            with open(STATE_PATH, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            input_path = (state.get("input_file_path") or "").strip()
+            if input_path and os.path.basename(input_path).startswith(TEST_PREFIX):
+                state.pop("input_file_path", None)
+                state["render_prep_complete"] = False
+                state.pop("processing_stage_markers", None)
+                with open(STATE_PATH, "w", encoding="utf-8") as f:
+                    json.dump(state, f, indent=2, ensure_ascii=False)
+                removed.append("state input_file_path")
+    except Exception:
+        pass
+    return removed
 
 
 # ── Section 1: Server ───────────────────────────────────────
@@ -167,8 +347,9 @@ def test_get_config():
     data = r.json()
     assert_key(data, "llm")
     assert_key(data, "tts")
-    # current_file should always be present (may be null)
-    assert_key(data, "current_file")
+    # current_file is optional when no source file has been selected yet.
+    if "current_file" in data and data["current_file"] is not None and not isinstance(data["current_file"], str):
+        raise TestFailure(f"current_file must be string or null, got {type(data['current_file']).__name__}")
 
 
 def test_save_config_roundtrip():
@@ -246,6 +427,56 @@ def test_save_config_roundtrip():
         "export": original.get("export"),
     }
     post("/api/config", json=restore)
+
+
+def test_save_export_config_roundtrip():
+    r = get("/api/config")
+    assert_status(r, 200)
+    original = r.json()
+    export_original = original.get("export") or {}
+
+    patch_payload = {
+        "silence_between_speakers_ms": int(export_original.get("silence_between_speakers_ms", 500)),
+        "silence_same_speaker_ms": int(export_original.get("silence_same_speaker_ms", 250)),
+        "silence_end_of_chapter_ms": int(export_original.get("silence_end_of_chapter_ms", 3000)),
+        "silence_paragraph_ms": int(export_original.get("silence_paragraph_ms", 750)),
+        "trim_clip_silence_enabled": False,
+        "trim_silence_threshold_dbfs": float(export_original.get("trim_silence_threshold_dbfs", -50.0)),
+        "trim_min_silence_len_ms": int(export_original.get("trim_min_silence_len_ms", 150)),
+        "trim_keep_padding_ms": int(export_original.get("trim_keep_padding_ms", 40)),
+        "normalize_enabled": bool(export_original.get("normalize_enabled", True)),
+        "normalize_target_lufs_mono": float(export_original.get("normalize_target_lufs_mono", -18.0)),
+        "normalize_target_lufs_stereo": float(export_original.get("normalize_target_lufs_stereo", -16.0)),
+        "normalize_true_peak_dbtp": float(export_original.get("normalize_true_peak_dbtp", -1.0)),
+        "normalize_lra": float(export_original.get("normalize_lra", 11.0)),
+    }
+
+    r = post("/api/config/export", json=patch_payload)
+    assert_status(r, 200)
+    body = r.json()
+    if body.get("status") != "saved":
+        raise TestFailure("Export config patch did not report success")
+
+    r = get("/api/config")
+    assert_status(r, 200)
+    readback = r.json()
+    if readback.get("export", {}).get("trim_clip_silence_enabled") is not False:
+        raise TestFailure("Export config patch did not persist trim_clip_silence_enabled=false")
+    if readback.get("export", {}).get("trim_keep_padding_ms") != patch_payload["trim_keep_padding_ms"]:
+        raise TestFailure("Export config patch did not persist trim_keep_padding_ms")
+
+    zero_padding_payload = dict(patch_payload)
+    zero_padding_payload["trim_keep_padding_ms"] = 0
+    r = post("/api/config/export", json=zero_padding_payload)
+    assert_status(r, 200)
+
+    r = get("/api/config")
+    assert_status(r, 200)
+    zero_readback = r.json()
+    if zero_readback.get("export", {}).get("trim_keep_padding_ms") != 0:
+        raise TestFailure("Export config patch did not preserve trim_keep_padding_ms=0")
+
+    post("/api/config", json=original)
 
 
 def test_save_review_prompts_roundtrip():
@@ -350,7 +581,7 @@ def test_get_default_prompts():
 
 
 def test_get_config_persists_missing_voice_prompt_default():
-    config_path = os.path.join(APP_DIR, "config.json")
+    config_path = os.path.join(ACTIVE_APP_DIR, "config.json")
     with open(config_path, "r", encoding="utf-8") as f:
         original_raw = f.read()
     original = json.loads(original_raw)
@@ -380,6 +611,7 @@ def test_get_config_persists_missing_voice_prompt_default():
 # ── Section 3: Upload ───────────────────────────────────────
 
 def test_upload_file():
+    require_full_mode()
     content = b"Chapter One\nIt was a dark and stormy night.\nThe end."
     files = {"file": (f"{TEST_PREFIX}upload.txt", io.BytesIO(content), "text/plain")}
     r = post("/api/upload", files=files)
@@ -434,8 +666,10 @@ def test_load_script():
         skip_test("no annotated script loaded")
     r = post("/api/scripts/load", json={"name": f"{TEST_PREFIX}script"})
     if r.status_code == 409:
-        # Loading while generation runs now returns 409; wait briefly and retry once.
-        if wait_for_task("audio", timeout=120):
+        # Script load is blocked by both active and queued audio work.
+        # Cancel any stale queue/current job and wait for full idle before retrying.
+        post("/api/cancel_audio", json={})
+        if wait_for_audio_idle(timeout=120):
             r = post("/api/scripts/load", json={"name": f"{TEST_PREFIX}script"})
     assert_status(r, 200)
     data = r.json()
@@ -1091,13 +1325,14 @@ def run_all_tests():
     section("Config")
     run_test("get_config", test_get_config)
     run_test("save_config_roundtrip", test_save_config_roundtrip)
+    run_test("save_export_config_roundtrip", test_save_export_config_roundtrip)
     run_test("save_review_prompts_roundtrip", test_save_review_prompts_roundtrip)
     run_test("save_attribution_prompts_roundtrip", test_save_attribution_prompts_roundtrip)
     run_test("get_default_prompts", test_get_default_prompts)
     run_test("get_config_persists_missing_voice_prompt_default", test_get_config_persists_missing_voice_prompt_default)
 
     section("Upload")
-    run_test("upload_file", test_upload_file)
+    run_test("upload_file", test_upload_file, requires_full=True)
 
     section("Annotated Script")
     run_test("get_annotated_script", test_get_annotated_script)
@@ -1192,6 +1427,16 @@ def cleanup():
     items = []
 
     try:
+        post("/api/cancel_audio", json={})
+    except Exception:
+        pass
+
+    try:
+        post("/api/dataset_builder/cancel")
+    except Exception:
+        pass
+
+    try:
         delete(f"/api/scripts/{TEST_PREFIX}script")
         items.append("test script")
     except Exception:
@@ -1206,6 +1451,17 @@ def cleanup():
     try:
         delete(f"/api/dataset_builder/{TEST_PREFIX}gen_proj")
         items.append("gen project")
+    except Exception:
+        pass
+
+    try:
+        r = get("/api/dataset_builder/list")
+        if r.status_code == 200:
+            for entry in r.json():
+                name = entry.get("name", "")
+                if name.startswith(TEST_PREFIX):
+                    delete(f"/api/dataset_builder/{name}")
+                    items.append(f"builder {name}")
     except Exception:
         pass
 
@@ -1225,10 +1481,21 @@ def cleanup():
     except Exception:
         pass
 
+    for removed in _cleanup_local_upload_state():
+        items.append(removed)
+
     if items:
         print(f"  Cleaned: {', '.join(items)}")
     else:
         print(f"  Nothing to clean")
+
+
+if pytest is not None:
+    @pytest.fixture(scope="session", autouse=True)
+    def _test_api_session_cleanup():
+        cleanup()
+        yield
+        cleanup()
 
 
 # ── Main ─────────────────────────────────────────────────────
@@ -1249,6 +1516,8 @@ def main():
     print(f"Alexandria API Tests")
     print(f"Server: {BASE_URL}")
     print(f"Mode:   {'FULL (includes TTS/LLM tests)' if FULL_MODE else 'QUICK (no TTS/LLM)'}")
+
+    cleanup()
 
     try:
         run_all_tests()

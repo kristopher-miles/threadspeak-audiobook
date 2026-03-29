@@ -10,6 +10,11 @@
                         console.error('Failed to flush editor saves:', err);
                     });
                 }
+                if (currentTab === 'audio' && nextTab !== 'audio' && window.persistExportConfigFromUI) {
+                    await window.persistExportConfigFromUI().catch(err => {
+                        console.error('Failed to flush export settings before tab switch:', err);
+                    });
+                }
 
                 // Remove active class from all links
                 document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
@@ -47,4 +52,3 @@
                 reconnectTaskLogs().catch(err => console.error('Task log reconnect error', err));
             });
         });
-

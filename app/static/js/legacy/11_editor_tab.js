@@ -60,6 +60,17 @@
             ].join('|');
         }
 
+        function buildChunkAudioSrc(chunk, fallbackToken = '') {
+            const rawPath = String(chunk?.audio_path || '').trim();
+            if (!rawPath) return '';
+            if (/^https?:\/\//i.test(rawPath)) {
+                return rawPath;
+            }
+            const normalizedPath = rawPath.startsWith('/') ? rawPath : `/${rawPath}`;
+            const fingerprint = getChunkAudioFingerprint(chunk) || fallbackToken || Date.now().toString();
+            return `${normalizedPath}?t=${encodeURIComponent(String(fingerprint))}`;
+        }
+
         function buildEditorChapterOptions(chunks) {
             const options = [{
                 id: WHOLE_PROJECT_CHAPTER_ID,
@@ -198,7 +209,7 @@
                 const existingAudio = actionContainer.querySelector('audio');
                 const existingNoAudio = actionContainer.querySelector('.text-muted.small');
                 if (chunk.audio_path) {
-                    const newSrc = `/${chunk.audio_path}?t=${Date.now()}`;
+                    const newSrc = buildChunkAudioSrc(chunk, Date.now().toString());
                     const nextFingerprint = getChunkAudioFingerprint(chunk);
 
                     if (existingNoAudio) {
@@ -491,7 +502,7 @@
             }
             if (audioCell) {
                 const audioHtml = chunk.audio_path
-                    ? `<audio controls src="/${chunk.audio_path}" style="width: 210px; height: 30px;"></audio>`
+                    ? `<audio controls src="${buildChunkAudioSrc(chunk, Date.now().toString())}" style="width: 210px; height: 30px;"></audio>`
                     : '<span class="text-muted small">No audio</span>';
                 audioCell.innerHTML = `${audioHtml}<div>${regenButton}${compareButton}${validateButton}${editButton}</div>`;
             }
@@ -534,7 +545,7 @@
                     ? `<div class="small text-muted mt-1">Duration ${proofread.actual_duration_sec}s vs expected ${proofread.expected_duration_sec || 0}s</div>`
                     : '';
                 const audioHtml = chunk.audio_path
-                    ? `<audio controls src="/${chunk.audio_path}?t=${Date.now()}" style="width: 210px; height: 30px;"></audio>`
+                    ? `<audio controls src="${buildChunkAudioSrc(chunk, Date.now().toString())}" style="width: 210px; height: 30px;"></audio>`
                     : '<span class="text-muted small">No audio</span>';
                 const regenButton = getProofreadGenerateButtonHtml(chunk, chunkRef);
                 const compareButton = shouldShowProofreadCompare(chunk)
@@ -1133,10 +1144,12 @@
                 syncEditorChapterState(chunks);
                 syncProofreadChapterState(chunks);
                 const proofreadVisibleChunks = getProofreadVisibleChunks(chunks);
+                const proofreadRowIds = Array.from(
+                    document.querySelectorAll('#proofread-table-body tr[data-proofread-id]')
+                ).map(row => row.dataset.proofreadId || '');
                 const canIncrementProofread = !forceFullRedraw &&
-                    cachedProofreadVisibleChunkIds.length === proofreadVisibleChunks.length &&
-                    cachedProofreadVisibleChunkIds.every((id, index) => id === getChunkRef(proofreadVisibleChunks[index])) &&
-                    document.querySelectorAll('#proofread-table-body tr[data-proofread-id]').length === proofreadVisibleChunks.length;
+                    proofreadRowIds.length === proofreadVisibleChunks.length &&
+                    proofreadRowIds.every((id, index) => id === getChunkRef(proofreadVisibleChunks[index]));
 
                 if (canIncrementProofread) {
                     const threshold = getProofreadThreshold();
@@ -1155,6 +1168,7 @@
                 }
                 renderProofreadTaskStatus(latestProofreadStatus || { running: false, progress: {}, logs: [] });
                 const visibleChunks = getVisibleChunks(chunks);
+                const tableRowIds = Array.from(tbody.querySelectorAll('tr[data-id]')).map(row => row.dataset.id || '');
 
                 renderEditorProgressBar(chunks, latestAudioState);
 
@@ -1171,10 +1185,8 @@
 
                 // Check if we can do incremental update
                 const canIncrement = !forceFullRedraw &&
-                                    cachedChunks.length === chunks.length &&
-                                    tbody.children.length === visibleChunks.length &&
-                                    cachedVisibleChunkIds.length === visibleChunks.length &&
-                                    cachedVisibleChunkIds.every((id, index) => id === getChunkRef(visibleChunks[index]));
+                                    tableRowIds.length === visibleChunks.length &&
+                                    tableRowIds.every((id, index) => id === getChunkRef(visibleChunks[index]));
 
                 if (canIncrement) {
                     // Incremental update - only update changed rows
@@ -1198,7 +1210,7 @@
                         const audioFingerprint = getChunkAudioFingerprint(chunk);
 
                         const audioPlayer = chunk.audio_path ?
-                            `<audio class="chunk-audio" data-id="${escapeHtml(chunkRef)}" data-audio-path="${escapeHtml(chunk.audio_path)}" data-audio-fingerprint="${escapeHtml(audioFingerprint)}" controls src="/${chunk.audio_path}?t=${Date.now()}" style="width: 200px; height: 30px;" onplay='stopOthers(${quotedChunkRef})'></audio>` :
+                            `<audio class="chunk-audio" data-id="${escapeHtml(chunkRef)}" data-audio-path="${escapeHtml(chunk.audio_path)}" data-audio-fingerprint="${escapeHtml(audioFingerprint)}" controls src="${buildChunkAudioSrc(chunk, Date.now().toString())}" style="width: 200px; height: 30px;" onplay='stopOthers(${quotedChunkRef})'></audio>` :
                             '<span class="text-muted small">No audio</span>';
 
                         const actionArea = chunk.status === 'generating' ?
@@ -1938,8 +1950,12 @@
              if (!await showConfirm("Merge all valid audio chunks into final audiobook?")) return;
 
              try {
+                 let exportConfig = null;
+                 if (window.persistExportConfigFromUI) {
+                     exportConfig = await window.persistExportConfigFromUI();
+                 }
                  await repairLegacyProjectBeforeExport();
-                 await API.post('/api/merge', {});
+                 await API.post('/api/merge', { export: exportConfig || undefined });
                  markTaskActionRequested('audio', 'merge');
                  // Switch to Export tab and poll
                  document.querySelector('[data-tab="audio"]').click();
@@ -1953,8 +1969,12 @@
              if (!await showConfirm("Create an optimized export zip with audiobook parts capped at about 2 hours each?")) return;
 
              try {
+                 let exportConfig = null;
+                 if (window.persistExportConfigFromUI) {
+                     exportConfig = await window.persistExportConfigFromUI();
+                 }
                  await repairLegacyProjectBeforeExport();
-                 await API.post('/api/merge_optimized', {});
+                 await API.post('/api/merge_optimized', { export: exportConfig || undefined });
                  markTaskActionRequested('audio', 'optimized');
                  document.querySelector('[data-tab="audio"]').click();
                  pollLogs('audio', 'audio-logs');
@@ -1963,4 +1983,82 @@
              }
         });
 
+        document.getElementById('btn-clear-trim-cache').addEventListener('click', async () => {
+             if (!await showConfirm("Clear cached trimmed clips? The next export will recompute trim for all clips.")) return;
 
+             try {
+                 const result = await API.post('/api/trim_cache/clear');
+                 const removedFiles = Number(result?.removed_files || 0);
+                 const removedBytes = Number(result?.removed_bytes || 0);
+                 showToast(`Trim cache cleared (${removedFiles} file${removedFiles === 1 ? '' : 's'}, ${formatBytes(removedBytes)}).`, 'success');
+             } catch (e) {
+                 showToast("Failed to clear trim cache: " + e.message, 'error');
+             }
+        });
+
+        document.getElementById('btn-trim-sanity-first-clip').addEventListener('click', async () => {
+             try {
+                 let exportConfig = null;
+                 if (window.persistExportConfigFromUI) {
+                     exportConfig = await window.persistExportConfigFromUI();
+                 }
+                 const result = await API.post('/api/trim_sanity/first_clip', { export: exportConfig || undefined });
+                 const clipPath = result?.clip?.audio_path || 'unknown';
+                 const trimmedFlag = result?.trim_info?.trimmed ? 'yes' : 'no';
+                 showToast(`Sanity trim ready for ${clipPath} (trimmed: ${trimmedFlag}). Downloading...`, 'success');
+                 const downloadUrl = `${result.download_url}?t=${Date.now()}`;
+                 const a = document.createElement('a');
+                 a.href = downloadUrl;
+                 a.download = 'trim_sanity_first_clip.wav';
+                 document.body.appendChild(a);
+                 a.click();
+                 a.remove();
+                 pollLogs('audio', 'audio-logs');
+             } catch (e) {
+                 showToast("Failed to run sanity trim: " + e.message, 'error');
+             }
+        });
+
+        document.getElementById('btn-assemble-sanity-first5').addEventListener('click', async () => {
+             try {
+                 let exportConfig = null;
+                 if (window.persistExportConfigFromUI) {
+                     exportConfig = await window.persistExportConfigFromUI();
+                 }
+                 const result = await API.post('/api/assemble_sanity/first5', { export: exportConfig || undefined });
+                 const clipCount = Number(result?.clip_count || 0);
+                 showToast(`Assembled first ${clipCount} clips. Downloading...`, 'success');
+                 const downloadUrl = `${result.download_url}?t=${Date.now()}`;
+                 const a = document.createElement('a');
+                 a.href = downloadUrl;
+                 a.download = 'assemble_sanity_first5.wav';
+                 document.body.appendChild(a);
+                 a.click();
+                 a.remove();
+                 pollLogs('audio', 'audio-logs');
+             } catch (e) {
+                 showToast("Failed to assemble first 5 clips: " + e.message, 'error');
+             }
+        });
+
+        document.getElementById('btn-assemble-sanity-first5-normalized').addEventListener('click', async () => {
+             try {
+                 let exportConfig = null;
+                 if (window.persistExportConfigFromUI) {
+                     exportConfig = await window.persistExportConfigFromUI();
+                 }
+                 const result = await API.post('/api/assemble_sanity/first5_normalized', { export: exportConfig || undefined });
+                 const clipCount = Number(result?.clip_count || 0);
+                 showToast(`Assembled and normalized first ${clipCount} clips. Downloading...`, 'success');
+                 const downloadUrl = `${result.download_url}?t=${Date.now()}`;
+                 const a = document.createElement('a');
+                 a.href = downloadUrl;
+                 a.download = 'assemble_sanity_first5_normalized.wav';
+                 document.body.appendChild(a);
+                 a.click();
+                 a.remove();
+                 pollLogs('audio', 'audio-logs');
+             } catch (e) {
+                 showToast("Failed to assemble+normalize first 5 clips: " + e.message, 'error');
+             }
+        });

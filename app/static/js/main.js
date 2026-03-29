@@ -36,8 +36,10 @@ const LEGACY_SCRIPTS = [
 async function bootstrap() {
   const root = document.getElementById('tab-fragments-root');
   await loadFragments({ root, fragments: TAB_FRAGMENTS });
+  // Ensure updated legacy scripts are fetched after backend/UI patches.
+  const scriptVersion = Date.now().toString();
   for (const script of LEGACY_SCRIPTS) {
-    await loadClassicScript(script);
+    await loadClassicScript(`${script}?v=${scriptVersion}`);
   }
 }
 

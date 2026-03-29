@@ -107,11 +107,13 @@ class ProjectArchiveHelpersTests(unittest.TestCase):
             original_root = app_module.ROOT_DIR
             original_workflow_path = app_module.PROCESSING_WORKFLOW_STATE_PATH
             original_workflow_state = dict(app_module.process_state["processing_workflow"])
+            original_new_mode_workflow_state = dict(app_module.process_state["new_mode_workflow"])
             original_starter = app_module._start_processing_workflow_thread_locked
             try:
                 app_module.ROOT_DIR = temp_root
                 app_module.PROCESSING_WORKFLOW_STATE_PATH = os.path.join(temp_root, "processing_workflow_state.json")
                 app_module.process_state["processing_workflow"] = app_module._new_processing_workflow_state()
+                app_module.process_state["new_mode_workflow"] = app_module._new_mode_workflow_initial_state()
                 app_module._start_processing_workflow_thread_locked = lambda: None
 
                 result = asyncio.run(
@@ -127,6 +129,7 @@ class ProjectArchiveHelpersTests(unittest.TestCase):
                 app_module.ROOT_DIR = original_root
                 app_module.PROCESSING_WORKFLOW_STATE_PATH = original_workflow_path
                 app_module.process_state["processing_workflow"] = original_workflow_state
+                app_module.process_state["new_mode_workflow"] = original_new_mode_workflow_state
                 app_module._start_processing_workflow_thread_locked = original_starter
 
     def test_run_generate_script_task_clears_downstream_markers_and_marks_script_complete(self):
@@ -197,6 +200,9 @@ class ProjectArchiveHelpersTests(unittest.TestCase):
             original_voice_config = app_module.VOICE_CONFIG_PATH
             original_chunks = app_module.CHUNKS_PATH
             original_audio_state = app_module.process_state["audio"].copy()
+            with app_module.audio_queue_lock:
+                original_audio_queue = list(app_module.audio_queue)
+                original_audio_current = app_module.audio_current_job
             try:
                 app_module.ROOT_DIR = temp_root
                 app_module.SCRIPTS_DIR = scripts_dir
@@ -204,6 +210,9 @@ class ProjectArchiveHelpersTests(unittest.TestCase):
                 app_module.VOICE_CONFIG_PATH = os.path.join(temp_root, "voice_config.json")
                 app_module.CHUNKS_PATH = os.path.join(temp_root, "chunks.json")
                 app_module.process_state["audio"]["running"] = False
+                with app_module.audio_queue_lock:
+                    app_module.audio_queue.clear()
+                    app_module.audio_current_job = None
 
                 result = asyncio.run(app_module.load_script(app_module.ScriptLoadRequest(name="demo")))
                 self.assertEqual(result["status"], "loaded")
@@ -221,6 +230,51 @@ class ProjectArchiveHelpersTests(unittest.TestCase):
                 app_module.CHUNKS_PATH = original_chunks
                 app_module.process_state["audio"].clear()
                 app_module.process_state["audio"].update(original_audio_state)
+                with app_module.audio_queue_lock:
+                    app_module.audio_queue[:] = original_audio_queue
+                    app_module.audio_current_job = original_audio_current
+
+    def test_load_script_ignores_stale_audio_running_flag_when_no_job_or_queue(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            scripts_dir = os.path.join(temp_root, "scripts")
+            os.makedirs(scripts_dir, exist_ok=True)
+            with open(os.path.join(scripts_dir, "demo.json"), "w", encoding="utf-8") as f:
+                json.dump({"entries": [], "dictionary": []}, f)
+            with open(os.path.join(temp_root, "state.json"), "w", encoding="utf-8") as f:
+                json.dump({"render_prep_complete": True}, f)
+
+            original_root = app_module.ROOT_DIR
+            original_scripts = app_module.SCRIPTS_DIR
+            original_script = app_module.SCRIPT_PATH
+            original_chunks = app_module.CHUNKS_PATH
+            original_audio_state = app_module.process_state["audio"].copy()
+            with app_module.audio_queue_lock:
+                original_audio_queue = list(app_module.audio_queue)
+                original_audio_current = app_module.audio_current_job
+            try:
+                app_module.ROOT_DIR = temp_root
+                app_module.SCRIPTS_DIR = scripts_dir
+                app_module.SCRIPT_PATH = os.path.join(temp_root, "annotated_script.json")
+                app_module.CHUNKS_PATH = os.path.join(temp_root, "chunks.json")
+
+                app_module.process_state["audio"]["running"] = True  # stale flag
+                app_module.process_state["audio"]["merge_running"] = False
+                with app_module.audio_queue_lock:
+                    app_module.audio_queue.clear()
+                    app_module.audio_current_job = None
+
+                result = asyncio.run(app_module.load_script(app_module.ScriptLoadRequest(name="demo")))
+                self.assertEqual(result["status"], "loaded")
+            finally:
+                app_module.ROOT_DIR = original_root
+                app_module.SCRIPTS_DIR = original_scripts
+                app_module.SCRIPT_PATH = original_script
+                app_module.CHUNKS_PATH = original_chunks
+                app_module.process_state["audio"].clear()
+                app_module.process_state["audio"].update(original_audio_state)
+                with app_module.audio_queue_lock:
+                    app_module.audio_queue[:] = original_audio_queue
+                    app_module.audio_current_job = original_audio_current
 
     def test_normalize_archive_path_rejects_parent_traversal(self):
         with self.assertRaises(ValueError):

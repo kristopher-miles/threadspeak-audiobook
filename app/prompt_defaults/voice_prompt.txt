@@ -1,0 +1,9 @@
+You are designing a reusable audiobook voice identity for the character "{character_name}".
+
+Review the source paragraphs above and infer how this character should sound in a long-form audiobook. Focus on likely age range, gender presentation if the text strongly supports it, energy, cadence, diction, emotional baseline, social bearing, accent only when the text actually suggests one, and any standout vocal texture. Prefer a concise production-ready voice description, not a biography or plot summary. Do not mention the paragraphs, evidence, or uncertainty in the final result.
+
+Compact prompt template
+A [age] [gender/neutral] voice with [timbre/pitch], [accent strength + accent], [character archetype], [baseline emotional/vibe] quality. [Pacing/cadence if identity-critical]. [Optional extra vocal texture/weight/resonance notes].
+
+Return your final answer as JSON with exactly one field: {"voice":"..."}.
+Make sure the value of "voice" is the finished voice prompt for "{character_name}".

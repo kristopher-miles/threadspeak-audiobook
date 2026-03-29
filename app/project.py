@@ -71,10 +71,25 @@ COMMON_PROOFREAD_ABBREVIATIONS = {
     "sr": ("senior",),
     "vs": ("versus",),
 }
-TRIM_CACHE_VERSION = 1
+TRIM_CACHE_VERSION = 3
 TRIM_SILENCE_THRESHOLD_DBFS = -50.0
 TRIM_MIN_SILENCE_LEN_MS = 150
 TRIM_KEEP_PADDING_MS = 40
+
+def _coerce_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return bool(default)
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off", ""}:
+            return False
+    return bool(value)
 
 def get_speaker(entry):
     """Get speaker from entry, checking both 'speaker' and 'type' fields."""
@@ -165,6 +180,34 @@ def group_into_chunks(script_entries, max_chars=MAX_CHUNK_CHARS):
     # Don't forget the last chunk
     chunks.append(_build_chunk(current_speaker, current_text, current_instruct, current_chapter, current_paragraph_id))
 
+    return chunks
+
+
+def script_entries_to_chunks(script_entries, max_chars=MAX_CHUNK_CHARS):
+    """Build chunks from script entries.
+
+    For sentence-level scripts produced by create_script.py (which include
+    paragraph_id), preserve a strict 1:1 mapping between entries and chunks.
+    Legacy scripts without paragraph_id keep the historical merge behavior.
+    """
+    if not script_entries:
+        return []
+
+    has_paragraph_ids = any(bool(entry.get("paragraph_id")) for entry in script_entries)
+    if not has_paragraph_ids:
+        return group_into_chunks(script_entries, max_chars=max_chars)
+
+    chunks = []
+    for entry in script_entries:
+        chunks.append(
+            _build_chunk(
+                get_speaker(entry),
+                entry.get("text", ""),
+                entry.get("instruct", ""),
+                _extract_chapter_name(entry),
+                entry.get("paragraph_id"),
+            )
+        )
     return chunks
 
 class ProjectManager:
@@ -415,7 +458,7 @@ class ProjectManager:
     def _resolve_trim_config(self, export_config=None):
         cfg = export_config or self._resolve_export_normalization_config(None)
         return {
-            "enabled": bool(getattr(cfg, "trim_clip_silence_enabled", True)),
+            "enabled": _coerce_bool(getattr(cfg, "trim_clip_silence_enabled", True), default=True),
             "silence_threshold_dbfs": float(getattr(cfg, "trim_silence_threshold_dbfs", TRIM_SILENCE_THRESHOLD_DBFS)),
             "min_silence_len_ms": max(1, int(getattr(cfg, "trim_min_silence_len_ms", TRIM_MIN_SILENCE_LEN_MS))),
             "keep_padding_ms": max(0, int(getattr(cfg, "trim_keep_padding_ms", TRIM_KEEP_PADDING_MS))),
@@ -453,18 +496,80 @@ class ProjectManager:
 
         first_start = int(ranges[0][0])
         last_end = int(ranges[-1][1])
-        if first_start <= 0 and last_end >= len(segment):
-            return segment, 0, 0, False
 
         keep = trim_cfg["keep_padding_ms"]
         trim_start = max(0, first_start - keep)
-        trim_end = min(len(segment), last_end + keep)
+
+        # Trailing keep-padding can reintroduce codec-tail artifacts (especially
+        # from MP3 decoder padding) into the trimmed output. Preserve only the
+        # leading keep-padding; keep the trailing cut at the detected nonsilent end.
+        trim_end = min(len(segment), last_end)
         if trim_end <= trim_start:
             return segment, 0, 0, False
 
-        lead_removed = trim_start
-        tail_removed = len(segment) - trim_end
-        return segment[trim_start:trim_end], lead_removed, tail_removed, (lead_removed > 0 or tail_removed > 0)
+        frame_rate = int(segment.frame_rate or 0)
+        channels = max(1, int(segment.channels or 1))
+        frame_width = int(segment.frame_width or 0)
+        if frame_rate <= 0 or frame_width <= 0:
+            lead_removed = trim_start
+            tail_removed = len(segment) - trim_end
+            return segment[trim_start:trim_end], lead_removed, tail_removed, (lead_removed > 0 or tail_removed > 0)
+
+        samples = segment.get_array_of_samples()
+        total_frames = len(samples) // channels
+        start_frame = max(0, min(total_frames, int(round(trim_start * frame_rate / 1000.0))))
+        end_frame = max(start_frame, min(total_frames, int(round(trim_end * frame_rate / 1000.0))))
+        if end_frame <= start_frame:
+            return segment, 0, 0, False
+
+        # detect_nonsilent() boundaries are RMS-window based. Snap start to a nearby
+        # zero crossing so transitions from inserted silence don't hard-click.
+        max_search_frames = max(1, int(round(frame_rate * 0.008)))  # up to ~8ms
+        if start_frame < total_frames - 1:
+            search_limit = min(total_frames - 1, start_frame + max_search_frames)
+            prev = int(samples[start_frame * channels])
+            best_frame = start_frame
+            best_abs = abs(prev)
+            for frame in range(start_frame + 1, search_limit + 1):
+                current = int(samples[frame * channels])
+                current_abs = abs(current)
+                if current_abs < best_abs:
+                    best_abs = current_abs
+                    best_frame = frame
+                if current == 0 or (prev <= 0 < current) or (prev >= 0 > current):
+                    start_frame = frame
+                    break
+                prev = current
+            else:
+                start_frame = best_frame
+
+        # detect_nonsilent() uses windowed RMS and can end at a non-zero crossing.
+        # Snap the cut point to the next nearby zero crossing to avoid hard-edge pops.
+        search_limit = min(total_frames - 1, end_frame + max_search_frames)
+        if end_frame < total_frames - 1:
+            prev = int(samples[(end_frame - 1) * channels]) if end_frame > 0 else int(samples[end_frame * channels])
+            best_frame = end_frame
+            best_abs = abs(prev)
+            for frame in range(end_frame, search_limit + 1):
+                current = int(samples[frame * channels])
+                current_abs = abs(current)
+                if current_abs < best_abs:
+                    best_abs = current_abs
+                    best_frame = frame
+                if current == 0 or (prev <= 0 < current) or (prev >= 0 > current):
+                    end_frame = min(total_frames, frame + 1)
+                    break
+                prev = current
+            else:
+                end_frame = min(total_frames, best_frame + 1)
+
+        start_byte = start_frame * frame_width
+        end_byte = end_frame * frame_width
+        trimmed_segment = segment._spawn(segment._data[start_byte:end_byte])
+
+        lead_removed = int(round((start_frame * 1000.0) / frame_rate))
+        tail_removed = int(round(((total_frames - end_frame) * 1000.0) / frame_rate))
+        return trimmed_segment, lead_removed, tail_removed, (lead_removed > 0 or tail_removed > 0)
 
     def _resolve_export_audio_path(self, full_path, trim_cfg):
         if not trim_cfg["enabled"]:
@@ -484,6 +589,20 @@ class ProjectManager:
 
         source_segment = AudioSegment.from_file(full_path)
         trimmed_segment, lead_ms, tail_ms, changed = self._trim_audio_segment_boundaries(source_segment, trim_cfg)
+
+        # Safety guard: trimming must never increase duration. If it does,
+        # discard the generated segment and cache the original audio instead.
+        if len(trimmed_segment) > len(source_segment):
+            print(
+                f"[trim] ERROR: Trim result longer than original for {full_path} "
+                f"(original={len(source_segment)}ms, trimmed={len(trimmed_segment)}ms). "
+                "Discarding trimmed output and caching original clip.",
+                flush=True,
+            )
+            trimmed_segment = source_segment
+            lead_ms = 0
+            tail_ms = 0
+            changed = False
 
         exported = trimmed_segment.export(cache_path, format="wav")
         if hasattr(exported, "close"):
@@ -512,6 +631,18 @@ class ProjectManager:
             "tail_ms_removed": 0,
             "fallback_originals": 0,
         }
+        eligible_chunks = []
+        for chunk in chunks:
+            if chunk.get("status") != "done":
+                continue
+            path = chunk.get("audio_path")
+            if not path:
+                continue
+            full_path = os.path.join(self.root_dir, path)
+            if not os.path.exists(full_path):
+                continue
+            eligible_chunks.append((chunk, full_path))
+        total_candidates = len(eligible_chunks)
 
         if progress_callback:
             progress_callback({
@@ -523,17 +654,17 @@ class ProjectManager:
                 "merged_duration_seconds": 0.0,
                 "estimated_size_bytes": 0,
                 "output_file_size_bytes": 0,
+                "total_items": total_candidates,
+                "processed_items": 0,
+                "remaining_items": total_candidates,
+                "percent_complete": 0.0,
+                "eta_seconds": None,
+                "trim_enabled": bool(trim_cfg["enabled"]),
             })
 
-        for chunk in chunks:
-            if chunk.get("status") != "done":
-                continue
-            path = chunk.get("audio_path")
-            if not path:
-                continue
-            full_path = os.path.join(self.root_dir, path)
-            if not os.path.exists(full_path):
-                continue
+        last_prepare_bucket = -1
+        prepare_started_at = merge_started_at or time.time()
+        for processed_index, (chunk, full_path) in enumerate(eligible_chunks, start=1):
             resolved_path = full_path
             if trim_cfg["enabled"]:
                 try:
@@ -555,17 +686,46 @@ class ProjectManager:
             }
             timeline.append(item)
             timeline_size_bytes += item["file_size_bytes"]
-            if progress_callback and len(timeline) % 100 == 0:
-                progress_callback({
-                    "stage": "preparing",
-                    "chapter_index": 0,
-                    "total_chapters": 0,
-                    "chapter_label": f"Indexed {len(timeline)} clips",
-                    "elapsed_seconds": max(0.0, time.time() - (merge_started_at or time.time())),
-                    "merged_duration_seconds": 0.0,
-                    "estimated_size_bytes": timeline_size_bytes,
-                    "output_file_size_bytes": 0,
-                })
+            if progress_callback and total_candidates > 0:
+                percent_complete = (processed_index / total_candidates) * 100.0
+                progress_bucket = int(percent_complete // 5)
+                should_emit = (
+                    processed_index == 1
+                    or processed_index == total_candidates
+                    or progress_bucket > last_prepare_bucket
+                )
+                if should_emit:
+                    elapsed = max(0.0, time.time() - prepare_started_at)
+                    rate = processed_index / elapsed if elapsed > 0 else 0.0
+                    remaining_items = max(total_candidates - processed_index, 0)
+                    eta_seconds = (remaining_items / rate) if rate > 0 and remaining_items > 0 else 0.0
+                    if trim_cfg["enabled"]:
+                        chapter_label = (
+                            f"Trimming clips: {int(round(percent_complete))}% "
+                            f"({processed_index}/{total_candidates}, {remaining_items} remaining)"
+                        )
+                    else:
+                        chapter_label = (
+                            f"Indexing clips: {int(round(percent_complete))}% "
+                            f"({processed_index}/{total_candidates}, {remaining_items} remaining)"
+                        )
+                    progress_callback({
+                        "stage": "preparing",
+                        "chapter_index": 0,
+                        "total_chapters": 0,
+                        "chapter_label": chapter_label,
+                        "elapsed_seconds": elapsed,
+                        "merged_duration_seconds": 0.0,
+                        "estimated_size_bytes": timeline_size_bytes,
+                        "output_file_size_bytes": 0,
+                        "total_items": total_candidates,
+                        "processed_items": processed_index,
+                        "remaining_items": remaining_items,
+                        "percent_complete": percent_complete,
+                        "eta_seconds": round(eta_seconds, 1),
+                        "trim_enabled": bool(trim_cfg["enabled"]),
+                    })
+                    last_prepare_bucket = progress_bucket
 
         if log_callback and trim_cfg["enabled"]:
             total_removed_ms = trim_stats["lead_ms_removed"] + trim_stats["tail_ms_removed"]
@@ -628,19 +788,42 @@ class ProjectManager:
             "output_file_size_bytes": os.path.getsize(output_path) if output_path and os.path.exists(output_path) else 0,
         })
 
-    def _create_silence_assets(self, temp_dir, export_config=None):
+    def _create_silence_assets(self, temp_dir, export_config=None, reference_audio_path=None):
         default_ms = getattr(export_config, "silence_between_speakers_ms", DEFAULT_PAUSE_MS)
         same_ms = getattr(export_config, "silence_same_speaker_ms", SAME_SPEAKER_PAUSE_MS)
         chapter_end_ms = getattr(export_config, "silence_end_of_chapter_ms", 3000)
         paragraph_ms = getattr(export_config, "silence_paragraph_ms", 750)
 
-        default_silence_path = os.path.join(temp_dir, "pause_default.mp3")
-        same_silence_path = os.path.join(temp_dir, "pause_same_speaker.mp3")
-        chapter_end_silence_path = os.path.join(temp_dir, "pause_chapter_end.mp3")
-        paragraph_silence_path = os.path.join(temp_dir, "pause_paragraph.mp3")
+        reference_frame_rate = None
+        reference_channels = None
+        reference_sample_width = None
+        if reference_audio_path and os.path.exists(reference_audio_path):
+            try:
+                reference_segment = AudioSegment.from_file(reference_audio_path)
+                reference_frame_rate = int(reference_segment.frame_rate or 0) or None
+                reference_channels = int(reference_segment.channels or 0) or None
+                reference_sample_width = int(reference_segment.sample_width or 0) or None
+            except Exception:
+                reference_frame_rate = None
+                reference_channels = None
+                reference_sample_width = None
+
+        # Keep pause assets uncompressed to avoid boundary artifacts that can be
+        # introduced by repeatedly concatenating tiny lossy MP3 silence files.
+        default_silence_path = os.path.join(temp_dir, "pause_default.wav")
+        same_silence_path = os.path.join(temp_dir, "pause_same_speaker.wav")
+        chapter_end_silence_path = os.path.join(temp_dir, "pause_chapter_end.wav")
+        paragraph_silence_path = os.path.join(temp_dir, "pause_paragraph.wav")
 
         def _write(path, duration_ms):
-            exp = AudioSegment.silent(duration=max(0, duration_ms)).export(path, format="mp3")
+            seg = AudioSegment.silent(duration=max(0, duration_ms))
+            if reference_frame_rate:
+                seg = seg.set_frame_rate(reference_frame_rate)
+            if reference_channels:
+                seg = seg.set_channels(reference_channels)
+            if reference_sample_width:
+                seg = seg.set_sample_width(reference_sample_width)
+            exp = seg.export(path, format="wav")
             if hasattr(exp, "close"):
                 exp.close()
 
@@ -680,6 +863,9 @@ class ProjectManager:
             "-hide_banner",
             "-loglevel",
             "error",
+            "-progress",
+            "pipe:1",
+            "-nostats",
             "-f",
             "concat",
             "-safe",
@@ -696,41 +882,154 @@ class ProjectManager:
             except OSError:
                 pass
 
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
-
-        while process.poll() is None:
+        def _progress_callback(_out_time_seconds, _phase_percent):
             if progress_tick:
                 progress_tick()
-            time.sleep(1)
 
-        stderr_text = ""
-        if process.stderr:
-            try:
-                stderr_text = process.stderr.read().decode("utf-8", errors="replace").strip()
-            except Exception:
-                stderr_text = ""
-
-        if process.returncode != 0:
-            return False, stderr_text or f"ffmpeg exited with code {process.returncode}"
+        returncode, stdout_text, stderr_text = self._run_ffmpeg_with_progress(
+            command,
+            duration_seconds=None,
+            progress_callback=_progress_callback if progress_tick else None,
+        )
+        if returncode != 0:
+            message = (stderr_text or stdout_text or "").strip()
+            if message:
+                message = message[-600:]
+            return False, message or f"ffmpeg exited with code {returncode}"
 
         if not os.path.exists(output_path):
             return False, "ffmpeg completed without creating an output file"
 
         output_size = os.path.getsize(output_path)
-        if output_size < 1024:
+        if output_size <= 0:
             try:
                 os.remove(output_path)
             except OSError:
                 pass
-            return False, f"ffmpeg produced an invalid file ({output_size} bytes)"
+            return False, "ffmpeg produced an empty output file"
+
+        # Very short/silent MP3 outputs can be smaller than 1KB while still valid.
+        # Validate via ffprobe duration/stream metadata instead of a hard size floor.
+        summary = self._ffprobe_audio_summary(output_path)
+        if not summary.get("ok"):
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+            return False, f"ffmpeg produced an unreadable file ({output_size} bytes): {summary.get('error')}"
+
+        try:
+            duration_seconds = float(summary.get("duration") or 0.0)
+        except (TypeError, ValueError):
+            duration_seconds = 0.0
+        if duration_seconds <= 0.0 or not summary.get("codec"):
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+            return (
+                False,
+                f"ffmpeg produced an invalid file ({output_size} bytes): "
+                f"codec={summary.get('codec')} duration={summary.get('duration')}",
+            )
 
         return True, output_path
 
-    def _export_concat_mp3(self, concat_path, output_path, progress_tick=None):
+    @staticmethod
+    def _parse_concat_entries(concat_path):
+        entries = []
+        try:
+            with open(concat_path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    stripped = line.strip()
+                    if not stripped.startswith("file '") or not stripped.endswith("'"):
+                        continue
+                    raw = stripped[6:-1]
+                    path = raw.replace(r"'\''", "'").replace("\\\\", "\\")
+                    entries.append(path)
+        except OSError:
+            return []
+        return entries
+
+    @staticmethod
+    def _ffprobe_audio_summary(path):
+        cmd = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_name,sample_rate,channels,sample_fmt,bits_per_sample:format=format_name,duration,bit_rate,size",
+            "-of",
+            "json",
+            path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or "").strip()
+            return {"ok": False, "error": err[-500:] if err else f"ffprobe exit {result.returncode}"}
+        try:
+            payload = json.loads(result.stdout or "{}")
+        except json.JSONDecodeError:
+            return {"ok": False, "error": "ffprobe returned invalid JSON"}
+
+        stream = (payload.get("streams") or [{}])[0]
+        fmt = payload.get("format") or {}
+        return {
+            "ok": True,
+            "codec": stream.get("codec_name"),
+            "sample_rate": stream.get("sample_rate"),
+            "channels": stream.get("channels"),
+            "sample_fmt": stream.get("sample_fmt"),
+            "bits_per_sample": stream.get("bits_per_sample"),
+            "format_name": fmt.get("format_name"),
+            "duration": fmt.get("duration"),
+            "bit_rate": fmt.get("bit_rate"),
+            "size": fmt.get("size"),
+        }
+
+    def _log_concat_failure_diagnostics(self, concat_path, output_path, failure_message, log_callback=None):
+        if not log_callback:
+            return
+        log_callback(f"[diag] MP3 concat export failed for {output_path}")
+        log_callback(f"[diag] ffmpeg error: {failure_message}")
+        entries = self._parse_concat_entries(concat_path)
+        log_callback(f"[diag] concat file entries: {len(entries)}")
+        if not entries:
+            return
+
+        sample_indices = sorted(set([0, 1, 2, max(len(entries) - 2, 0), len(entries) - 1]))
+        probed = []
+        for idx in sample_indices:
+            if not (0 <= idx < len(entries)):
+                continue
+            src = entries[idx]
+            summary = self._ffprobe_audio_summary(src)
+            probed.append((idx, src, summary))
+            basename = os.path.basename(src)
+            if summary.get("ok"):
+                log_callback(
+                    f"[diag] input[{idx}] {basename}: "
+                    f"codec={summary.get('codec')}, sr={summary.get('sample_rate')}, "
+                    f"ch={summary.get('channels')}, fmt={summary.get('sample_fmt')}, "
+                    f"bps={summary.get('bits_per_sample')}, dur={summary.get('duration')}, "
+                    f"br={summary.get('bit_rate')}, size={summary.get('size')}"
+                )
+            else:
+                log_callback(f"[diag] input[{idx}] {basename}: ffprobe error: {summary.get('error')}")
+
+        layouts = set()
+        codecs = set()
+        formats = set()
+        for _idx, _src, summary in probed:
+            if not summary.get("ok"):
+                continue
+            layouts.add((summary.get("sample_rate"), summary.get("channels"), summary.get("sample_fmt"), summary.get("bits_per_sample")))
+            codecs.add(summary.get("codec"))
+            formats.add(summary.get("format_name"))
+        log_callback(f"[diag] sampled input codecs={sorted(c for c in codecs if c)} formats={sorted(f for f in formats if f)}")
+        log_callback(f"[diag] sampled input layouts={sorted(layouts)}")
+
+    def _export_concat_mp3(self, concat_path, output_path, progress_tick=None, log_callback=None):
         mp3_success, mp3_result = self._run_ffmpeg_concat(
             concat_path,
             output_path,
@@ -739,22 +1038,8 @@ class ProjectManager:
         )
         if mp3_success:
             return True, mp3_result
-
-        fallback_path = os.path.splitext(output_path)[0] + ".wav"
-        wav_success, wav_result = self._run_ffmpeg_concat(
-            concat_path,
-            fallback_path,
-            ["-c:a", "pcm_s16le"],
-            progress_tick=progress_tick,
-        )
-        if wav_success:
-            print(
-                f"MP3 export failed for {output_path} ({mp3_result}). "
-                f"Falling back to WAV: {wav_result}"
-            )
-            return True, wav_result
-
-        return False, f"{mp3_result}; fallback WAV export also failed: {wav_result}"
+        self._log_concat_failure_diagnostics(concat_path, output_path, mp3_result, log_callback=log_callback)
+        return False, f"MP3 concat export failed: {mp3_result}"
 
     def _optimized_export_part_basename(self, part_index):
         title = self._current_script_title().strip() or "Project"
@@ -796,11 +1081,18 @@ class ProjectManager:
             return 1
 
     @staticmethod
-    def _loudnorm_codec_args_for_path(path):
+    def _loudnorm_codec_args_for_path(path, *, sample_rate=None, channels=None):
         ext = os.path.splitext(path)[1].lower()
+        args = []
         if ext == ".wav":
-            return ["-c:a", "pcm_s16le"]
-        return ["-c:a", "libmp3lame", "-q:a", "2"]
+            args.extend(["-c:a", "pcm_s16le"])
+        else:
+            args.extend(["-c:a", "libmp3lame", "-q:a", "2"])
+        if sample_rate:
+            args.extend(["-ar", str(int(sample_rate))])
+        if channels:
+            args.extend(["-ac", str(int(channels))])
+        return args
 
     @staticmethod
     def _run_ffmpeg_with_progress(command, duration_seconds=None, progress_callback=None):
@@ -877,13 +1169,18 @@ class ProjectManager:
             return False, f"Normalization input does not exist: {input_path}"
 
         duration_seconds = 0.0
+        input_sample_rate = 48000
+        input_channels = 1
         try:
-            duration_seconds = float(AudioSegment.from_file(input_path).duration_seconds or 0.0)
+            input_segment = AudioSegment.from_file(input_path)
+            duration_seconds = float(input_segment.duration_seconds or 0.0)
+            input_sample_rate = int(input_segment.frame_rate or 48000)
+            input_channels = max(1, int(input_segment.channels or 1))
         except Exception:
             duration_seconds = 0.0
         is_short_clip = duration_seconds > 0 and duration_seconds <= float(short_seconds_threshold)
 
-        channels = self._detect_channel_count(input_path)
+        channels = input_channels
         target_lufs = float(
             getattr(export_config, "normalize_target_lufs_stereo", -16.0)
             if channels > 1 else getattr(export_config, "normalize_target_lufs_mono", -18.0)
@@ -953,7 +1250,11 @@ class ProjectManager:
                 "-vn",
                 "-af",
                 pass1_filter,
-                *self._loudnorm_codec_args_for_path(input_path),
+                *self._loudnorm_codec_args_for_path(
+                    input_path,
+                    sample_rate=input_sample_rate,
+                    channels=input_channels,
+                ),
                 temp_output,
             ]
             if log_callback:
@@ -1058,7 +1359,11 @@ class ProjectManager:
             "-vn",
             "-af",
             pass2_filter,
-            *self._loudnorm_codec_args_for_path(input_path),
+            *self._loudnorm_codec_args_for_path(
+                input_path,
+                sample_rate=input_sample_rate,
+                channels=input_channels,
+            ),
             temp_output,
         ]
         if log_callback:
@@ -1458,8 +1763,7 @@ class ProjectManager:
         self-alias, or loop falls back to the original speaker.
         """
         original = speaker or ""
-        current = original
-        if not current:
+        if not original:
             return original
 
         lookup = {}
@@ -1468,7 +1772,10 @@ class ProjectManager:
             if normalized and normalized not in lookup:
                 lookup[normalized] = name
 
-        seen = {self._normalize_speaker_name(original)}
+        # Canonicalize the starting speaker to the configured key when a
+        # case-variant exists (e.g. "Narrator" -> "NARRATOR").
+        current = lookup.get(self._normalize_speaker_name(original), original)
+        seen = {self._normalize_speaker_name(current)}
         while current:
             voice_data = voice_config.get(current, {})
             alias = (voice_data.get("alias") or "").strip()
@@ -1841,16 +2148,48 @@ class ProjectManager:
         }
 
     def _commit_proofread_result_locked(self, chunks, index, proofread_result):
-        chunks[index]["proofread"] = proofread_result
-        self._atomic_json_write(chunks, self.chunks_path)
-        return chunks[index]["proofread"]
+        # Proofread can run in a separate process; never write an old snapshot
+        # back wholesale, or we can clobber in-flight generation_token/status.
+        latest = chunks
+        if os.path.exists(self.chunks_path):
+            try:
+                with open(self.chunks_path, "r", encoding="utf-8") as f:
+                    latest_loaded = json.load(f)
+                if isinstance(latest_loaded, list):
+                    latest = latest_loaded
+            except (OSError, ValueError, json.JSONDecodeError):
+                latest = chunks
+
+        if 0 <= index < len(latest):
+            latest[index]["proofread"] = proofread_result
+        if 0 <= index < len(chunks):
+            chunks[index]["proofread"] = proofread_result
+
+        self._atomic_json_write(latest, self.chunks_path)
+        return proofread_result
 
     def _commit_proofread_results_batch_locked(self, chunks, pending_results):
         if not pending_results:
             return 0
+        # Proofread can run in a separate process; merge into freshest chunks
+        # to avoid dropping live generation state written by the audio worker.
+        latest = chunks
+        if os.path.exists(self.chunks_path):
+            try:
+                with open(self.chunks_path, "r", encoding="utf-8") as f:
+                    latest_loaded = json.load(f)
+                if isinstance(latest_loaded, list):
+                    latest = latest_loaded
+            except (OSError, ValueError, json.JSONDecodeError):
+                latest = chunks
+
         for index, proofread_result in pending_results.items():
-            chunks[index]["proofread"] = proofread_result
-        self._atomic_json_write(chunks, self.chunks_path)
+            if 0 <= index < len(latest):
+                latest[index]["proofread"] = proofread_result
+            if 0 <= index < len(chunks):
+                chunks[index]["proofread"] = proofread_result
+
+        self._atomic_json_write(latest, self.chunks_path)
         return len(pending_results)
 
     @staticmethod
@@ -2220,7 +2559,7 @@ class ProjectManager:
         # If no chunks exist yet, generate from script
         if os.path.exists(self.script_path):
             script = load_script_document(self.script_path)["entries"]
-            chunks = group_into_chunks(script)
+            chunks = script_entries_to_chunks(script)
 
             # Initialize chunk status
             for i, chunk in enumerate(chunks):
@@ -2256,7 +2595,7 @@ class ProjectManager:
             return {"synced": False, "reason": "chunks_current"}
 
         script = load_script_document(self.script_path)["entries"]
-        chunks = group_into_chunks(script)
+        chunks = script_entries_to_chunks(script)
         for i, chunk in enumerate(chunks):
             chunk["id"] = i
             chunk["uid"] = chunk.get("uid") or self._new_chunk_uid()
@@ -2293,9 +2632,6 @@ class ProjectManager:
             immediate_commits = 0
 
             for chunk in chunks:
-                if chunk.get("status") != "error":
-                    continue
-
                 audio_path = chunk.get("audio_path")
                 if not audio_path:
                     continue
@@ -2319,10 +2655,18 @@ class ProjectManager:
                     continue
 
                 if validation["is_valid"]:
-                    chunk["status"] = "done"
-                    chunk["audio_validation"] = validation
-                    chunk["auto_regen_count"] = 0
-                    changed = True
+                    # Any chunk with valid persisted audio should be treated as done.
+                    # This prevents restart/resume from re-queueing already-rendered clips
+                    # when status drifted (e.g. pending/error/generating after interruption).
+                    if chunk.get("status") != "done":
+                        chunk["status"] = "done"
+                        changed = True
+                    if chunk.get("audio_validation") != validation:
+                        chunk["audio_validation"] = validation
+                        changed = True
+                    if int(chunk.get("auto_regen_count") or 0) != 0:
+                        chunk["auto_regen_count"] = 0
+                        changed = True
                 elif chunk.get("audio_validation") != validation:
                     chunk["audio_validation"] = validation
                     changed = True
@@ -4153,14 +4497,26 @@ class ProjectManager:
             }
 
     def update_chunk(self, chunk_ref, data):
-        chunks = self.load_chunks()
-        index = self.resolve_chunk_index(chunk_ref, chunks)
-        if index is not None and 0 <= index < len(chunks):
+        # Hold the lock for the entire read-modify-write cycle so editor saves
+        # cannot overwrite in-flight generation tokens from audio workers.
+        with self._chunks_lock:
+            if not os.path.exists(self.chunks_path):
+                return None
+            with open(self.chunks_path, "r", encoding="utf-8") as f:
+                chunks = json.load(f)
+
+            index = self.resolve_chunk_index(chunk_ref, chunks)
+            if index is None or not (0 <= index < len(chunks)):
+                return None
+
             chunk = chunks[index]
             # Update fields
-            if "text" in data: chunk["text"] = data["text"]
-            if "instruct" in data: chunk["instruct"] = data["instruct"]
-            if "speaker" in data: chunk["speaker"] = data["speaker"]
+            if "text" in data:
+                chunk["text"] = data["text"]
+            if "instruct" in data:
+                chunk["instruct"] = data["instruct"]
+            if "speaker" in data:
+                chunk["speaker"] = data["speaker"]
 
             # If text/instruct/speaker changed, invalidate the old audio immediately.
             if "text" in data or "instruct" in data or "speaker" in data:
@@ -4172,9 +4528,9 @@ class ProjectManager:
                 self._clear_proofread_state(chunk)
 
             print(f"update_chunk({index}): instruct='{chunk.get('instruct', '')}', speaker='{chunk.get('speaker', '')}'")
-            self.save_chunks(chunks)
+            self._ensure_chunk_uids(chunks)
+            self._atomic_json_write(chunks, self.chunks_path)
             return chunk
-        return None
 
     def prepare_chunk_for_regeneration(self, chunk_ref):
         with self._chunks_lock:
@@ -4473,7 +4829,11 @@ class ProjectManager:
         concat_path = os.path.join(temp_dir, "concat.txt")
 
         try:
-            silence_assets = self._create_silence_assets(temp_dir, export_config)
+            silence_assets = self._create_silence_assets(
+                temp_dir,
+                export_config,
+                reference_audio_path=timeline[0]["full_path"] if timeline else None,
+            )
 
             estimated_size_bytes = 0
             previous_item = None
@@ -4564,6 +4924,7 @@ class ProjectManager:
                     estimated_size_bytes=estimated_size_bytes,
                     output_path=output_path,
                 ),
+                log_callback=log_callback,
             )
             if not success:
                 return False, f"ffmpeg merge failed: {export_result}"
@@ -4633,7 +4994,11 @@ class ProjectManager:
         chapter_end_ms = getattr(export_config, "silence_end_of_chapter_ms", 3000)
 
         try:
-            silence_assets = self._create_silence_assets(temp_dir, export_config)
+            silence_assets = self._create_silence_assets(
+                temp_dir,
+                export_config,
+                reference_audio_path=timeline[0]["full_path"] if timeline else None,
+            )
             chapter_exports = []
             estimated_size_bytes = 0
             total_same = 0
@@ -4687,7 +5052,11 @@ class ProjectManager:
                     output_path=chapter_output_path,
                 )
 
-                success, export_result = self._export_concat_mp3(concat_path, chapter_output_path)
+                success, export_result = self._export_concat_mp3(
+                    concat_path,
+                    chapter_output_path,
+                    log_callback=log_callback,
+                )
                 if not success:
                     return False, f"Failed to export chapter {chapter_label}: {export_result}"
 
@@ -4770,6 +5139,7 @@ class ProjectManager:
                         estimated_size_bytes=current_size,
                         output_path=current_path,
                     ),
+                    log_callback=log_callback,
                 )
                 if not success:
                     return False, f"Failed to export optimized part {part_index}: {export_result}"
@@ -5238,6 +5608,7 @@ class ProjectManager:
         """
         from collections import OrderedDict
         groups = OrderedDict()
+        labels = {}
 
         for idx in indices:
             if not (0 <= idx < len(chunks)):
@@ -5280,6 +5651,7 @@ class ProjectManager:
         chunks = chunks if chunks is not None else self.load_chunks()
         voice_config = voice_config if voice_config is not None else self._load_voice_config()
         groups = OrderedDict()
+        labels = {}
 
         for idx in indices:
             if not (0 <= idx < len(chunks)):
@@ -5288,11 +5660,13 @@ class ProjectManager:
 
             speaker = chunks[idx].get("speaker", "")
             resolved = self.resolve_voice_speaker(speaker, voice_config)
-            groups.setdefault(resolved, []).append(idx)
+            group_key = self._normalize_speaker_name(resolved) or resolved
+            groups.setdefault(group_key, []).append(idx)
+            labels.setdefault(group_key, resolved)
 
         reordered = []
-        for speaker, group_indices in groups.items():
-            label = speaker or "<unknown>"
+        for key, group_indices in groups.items():
+            label = labels.get(key) or key or "<unknown>"
             print(f"  Speaker group '{label}': {len(group_indices)} chunks")
             reordered.extend(group_indices)
 

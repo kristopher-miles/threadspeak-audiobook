@@ -12,6 +12,7 @@ def _ensure_new_mode_workflow_inactive(conflict_message: str = "Cannot run this 
 
 @router.post("/api/reset_project")
 async def reset_project():
+    global audio_current_job, audio_recovery_request
     # Hard-stop everything before nuking project artifacts.
     with task_state_lock:
         for task_name, process in list(task_processes.items()):
@@ -47,6 +48,9 @@ async def reset_project():
                 "Project reset requested",
                 status="cancelled",
             )
+        # Ensure reset always clears worker pointers, even if abandon raced.
+        audio_current_job = None
+        audio_recovery_request = None
         _refresh_audio_process_state_locked(persist=True)
 
     # Signal cancellation for thread-based tasks that poll a cancel flag.
@@ -115,6 +119,8 @@ async def reset_project():
 
     with audio_queue_condition:
         audio_queue.clear()
+        audio_current_job = None
+        audio_recovery_request = None
         process_state["audio"]["cancel"] = False
         process_state["audio"]["queue"] = []
         process_state["audio"]["current_job"] = None
@@ -238,6 +244,10 @@ async def reset_new_mode():
             state["running"] = False
             state["logs"] = []
             state["progress"] = {}
+    _clear_new_mode_stage_markers()
+    with new_mode_workflow_lock:
+        process_state["new_mode_workflow"]["completed_stages"] = []
+        _persist_new_mode_workflow_state_locked()
     return {"status": "reset", "removed": removed}
 
 
@@ -479,6 +489,7 @@ async def pause_processing_workflow():
 @router.post("/api/new_mode_workflow/start")
 async def start_new_mode_workflow(request: NewModeWorkflowRequest):
     options = {"process_voices": bool(request.process_voices), "generate_audio": bool(request.generate_audio)}
+    _initialize_new_mode_stage_markers(options=options)
     with new_mode_workflow_lock:
         state = process_state["new_mode_workflow"]
         if state.get("running") and not state.get("paused"):
@@ -491,9 +502,10 @@ async def start_new_mode_workflow(request: NewModeWorkflowRequest):
             state["pause_requested"] = False
             state["last_error"] = None
             state["options"] = options
+            state["completed_stages"] = _derived_new_mode_completed_stages(options)
             _append_new_mode_workflow_log_locked("Resuming...")
         else:
-            # Fresh start: detect already-complete stages from file state
+            # Fresh start: derive complete stages from durable stage markers.
             completed = _derived_new_mode_completed_stages(options)
             process_state["new_mode_workflow"] = _new_mode_workflow_initial_state() | {
                 "running": True,

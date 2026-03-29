@@ -462,7 +462,8 @@
                     return result;
                 } catch (e) {
                     if (!String(e?.message || '').toLowerCase().includes('cancelled')) {
-                        statusEl.innerHTML = '<i class="fas fa-times text-danger me-1"></i>save failed';
+                        const detail = String(e?.message || '').trim();
+                        statusEl.innerHTML = `<i class="fas fa-times text-danger me-1"></i>save failed${detail ? `: ${detail}` : ''}`;
                     }
                     throw e;
                 } finally {
@@ -798,4 +799,3 @@
                 clearBtn.textContent = originalText;
             }
         };
-

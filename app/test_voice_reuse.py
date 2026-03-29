@@ -280,6 +280,51 @@ class SavedVoiceReuseTests(unittest.TestCase):
                 app_module.VOICE_CONFIG_PATH = original_voice_config_path
                 app_module.VOICES_PATH = original_voices_path
 
+    def test_save_voice_config_with_invalidation_preserves_unsubmitted_voices(self):
+        captured = {}
+
+        class FakeProjectManager:
+            def _normalize_speaker_name(self, value):
+                return (value or "").strip().lower()
+
+            def _load_voice_config(self):
+                return {
+                    "NARRATOR": {"type": "design", "description": "existing narrator"},
+                    "CAT": {"type": "clone", "ref_audio": "clone_voices/cat.wav"},
+                }
+
+            def save_voice_config_with_invalidation(self, new_config, confirm_invalidation=False):
+                captured["new_config"] = json.loads(json.dumps(new_config))
+                captured["confirm_invalidation"] = bool(confirm_invalidation)
+                return {"status": "saved", "invalidated_clips": 0}
+
+        original_pm = app_module.project_manager
+        try:
+            app_module.project_manager = FakeProjectManager()
+            request = app_module.VoiceConfigSaveRequest(
+                config={
+                    "NARRATOR": app_module.VoiceConfigItem(
+                        type="design",
+                        description="updated narrator",
+                        ref_text="sample",
+                        ref_audio="",
+                        generated_ref_text="",
+                        alias="",
+                        seed="-1",
+                    )
+                },
+                confirm_invalidation=False,
+            )
+            result = asyncio.run(app_module.save_voice_config_with_invalidation(request))
+            self.assertEqual(result.get("status"), "saved")
+            self.assertFalse(captured["confirm_invalidation"])
+            self.assertIn("NARRATOR", captured["new_config"])
+            self.assertIn("CAT", captured["new_config"])
+            self.assertEqual(captured["new_config"]["NARRATOR"]["description"], "updated narrator")
+            self.assertEqual(captured["new_config"]["CAT"]["ref_audio"], "clone_voices/cat.wav")
+        finally:
+            app_module.project_manager = original_pm
+
 
 if __name__ == "__main__":
     unittest.main()

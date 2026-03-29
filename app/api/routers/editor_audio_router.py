@@ -1,9 +1,18 @@
 from fastapi import APIRouter
 from .. import shared as _shared
+from pydub import AudioSegment
 
 globals().update({k: v for k, v in vars(_shared).items() if not k.startswith("__")})
 
 router = APIRouter()
+
+
+class MergeRequest(BaseModel):
+    export: Optional[ExportConfig] = None
+
+SANITY_TRIM_FIRST_CLIP_PATH = os.path.join(ROOT_DIR, "trim_sanity_first_clip.wav")
+SANITY_ASSEMBLE_FIRST5_PATH = os.path.join(ROOT_DIR, "assemble_sanity_first5.wav")
+SANITY_ASSEMBLE_FIRST5_NORMALIZED_PATH = os.path.join(ROOT_DIR, "assemble_sanity_first5_normalized.wav")
 
 def _export_download_basename():
     """Return a filesystem-safe base name for export downloads, using the saved script name when available."""
@@ -37,6 +46,11 @@ async def get_chunks():
 
 @router.post("/api/chunks/sync_from_script_if_stale")
 async def sync_chunks_from_script_if_stale():
+    # Never rewrite chunks while audio generation is active; doing so can clear
+    # generation tokens for in-flight workers and surface as "Generation abandoned".
+    with audio_queue_lock:
+        if audio_current_job is not None or audio_queue or process_state["audio"].get("merge_running", False):
+            return {"synced": False, "reason": "audio_running"}
     result = project_manager.sync_chunks_from_script_if_stale()
     return result
 
@@ -357,7 +371,8 @@ async def regenerate_chunk_endpoint(index: str, background_tasks: BackgroundTask
     return {"status": "started"}
 
 @router.post("/api/merge")
-async def merge_audio_endpoint(background_tasks: BackgroundTasks):
+async def merge_audio_endpoint(request: Optional[MergeRequest] = None, background_tasks: BackgroundTasks = None):
+    background_tasks = background_tasks or BackgroundTasks()
     with audio_queue_lock:
         if audio_current_job is not None or audio_queue or process_state["audio"].get("merge_running", False):
             raise HTTPException(status_code=400, detail="Audio queue is active. Wait for queued jobs to finish or cancel them first.")
@@ -371,6 +386,25 @@ async def merge_audio_endpoint(background_tasks: BackgroundTasks):
         process_state["audio"]["running"] = True
         process_state["audio"]["logs"] = ["Starting merge..."]
         process_state["audio"]["merge_progress"] = _new_audio_merge_progress() | {"running": True, "stage": "starting", "updated_at": time.time()}
+        merge_log_state = {
+            "prepare_bucket": -1,
+            "export_bucket": -1,
+            "normalizing_bucket": -1,
+            "last_stage": None,
+        }
+
+        def _format_eta_from_percent(percent_value, elapsed_seconds):
+            if percent_value <= 0:
+                return "ETA --"
+            if percent_value >= 99.9:
+                return "ETA <1s"
+            remaining = max(0.0, elapsed_seconds * (100.0 - percent_value) / percent_value)
+            return f"ETA {int(round(remaining))}s"
+
+        def _dot_meter(percent_value):
+            filled = min(10, max(1, int(round(percent_value / 10.0))))
+            return "." * filled + "-" * (10 - filled)
+
         try:
             def on_progress(progress):
                 process_state["audio"]["merge_progress"] = {
@@ -389,8 +423,27 @@ async def merge_audio_endpoint(background_tasks: BackgroundTasks):
                 chapter_index = int(progress.get("chapter_index", 0) or 0)
                 total_chapters = int(progress.get("total_chapters", 0) or 0)
                 chapter_label = progress.get("chapter_label") or "Unlabeled"
+                elapsed = float(progress.get("elapsed_seconds", 0.0) or 0.0)
                 if stage == "preparing":
-                    process_state["audio"]["logs"].append(f"Preparing merge inputs: {chapter_label}")
+                    percent = float(progress.get("percent_complete", 0.0) or 0.0)
+                    bucket = int(percent // 5)
+                    if bucket > merge_log_state["prepare_bucket"] or merge_log_state["last_stage"] != stage:
+                        total_items = int(progress.get("total_items", 0) or 0)
+                        processed_items = int(progress.get("processed_items", 0) or 0)
+                        remaining_items = int(progress.get("remaining_items", 0) or 0)
+                        if bool(progress.get("trim_enabled")):
+                            process_state["audio"]["logs"].append(
+                                f"Trimming clips [{_dot_meter(percent)}] {int(round(percent))}% "
+                                f"({processed_items}/{total_items}, {remaining_items} remaining, "
+                                f"{_format_eta_from_percent(percent, elapsed)})"
+                            )
+                        else:
+                            process_state["audio"]["logs"].append(
+                                f"Preparing merge inputs: {int(round(percent))}% "
+                                f"({processed_items}/{total_items}, {remaining_items} remaining, "
+                                f"{_format_eta_from_percent(percent, elapsed)})"
+                            )
+                        merge_log_state["prepare_bucket"] = bucket
                 elif stage == "assembling":
                     process_state["audio"]["logs"].append(f"Assembling chapter {chapter_index}/{total_chapters}: {chapter_label}")
                 elif stage == "packing":
@@ -398,14 +451,39 @@ async def merge_audio_endpoint(background_tasks: BackgroundTasks):
                 elif stage == "bundling":
                     process_state["audio"]["logs"].append("Writing optimized export zip...")
                 elif stage == "exporting":
-                    process_state["audio"]["logs"].append("Exporting final audiobook file...")
+                    estimated_size = int(progress.get("estimated_size_bytes", 0) or 0)
+                    output_size = int(progress.get("output_file_size_bytes", 0) or 0)
+                    percent = 0.0
+                    if estimated_size > 0:
+                        percent = min(99.0, max(0.0, (output_size / estimated_size) * 100.0))
+                    bucket = int(percent // 5)
+                    if bucket > merge_log_state["export_bucket"] or merge_log_state["last_stage"] != stage:
+                        process_state["audio"]["logs"].append(
+                            f"Exporting final audiobook file... {int(round(percent))}% "
+                            f"({_format_eta_from_percent(percent, elapsed)})"
+                        )
+                        merge_log_state["export_bucket"] = bucket
                 elif stage == "normalizing":
-                    process_state["audio"]["logs"].append("Applying loudness normalization...")
+                    label = chapter_label or ""
+                    percent_match = re.search(r"(\d{1,3})%", label)
+                    if percent_match:
+                        percent = float(percent_match.group(1))
+                        bucket = int(percent // 5)
+                        if bucket > merge_log_state["normalizing_bucket"] or merge_log_state["last_stage"] != stage:
+                            process_state["audio"]["logs"].append(
+                                f"Applying loudness normalization... {int(round(percent))}% "
+                                f"({_format_eta_from_percent(percent, elapsed)})"
+                            )
+                            merge_log_state["normalizing_bucket"] = bucket
+                    elif merge_log_state["last_stage"] != stage:
+                        process_state["audio"]["logs"].append("Applying loudness normalization...")
+                merge_log_state["last_stage"] = stage
 
+            selected_export = request.export if request and request.export is not None else _load_export_config()
             success, msg = project_manager.merge_audio(
                 progress_callback=on_progress,
                 log_callback=_append_audio_log_locked,
-                export_config=_load_export_config(),
+                export_config=selected_export,
             )
             if success:
                 process_state["audio"]["logs"].append(f"Merge complete: {msg}")
@@ -427,7 +505,8 @@ async def merge_audio_endpoint(background_tasks: BackgroundTasks):
     return {"status": "started"}
 
 @router.post("/api/merge_optimized")
-async def merge_optimized_audio_endpoint(background_tasks: BackgroundTasks):
+async def merge_optimized_audio_endpoint(request: Optional[MergeRequest] = None, background_tasks: BackgroundTasks = None):
+    background_tasks = background_tasks or BackgroundTasks()
     with audio_queue_lock:
         if audio_current_job is not None or audio_queue or process_state["audio"].get("merge_running", False):
             raise HTTPException(status_code=400, detail="Audio queue is active. Wait for queued jobs to finish or cancel them first.")
@@ -466,10 +545,11 @@ async def merge_optimized_audio_endpoint(background_tasks: BackgroundTasks):
                 elif stage == "normalizing":
                     process_state["audio"]["logs"].append(f"Normalizing optimized part {chapter_index}/{total_chapters}...")
 
+            selected_export = request.export if request and request.export is not None else _load_export_config()
             success, msg = project_manager.export_optimized_mp3_zip(
                 progress_callback=on_progress,
                 log_callback=_append_audio_log_locked,
-                export_config=_load_export_config(),
+                export_config=selected_export,
             )
             if success:
                 process_state["audio"]["logs"].append(f"Optimized export complete: {msg}")
@@ -497,8 +577,325 @@ async def get_optimized_export():
     download_name = f"{_export_download_basename()}.zip"
     return FileResponse(OPTIMIZED_EXPORT_PATH, filename=download_name, media_type="application/zip")
 
+@router.post("/api/trim_cache/clear")
+async def clear_trim_cache():
+    with audio_queue_lock:
+        if audio_current_job is not None or audio_queue or process_state["audio"].get("merge_running", False):
+            raise HTTPException(
+                status_code=400,
+                detail="Audio queue is active. Wait for queued jobs to finish or cancel them first.",
+            )
+
+    cache_dir = project_manager._trim_cache_dir()
+    if not os.path.isdir(cache_dir):
+        return {"status": "ok", "removed_files": 0, "removed_bytes": 0, "path": cache_dir}
+
+    removed_files = 0
+    removed_bytes = 0
+    for root, _dirs, files in os.walk(cache_dir):
+        for name in files:
+            path = os.path.join(root, name)
+            removed_files += 1
+            try:
+                removed_bytes += os.path.getsize(path)
+            except OSError:
+                pass
+
+    try:
+        shutil.rmtree(cache_dir)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to clear trim cache: {e}")
+
+    return {
+        "status": "ok",
+        "removed_files": removed_files,
+        "removed_bytes": removed_bytes,
+        "path": cache_dir,
+    }
+
+
+@router.post("/api/trim_sanity/first_clip")
+async def trim_sanity_first_clip(request: Optional[MergeRequest] = None):
+    with audio_queue_lock:
+        if audio_current_job is not None or audio_queue or process_state["audio"].get("merge_running", False):
+            raise HTTPException(
+                status_code=400,
+                detail="Audio queue is active. Wait for queued jobs to finish or cancel them first.",
+            )
+
+    chunks = project_manager.load_chunks()
+    first_clip = None
+    for chunk in chunks:
+        rel_path = (chunk.get("audio_path") or "").strip()
+        if not rel_path:
+            continue
+        full_path = os.path.join(ROOT_DIR, rel_path)
+        if os.path.exists(full_path):
+            first_clip = {
+                "id": chunk.get("id"),
+                "speaker": chunk.get("speaker"),
+                "text": chunk.get("text"),
+                "audio_path": rel_path,
+                "full_path": full_path,
+            }
+            break
+    if first_clip is None:
+        raise HTTPException(status_code=404, detail="No existing clip found in project chunks.")
+
+    selected_export = request.export if request and request.export is not None else _load_export_config()
+    passed_export_payload = selected_export.model_dump()
+    process_state["audio"]["logs"].append(
+        f"[trim-sanity] Input export config passed to trim: {json.dumps(passed_export_payload, ensure_ascii=False, sort_keys=True)}"
+    )
+    print(
+        f"[trim-sanity] Input export config passed to trim: {json.dumps(passed_export_payload, ensure_ascii=False, sort_keys=True)}",
+        flush=True,
+    )
+
+    trim_cfg = project_manager._resolve_trim_config(selected_export)
+    process_state["audio"]["logs"].append(
+        f"[trim-sanity] Resolved trim args: {json.dumps(trim_cfg, ensure_ascii=False, sort_keys=True)}"
+    )
+    print(
+        f"[trim-sanity] Resolved trim args: {json.dumps(trim_cfg, ensure_ascii=False, sort_keys=True)}",
+        flush=True,
+    )
+
+    resolved_path, trim_info = project_manager._resolve_export_audio_path(first_clip["full_path"], trim_cfg)
+    resolved_segment = AudioSegment.from_file(resolved_path)
+    exported = resolved_segment.export(SANITY_TRIM_FIRST_CLIP_PATH, format="wav")
+    if hasattr(exported, "close"):
+        exported.close()
+
+    process_state["audio"]["logs"].append(
+        f"[trim-sanity] First clip: id={first_clip['id']} path={first_clip['audio_path']} "
+        f"resolved_path={resolved_path} trimmed={bool(trim_info.get('trimmed'))} "
+        f"lead_ms={int(trim_info.get('lead_ms', 0))} tail_ms={int(trim_info.get('tail_ms', 0))}"
+    )
+
+    return {
+        "status": "ok",
+        "download_url": "/api/trim_sanity/first_clip",
+        "output_path": SANITY_TRIM_FIRST_CLIP_PATH,
+        "clip": {
+            "id": first_clip["id"],
+            "speaker": first_clip["speaker"],
+            "text": first_clip["text"],
+            "audio_path": first_clip["audio_path"],
+        },
+        "trim_info": trim_info,
+        "passed_export": passed_export_payload,
+        "resolved_trim": trim_cfg,
+    }
+
+
+@router.get("/api/trim_sanity/first_clip")
+async def get_trim_sanity_first_clip():
+    if not os.path.exists(SANITY_TRIM_FIRST_CLIP_PATH):
+        raise HTTPException(status_code=404, detail="Sanity trim clip not found. Generate it first.")
+    return FileResponse(
+        SANITY_TRIM_FIRST_CLIP_PATH,
+        filename="trim_sanity_first_clip.wav",
+        media_type="audio/wav",
+    )
+
+
+def _collect_first_clips_for_sanity(limit=5):
+    chunks = project_manager.load_chunks()
+    selected = []
+    for chunk in chunks:
+        rel_path = (chunk.get("audio_path") or "").strip()
+        if not rel_path:
+            continue
+        full_path = os.path.join(ROOT_DIR, rel_path)
+        if not os.path.exists(full_path):
+            continue
+        selected.append({
+            "id": chunk.get("id"),
+            "speaker": chunk.get("speaker"),
+            "text": chunk.get("text"),
+            "chapter": chunk.get("chapter"),
+            "paragraph_id": chunk.get("paragraph_id"),
+            "audio_path": rel_path,
+            "full_path": full_path,
+        })
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _assemble_sanity_clips(clip_items, export_cfg_obj):
+    trim_cfg = project_manager._resolve_trim_config(export_cfg_obj)
+    same_ms = int(getattr(export_cfg_obj, "silence_same_speaker_ms", 250))
+    between_ms = int(getattr(export_cfg_obj, "silence_between_speakers_ms", 500))
+    paragraph_ms = int(getattr(export_cfg_obj, "silence_paragraph_ms", 750))
+
+    combined = None
+    details = []
+    previous = None
+    for item in clip_items:
+        resolved_path, trim_info = project_manager._resolve_export_audio_path(item["full_path"], trim_cfg)
+        segment = AudioSegment.from_file(resolved_path)
+        details.append({
+            "id": item["id"],
+            "audio_path": item["audio_path"],
+            "resolved_path": resolved_path,
+            "duration_ms": len(segment),
+            "trimmed": bool(trim_info.get("trimmed")),
+            "lead_ms": int(trim_info.get("lead_ms", 0)),
+            "tail_ms": int(trim_info.get("tail_ms", 0)),
+        })
+        if combined is None:
+            combined = segment
+            previous = item
+            continue
+
+        prev_pid = previous.get("paragraph_id")
+        curr_pid = item.get("paragraph_id")
+        if prev_pid and curr_pid and prev_pid != curr_pid:
+            pause_ms = paragraph_ms
+        elif previous.get("speaker") == item.get("speaker"):
+            pause_ms = same_ms
+        else:
+            pause_ms = between_ms
+
+        combined += AudioSegment.silent(duration=max(0, pause_ms), frame_rate=segment.frame_rate)
+        combined += segment
+        previous = item
+
+    return combined, trim_cfg, details
+
+
+@router.post("/api/assemble_sanity/first5")
+async def assemble_sanity_first5(request: Optional[MergeRequest] = None):
+    with audio_queue_lock:
+        if audio_current_job is not None or audio_queue or process_state["audio"].get("merge_running", False):
+            raise HTTPException(
+                status_code=400,
+                detail="Audio queue is active. Wait for queued jobs to finish or cancel them first.",
+            )
+
+    selected = _collect_first_clips_for_sanity(limit=5)
+    if not selected:
+        raise HTTPException(status_code=404, detail="No existing clips found in project chunks.")
+
+    selected_export = request.export if request and request.export is not None else _load_export_config()
+    passed_export_payload = selected_export.model_dump()
+    process_state["audio"]["logs"].append(
+        f"[assemble-sanity] Input export config: {json.dumps(passed_export_payload, ensure_ascii=False, sort_keys=True)}"
+    )
+    print(
+        f"[assemble-sanity] Input export config: {json.dumps(passed_export_payload, ensure_ascii=False, sort_keys=True)}",
+        flush=True,
+    )
+
+    combined, resolved_trim, clip_details = _assemble_sanity_clips(selected, selected_export)
+    if combined is None:
+        raise HTTPException(status_code=500, detail="Failed to assemble sanity clip set.")
+
+    exported = combined.export(SANITY_ASSEMBLE_FIRST5_PATH, format="wav")
+    if hasattr(exported, "close"):
+        exported.close()
+
+    process_state["audio"]["logs"].append(
+        f"[assemble-sanity] Resolved trim args: {json.dumps(resolved_trim, ensure_ascii=False, sort_keys=True)}"
+    )
+    process_state["audio"]["logs"].append(
+        f"[assemble-sanity] Assembled first {len(selected)} clips -> {SANITY_ASSEMBLE_FIRST5_PATH}"
+    )
+
+    return {
+        "status": "ok",
+        "download_url": "/api/assemble_sanity/first5",
+        "output_path": SANITY_ASSEMBLE_FIRST5_PATH,
+        "clip_count": len(selected),
+        "clips": clip_details,
+        "passed_export": passed_export_payload,
+        "resolved_trim": resolved_trim,
+    }
+
+
+@router.get("/api/assemble_sanity/first5")
+async def get_assemble_sanity_first5():
+    if not os.path.exists(SANITY_ASSEMBLE_FIRST5_PATH):
+        raise HTTPException(status_code=404, detail="Sanity assembled clip not found. Generate it first.")
+    return FileResponse(
+        SANITY_ASSEMBLE_FIRST5_PATH,
+        filename="assemble_sanity_first5.wav",
+        media_type="audio/wav",
+    )
+
+
+@router.post("/api/assemble_sanity/first5_normalized")
+async def assemble_sanity_first5_normalized(request: Optional[MergeRequest] = None):
+    with audio_queue_lock:
+        if audio_current_job is not None or audio_queue or process_state["audio"].get("merge_running", False):
+            raise HTTPException(
+                status_code=400,
+                detail="Audio queue is active. Wait for queued jobs to finish or cancel them first.",
+            )
+
+    selected = _collect_first_clips_for_sanity(limit=5)
+    if not selected:
+        raise HTTPException(status_code=404, detail="No existing clips found in project chunks.")
+
+    selected_export = request.export if request and request.export is not None else _load_export_config()
+    passed_export_payload = selected_export.model_dump()
+    process_state["audio"]["logs"].append(
+        f"[assemble-sanity-normalized] Input export config: {json.dumps(passed_export_payload, ensure_ascii=False, sort_keys=True)}"
+    )
+    print(
+        f"[assemble-sanity-normalized] Input export config: {json.dumps(passed_export_payload, ensure_ascii=False, sort_keys=True)}",
+        flush=True,
+    )
+
+    combined, resolved_trim, clip_details = _assemble_sanity_clips(selected, selected_export)
+    if combined is None:
+        raise HTTPException(status_code=500, detail="Failed to assemble sanity clip set.")
+
+    exported = combined.export(SANITY_ASSEMBLE_FIRST5_NORMALIZED_PATH, format="wav")
+    if hasattr(exported, "close"):
+        exported.close()
+
+    normalized, normalize_result = project_manager._call_normalize_audio_file(
+        SANITY_ASSEMBLE_FIRST5_NORMALIZED_PATH,
+        export_config=selected_export,
+        allow_short_single_pass=True,
+    )
+    if not normalized:
+        raise HTTPException(status_code=500, detail=f"Normalization failed: {normalize_result}")
+
+    process_state["audio"]["logs"].append(
+        f"[assemble-sanity-normalized] Resolved trim args: {json.dumps(resolved_trim, ensure_ascii=False, sort_keys=True)}"
+    )
+    process_state["audio"]["logs"].append(
+        f"[assemble-sanity-normalized] Assembled+normalized first {len(selected)} clips -> {SANITY_ASSEMBLE_FIRST5_NORMALIZED_PATH}"
+    )
+
+    return {
+        "status": "ok",
+        "download_url": "/api/assemble_sanity/first5_normalized",
+        "output_path": SANITY_ASSEMBLE_FIRST5_NORMALIZED_PATH,
+        "clip_count": len(selected),
+        "clips": clip_details,
+        "passed_export": passed_export_payload,
+        "resolved_trim": resolved_trim,
+    }
+
+
+@router.get("/api/assemble_sanity/first5_normalized")
+async def get_assemble_sanity_first5_normalized():
+    if not os.path.exists(SANITY_ASSEMBLE_FIRST5_NORMALIZED_PATH):
+        raise HTTPException(status_code=404, detail="Normalized sanity assembled clip not found. Generate it first.")
+    return FileResponse(
+        SANITY_ASSEMBLE_FIRST5_NORMALIZED_PATH,
+        filename="assemble_sanity_first5_normalized.wav",
+        media_type="audio/wav",
+    )
+
 @router.post("/api/export_audacity")
-async def export_audacity_endpoint(background_tasks: BackgroundTasks):
+async def export_audacity_endpoint(request: Optional[MergeRequest] = None, background_tasks: BackgroundTasks = None):
+    background_tasks = background_tasks or BackgroundTasks()
     if process_state["audacity_export"]["running"]:
         raise HTTPException(status_code=400, detail="Audacity export already running")
 
@@ -506,7 +903,8 @@ async def export_audacity_endpoint(background_tasks: BackgroundTasks):
         process_state["audacity_export"]["running"] = True
         process_state["audacity_export"]["logs"] = ["Starting Audacity export..."]
         try:
-            success, msg = project_manager.export_audacity()
+            selected_export = request.export if request and request.export is not None else _load_export_config()
+            success, msg = project_manager.export_audacity(export_config=selected_export)
             if success:
                 process_state["audacity_export"]["logs"].append(f"Export complete: {msg}")
             else:
@@ -533,6 +931,7 @@ class M4bExportRequest(BaseModel):
     narrator: str = ""
     year: str = ""
     description: str = ""
+    export: Optional[ExportConfig] = None
 
 @router.post("/api/merge_m4b")
 async def merge_m4b_endpoint(request: M4bExportRequest, background_tasks: BackgroundTasks):
@@ -554,7 +953,7 @@ async def merge_m4b_endpoint(request: M4bExportRequest, background_tasks: Backgr
             success, msg = project_manager.merge_m4b(
                 per_chunk_chapters=request.per_chunk_chapters,
                 metadata=meta,
-                export_config=_load_export_config(),
+                export_config=request.export or _load_export_config(),
             )
             if success:
                 process_state["m4b_export"]["logs"].append(f"Export complete: {msg}")
@@ -629,6 +1028,7 @@ async def generate_batch_fast_endpoint(request: BatchGenerateRequest, background
 async def cancel_audio():
     """Cancel the current audio job and clear any queued jobs."""
     global audio_recovery_request
+    cancelled_or_cleared = False
     with audio_queue_condition:
         cleared = len(audio_queue)
         now = time.time()
@@ -637,6 +1037,8 @@ async def cancel_audio():
             job["status"] = "cancelled"
             job["finished_at"] = now
             _record_audio_recent_job_locked(job)
+        if cleared:
+            cancelled_or_cleared = True
 
         if audio_current_job is not None:
             process_state["audio"]["cancel"] = True
@@ -650,19 +1052,33 @@ async def cancel_audio():
                 "User requested cancellation",
                 status="cancelled",
             )
+            cancelled_or_cleared = True
             if abandoned:
+                _refresh_audio_process_state_locked(persist=True)
+                if os.path.exists(AUDIO_QUEUE_STATE_PATH):
+                    os.remove(AUDIO_QUEUE_STATE_PATH)
                 return {"status": "cancelled", "cleared_queued_jobs": cleared}
             _refresh_audio_process_state_locked(persist=True)
+            if os.path.exists(AUDIO_QUEUE_STATE_PATH):
+                os.remove(AUDIO_QUEUE_STATE_PATH)
             return {"status": "cancelling", "cleared_queued_jobs": cleared}
 
         if cleared:
             audio_recovery_request = None
             _append_audio_log_locked(f"[CANCEL] Cleared {cleared} queued job(s)")
             _refresh_audio_process_state_locked(persist=True)
+            if os.path.exists(AUDIO_QUEUE_STATE_PATH):
+                os.remove(AUDIO_QUEUE_STATE_PATH)
             return {"status": "cancelled", "cleared_queued_jobs": cleared}
 
     # Not running — still reset any stuck "generating" chunks (e.g. from a crash)
     reset_count = project_manager.reset_generating_chunks()
+    with audio_queue_condition:
+        audio_recovery_request = None
+        process_state["audio"]["cancel"] = False
+        _refresh_audio_process_state_locked(persist=True)
+    if os.path.exists(AUDIO_QUEUE_STATE_PATH):
+        os.remove(AUDIO_QUEUE_STATE_PATH)
     return {"status": "not_running", "reset_chunks": reset_count}
 
 ## ── Saved Scripts ──────────────────────────────────────────────

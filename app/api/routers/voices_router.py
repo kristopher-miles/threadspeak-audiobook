@@ -186,17 +186,23 @@ async def save_voice_config(config_data: Dict[str, VoiceConfigItem]):
 
 @router.post("/api/voices/save_config")
 async def save_voice_config_with_invalidation(request: VoiceConfigSaveRequest):
-    running_task = _any_project_task_running()
-    if running_task:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot update voices while {running_task} work is running",
-        )
-
-    new_config = _canonicalize_voice_config_keys({
+    # Voice updates must remain available even during active processing so the
+    # UI can prompt for invalidation and intentionally clear affected clips.
+    incoming_config = _canonicalize_voice_config_keys({
         _canonical_speaker_name(voice_name): config_item.model_dump()
         for voice_name, config_item in (request.config or {}).items()
     })
+    existing_config = _canonicalize_voice_config_keys(project_manager._load_voice_config())
+
+    # Treat request payload as patch semantics: update submitted voices while
+    # preserving unrelated voice entries already in the config file.
+    new_config = copy.deepcopy(existing_config)
+    for voice_name, config_item in incoming_config.items():
+        target_name = _canonical_speaker_name(voice_name)
+        existing_key = _find_config_key_case_insensitive(new_config, target_name)
+        new_config[existing_key or target_name] = config_item
+    new_config = _canonicalize_voice_config_keys(new_config)
+
     result = project_manager.save_voice_config_with_invalidation(
         new_config,
         confirm_invalidation=bool(request.confirm_invalidation),

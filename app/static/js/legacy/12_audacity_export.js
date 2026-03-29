@@ -4,7 +4,11 @@
             statusEl.innerHTML = '<span class="text-info"><i class="fas fa-spinner fa-spin me-1"></i>Exporting...</span>';
 
             try {
-                await API.post('/api/export_audacity', {});
+                let exportConfig = null;
+                if (window.persistExportConfigFromUI) {
+                    exportConfig = await window.persistExportConfigFromUI();
+                }
+                await API.post('/api/export_audacity', { export: exportConfig || undefined });
 
                 const poll = setInterval(async () => {
                     try {
@@ -60,13 +64,18 @@
             statusEl.innerHTML = '<span class="text-info"><i class="fas fa-spinner fa-spin me-1"></i>Exporting M4B...</span>';
 
             try {
+                let exportConfig = null;
+                if (window.persistExportConfigFromUI) {
+                    exportConfig = await window.persistExportConfigFromUI();
+                }
                 await API.post('/api/merge_m4b', {
                     per_chunk_chapters: perChunk,
                     title: document.getElementById('m4b-title').value,
                     author: document.getElementById('m4b-author').value,
                     narrator: document.getElementById('m4b-narrator').value,
                     year: document.getElementById('m4b-year').value,
-                    description: document.getElementById('m4b-description').value
+                    description: document.getElementById('m4b-description').value,
+                    export: exportConfig || undefined
                 });
 
                 const poll = setInterval(async () => {
@@ -97,4 +106,3 @@
                 statusEl.innerHTML = `<span class="text-danger"><i class="fas fa-times me-1"></i>${e.message}</span>`;
             }
         };
-

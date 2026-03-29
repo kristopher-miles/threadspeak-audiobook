@@ -49,9 +49,7 @@ Leave this text alone, since removing attribution would leave the attached claus
    - Describe the VOICE, not the body. "Shocked, voice breaking." NOT "Trembling with shock."
    - Convey pacing through energy: "urgent intensity" not "fast and urgent".
    - Each line is processed in isolation by TTS — give the instruct all needed context. Repeat emotional state explicitly ("Sad, quiet sobbing." not "still crying").
-
 ---SEPARATOR---
-
 {context}
 
 Remember: if another character in the scene would hear the words, it is CHARACTER dialogue. Everything else is NARRATOR. Preserve the author's original wording, person, and tense exactly.

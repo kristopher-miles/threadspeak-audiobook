@@ -25,7 +25,15 @@ from openai import OpenAI
 # Import ProjectManager
 from project import ProjectManager
 from asr import LocalASRUnavailableError
-from default_prompts import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT, load_default_prompts, DEFAULT_DIALOGUE_IDENTIFICATION_PROMPT, DEFAULT_TEMPERAMENT_EXTRACTION_PROMPT
+from default_prompts import (
+    DEFAULT_SYSTEM_PROMPT,
+    DEFAULT_USER_PROMPT,
+    load_default_prompts,
+    DEFAULT_DIALOGUE_IDENTIFICATION_PROMPT,
+    DEFAULT_TEMPERAMENT_EXTRACTION_PROMPT,
+    load_dialogue_identification_prompt,
+    load_temperament_extraction_prompt,
+)
 from review_prompts import load_review_prompts
 from attribution_prompts import load_attribution_prompts
 from voice_prompt import load_voice_prompt
@@ -660,8 +668,18 @@ NEW_MODE_STAGE_LABELS = {
     "render_audio": "Render Audio",
     "proofread": "Proofread",
 }
+NEW_MODE_STAGE_ORDER = [
+    "process_paragraphs",
+    "assign_dialogue",
+    "extract_temperament",
+    "create_script",
+    "process_voices",
+    "render_audio",
+    "proofread",
+]
 PROCESSING_STAGE_ORDER = ["script", "review", "sanity", "repair", "voices", "audio"]
 PROCESSING_STAGE_MARKERS_KEY = "processing_stage_markers"
+NEW_MODE_STAGE_MARKERS_KEY = "new_mode_stage_markers"
 PROCESSING_WORKFLOW_STAGE_LABELS = {
     "script": "Generate Annotated Script",
     "review": "Review Script",
@@ -1055,6 +1073,12 @@ def _load_processing_stage_markers():
     return dict(markers) if isinstance(markers, dict) else {}
 
 
+def _load_new_mode_stage_markers():
+    state = _load_project_state_payload()
+    markers = state.get(NEW_MODE_STAGE_MARKERS_KEY)
+    return dict(markers) if isinstance(markers, dict) else {}
+
+
 def _save_processing_stage_markers(markers, state=None):
     payload = dict(state) if isinstance(state, dict) else _load_project_state_payload()
     cleaned = {stage: value for stage, value in dict(markers).items() if stage in PROCESSING_STAGE_ORDER}
@@ -1062,6 +1086,16 @@ def _save_processing_stage_markers(markers, state=None):
         payload[PROCESSING_STAGE_MARKERS_KEY] = cleaned
     else:
         payload.pop(PROCESSING_STAGE_MARKERS_KEY, None)
+    _save_project_state_payload(payload)
+
+
+def _save_new_mode_stage_markers(markers, state=None):
+    payload = dict(state) if isinstance(state, dict) else _load_project_state_payload()
+    cleaned = {stage: value for stage, value in dict(markers).items() if stage in NEW_MODE_STAGE_ORDER}
+    if cleaned:
+        payload[NEW_MODE_STAGE_MARKERS_KEY] = cleaned
+    else:
+        payload.pop(NEW_MODE_STAGE_MARKERS_KEY, None)
     _save_project_state_payload(payload)
 
 
@@ -1075,6 +1109,18 @@ def _mark_processing_stage_completed_marker(stage_name):
         "completed_at": time.time(),
     }
     _save_processing_stage_markers(markers, state=state)
+
+
+def _mark_new_mode_stage_completed_marker(stage_name):
+    if stage_name not in NEW_MODE_STAGE_ORDER:
+        return
+    state = _load_project_state_payload()
+    markers = state.get(NEW_MODE_STAGE_MARKERS_KEY)
+    markers = dict(markers) if isinstance(markers, dict) else {}
+    markers[stage_name] = {
+        "completed_at": time.time(),
+    }
+    _save_new_mode_stage_markers(markers, state=state)
 
 
 def _clear_processing_stage_markers(stage_names=None):
@@ -1094,11 +1140,35 @@ def _clear_processing_stage_markers(stage_names=None):
         _save_processing_stage_markers(markers, state=state)
 
 
+def _clear_new_mode_stage_markers(stage_names=None):
+    state = _load_project_state_payload()
+    markers = state.get(NEW_MODE_STAGE_MARKERS_KEY)
+    markers = dict(markers) if isinstance(markers, dict) else {}
+    if stage_names is None:
+        changed = bool(markers)
+        markers = {}
+    else:
+        changed = False
+        for stage_name in stage_names:
+            if stage_name in markers:
+                markers.pop(stage_name, None)
+                changed = True
+    if changed:
+        _save_new_mode_stage_markers(markers, state=state)
+
+
 def _clear_processing_stage_and_downstream(stage_name, include_self=True):
     if stage_name not in PROCESSING_STAGE_ORDER:
         return
     start_index = PROCESSING_STAGE_ORDER.index(stage_name) + (0 if include_self else 1)
     _clear_processing_stage_markers(PROCESSING_STAGE_ORDER[start_index:])
+
+
+def _clear_new_mode_stage_and_downstream(stage_name, include_self=True):
+    if stage_name not in NEW_MODE_STAGE_ORDER:
+        return
+    start_index = NEW_MODE_STAGE_ORDER.index(stage_name) + (0 if include_self else 1)
+    _clear_new_mode_stage_markers(NEW_MODE_STAGE_ORDER[start_index:])
 
 
 def _derived_processing_completed_stages(options=None):
@@ -1413,6 +1483,19 @@ def _pause_audio_queue_for_workflow():
             _append_audio_log_locked(f"[WORKFLOW] Pause requested for audio job #{audio_current_job['id']}")
             if cleared:
                 _append_audio_log_locked(f"[WORKFLOW] Removed {cleared} queued audio job(s)")
+
+            # Force-abandon the active job immediately so workflow cancellation
+            # does not leave stale running state behind.
+            abandoned = _abandon_audio_job_locked(
+                audio_current_job,
+                audio_current_job.get("run_token"),
+                "Workflow pause requested",
+                status="cancelled",
+            )
+            if abandoned:
+                return True
+
+            # Fallback to cooperative cancellation when a race prevents immediate abandon.
             _refresh_audio_process_state_locked(persist=True)
             return True
 
@@ -1751,6 +1834,7 @@ def _record_audio_sample_locked(job, chunk_index, elapsed_seconds, input_words, 
 def _restore_job_progress_from_chunks(raw_job, chunks):
     indices = [int(idx) for idx in raw_job.get("indices", [])]
     word_counts = {int(k): int(v) for k, v in (raw_job.get("word_counts") or {}).items()}
+    dictionary_entries = project_manager.load_dictionary_entries()
 
     reconciled_indices = [idx for idx in indices if 0 <= idx < len(chunks)]
     pending_indices = []
@@ -1758,14 +1842,27 @@ def _restore_job_progress_from_chunks(raw_job, chunks):
     error_clips = 0
 
     for idx in reconciled_indices:
-        status = chunks[idx].get("status")
+        chunk = chunks[idx]
+        status = chunk.get("status")
         if status == "done":
             processed_clips += 1
-        elif status == "error":
+            continue
+
+        # Status can drift during crashes/cancels; trust the on-disk audio when valid.
+        validation = project_manager._validate_chunk_audio(chunk, dictionary_entries)
+        if validation and validation.get("is_valid"):
+            processed_clips += 1
+            chunk["status"] = "done"
+            chunk["audio_validation"] = validation
+            chunk["auto_regen_count"] = 0
+            continue
+
+        if status == "error":
             processed_clips += 1
             error_clips += 1
-        else:
-            pending_indices.append(idx)
+            continue
+
+        pending_indices.append(idx)
 
     total_words = sum(word_counts.get(idx, 0) for idx in reconciled_indices)
     remaining_words = sum(word_counts.get(idx, 0) for idx in pending_indices)
@@ -1935,6 +2032,7 @@ def _restore_audio_queue_state():
 
     with audio_queue_condition:
         project_manager.recover_interrupted_generating_chunks()
+        project_manager.reconcile_chunk_audio_states()
         chunks = project_manager.load_chunks()
         process_state["audio"]["metrics"] = _new_audio_metrics()
         process_state["audio"]["heartbeat"] = _new_audio_heartbeat_state()
@@ -2008,6 +2106,9 @@ def _restore_audio_queue_state():
                 )
 
         audio_queue[:] = restored_jobs
+        if restored_jobs:
+            # Persist any status repairs made while reconciling/restoring.
+            project_manager.save_chunks(chunks)
         _seed_audio_metrics_from_jobs_locked(*restored_jobs)
         if restored_jobs:
             _refresh_audio_process_state_locked(persist=True)
@@ -3081,8 +3182,17 @@ def _new_mode_workflow_is_pause_requested() -> bool:
 
 
 def _derived_new_mode_completed_stages(options=None) -> list:
-    """Detect already-complete stages from file state (used on fresh start)."""
+    """Derive complete stages for new-mode workflow (marker-authoritative)."""
     options = options or {}
+    allowed = set(_new_mode_stage_sequence(options))
+    markers = _load_new_mode_stage_markers()
+    return [stage for stage in NEW_MODE_STAGE_ORDER if stage in allowed and markers.get(stage)]
+
+
+def _derived_new_mode_completed_stages_from_files(options=None) -> list:
+    """Best-effort one-time migration source for missing marker state."""
+    options = options or {}
+    allowed = set(_new_mode_stage_sequence(options))
     paragraphs_path = os.path.join(ROOT_DIR, "paragraphs.json")
     chunks_path = CHUNKS_PATH
     script_path = os.path.join(ROOT_DIR, "annotated_script.json")
@@ -3122,7 +3232,27 @@ def _derived_new_mode_completed_stages(options=None) -> list:
         except Exception:
             pass
 
-    return completed
+    return [stage for stage in completed if stage in allowed]
+
+
+def _initialize_new_mode_stage_markers(options=None, legacy_completed_stages=None):
+    options = options or {}
+    markers = _load_new_mode_stage_markers()
+    if markers:
+        return markers
+
+    completed = []
+    if legacy_completed_stages:
+        completed = [stage for stage in legacy_completed_stages if stage in NEW_MODE_STAGE_ORDER]
+    if not completed:
+        completed = _derived_new_mode_completed_stages_from_files(options)
+
+    if completed:
+        now = time.time()
+        migrated = {stage: {"completed_at": now} for stage in completed}
+        _save_new_mode_stage_markers(migrated)
+        return migrated
+    return {}
 
 
 def _set_new_mode_workflow_paused(stage_name=None):
@@ -3149,13 +3279,14 @@ def _set_new_mode_workflow_failed(stage_name: str, message: str):
 
 def _set_new_mode_workflow_completed():
     with new_mode_workflow_lock:
+        options = process_state["new_mode_workflow"].get("options") or {}
+        process_state["new_mode_workflow"]["completed_stages"] = _derived_new_mode_completed_stages(options)
         process_state["new_mode_workflow"]["running"] = False
         process_state["new_mode_workflow"]["paused"] = False
         process_state["new_mode_workflow"]["pause_requested"] = False
         process_state["new_mode_workflow"]["current_stage"] = None
         process_state["new_mode_workflow"]["last_error"] = None
         process_state["new_mode_workflow"]["completed_at"] = time.time()
-        options = process_state["new_mode_workflow"].get("options") or {}
         if options.get("generate_audio"):
             _append_new_mode_workflow_log_locked(
                 "All steps complete. Book is ready for export."
@@ -3231,7 +3362,9 @@ def _run_new_mode_workflow_stage(stage_name: str):
         run_id = _start_task_run(stage_name)
         if stage_name == "process_paragraphs":
             state = _load_project_state_payload()
-            input_file = state.get("input_file_path", "")
+            input_file = (state.get("input_file_path") or "").strip()
+            if not input_file or not os.path.exists(input_file):
+                raise RuntimeError("No input file found. Please upload a book first.")
             success = run_process(
                 [sys.executable, "-u", "process_paragraphs.py", input_file, paragraphs_path],
                 stage_name, run_id, relay_fn=relay,
@@ -3299,9 +3432,12 @@ def _new_mode_workflow_runner():
                 break
 
             options = state.get("options") or {}
-            completed = list(state.get("completed_stages") or [])
+            completed = _derived_new_mode_completed_stages(options)
+            with new_mode_workflow_lock:
+                process_state["new_mode_workflow"]["completed_stages"] = completed
+                _persist_new_mode_workflow_state_locked()
             pending = next(
-                (s for s in _new_mode_stage_sequence(options) if s not in completed),
+                (s for s in _new_mode_stage_sequence(options) if s not in set(completed)),
                 None,
             )
             if pending is None:
@@ -3311,9 +3447,8 @@ def _new_mode_workflow_runner():
             try:
                 _run_new_mode_workflow_stage(pending)
                 with new_mode_workflow_lock:
-                    done = list(process_state["new_mode_workflow"].get("completed_stages") or [])
-                    if pending not in done:
-                        done.append(pending)
+                    _mark_new_mode_stage_completed_marker(pending)
+                    done = _derived_new_mode_completed_stages(options)
                     process_state["new_mode_workflow"]["completed_stages"] = done
                     _append_new_mode_workflow_log_locked(
                         f"{NEW_MODE_STAGE_LABELS.get(pending, pending)} complete."
@@ -3354,8 +3489,49 @@ def _restore_new_mode_workflow_state():
         return
     restored = _new_mode_workflow_initial_state()
     restored.update(payload)
+    options = restored.get("options") or {}
+    _initialize_new_mode_stage_markers(
+        options=options,
+        legacy_completed_stages=restored.get("completed_stages") or [],
+    )
+    restored["completed_stages"] = _derived_new_mode_completed_stages(options)
     process_state["new_mode_workflow"] = restored
     if restored.get("running") and not restored.get("paused"):
+        stage_order = _new_mode_stage_sequence(options)
+        completed = set(_derived_new_mode_completed_stages(options))
+        pending = [stage for stage in stage_order if stage not in completed]
+
+        if not pending:
+            with new_mode_workflow_lock:
+                process_state["new_mode_workflow"]["running"] = False
+                process_state["new_mode_workflow"]["paused"] = False
+                process_state["new_mode_workflow"]["pause_requested"] = False
+                process_state["new_mode_workflow"]["current_stage"] = None
+                process_state["new_mode_workflow"]["last_error"] = None
+                process_state["new_mode_workflow"]["completed_at"] = (
+                    process_state["new_mode_workflow"].get("completed_at") or time.time()
+                )
+                _append_new_mode_workflow_log_locked(
+                    "Recovered workflow was already complete; no stages resumed."
+                )
+            return
+
+        # Do not auto-resume into process_paragraphs unless an input file exists.
+        if pending and pending[0] == "process_paragraphs":
+            state = _load_project_state_payload()
+            input_file = (state.get("input_file_path") or "").strip()
+            if not input_file or not os.path.exists(input_file):
+                with new_mode_workflow_lock:
+                    process_state["new_mode_workflow"]["running"] = False
+                    process_state["new_mode_workflow"]["paused"] = False
+                    process_state["new_mode_workflow"]["last_error"] = (
+                        "Recovered workflow requires an input file, but none was found. Upload a book and start Process Script."
+                    )
+                    _append_new_mode_workflow_log_locked(
+                        "Recovery skipped: missing input file for Process Paragraphs."
+                    )
+                return
+
         with new_mode_workflow_lock:
             _append_new_mode_workflow_log_locked("Recovered workflow after app restart.")
             _start_new_mode_workflow_thread_locked()

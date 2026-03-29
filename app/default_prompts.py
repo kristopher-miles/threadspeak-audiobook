@@ -1,6 +1,12 @@
 import os
 
 _PROMPTS_FILE = os.path.join(os.path.dirname(__file__), "..", "default_prompts.txt")
+_DIALOGUE_PROMPT_FILE = os.path.join(
+    os.path.dirname(__file__), "..", "dialogue_identification_system_prompt.txt"
+)
+_TEMPERAMENT_PROMPT_FILE = os.path.join(
+    os.path.dirname(__file__), "..", "temperament_extraction_system_prompt.txt"
+)
 
 
 def load_default_prompts():
@@ -26,11 +32,7 @@ def load_default_prompts():
     return parts[0].strip(), parts[1].strip()
 
 
-# Cached at import time — used by generate_script.py (subprocess, fresh each run)
-DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT = load_default_prompts()
-
-
-DEFAULT_TEMPERAMENT_EXTRACTION_PROMPT = """\
+_FALLBACK_TEMPERAMENT_EXTRACTION_PROMPT = """\
 You are a narrative tone specialist helping to produce an audiobook. \
 Your sole task is to identify the emotional sentiment and delivery style \
 of a given paragraph of prose.
@@ -45,7 +47,7 @@ deliver the paragraph (e.g. "Read with quiet melancholy and a slow, deliberate p
   - You MUST call the identify_sentiment tool with your answer. Do not respond in plain text.\
 """
 
-DEFAULT_DIALOGUE_IDENTIFICATION_PROMPT = """\
+_FALLBACK_DIALOGUE_IDENTIFICATION_PROMPT = """\
 You are a dialogue attribution specialist helping to build an audiobook script. \
 Your sole task is to identify who speaks a given piece of dialogue based on the surrounding narrative.
 
@@ -63,3 +65,36 @@ use their exact name from the list.
 (a rare edge case).
   - You MUST call the identify_dialogue tool with your answer. Do not respond in plain text.\
 """
+
+
+def _load_single_prompt_file(path: str, label: str, fallback: str):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            value = f.read().strip()
+    except FileNotFoundError:
+        return fallback
+    if not value:
+        raise RuntimeError(f"{label} is empty.")
+    return value
+
+
+def load_dialogue_identification_prompt():
+    return _load_single_prompt_file(
+        _DIALOGUE_PROMPT_FILE,
+        "dialogue_identification_system_prompt.txt",
+        _FALLBACK_DIALOGUE_IDENTIFICATION_PROMPT,
+    )
+
+
+def load_temperament_extraction_prompt():
+    return _load_single_prompt_file(
+        _TEMPERAMENT_PROMPT_FILE,
+        "temperament_extraction_system_prompt.txt",
+        _FALLBACK_TEMPERAMENT_EXTRACTION_PROMPT,
+    )
+
+
+# Cached at import time — used by subprocess scripts (fresh import each run)
+DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT = load_default_prompts()
+DEFAULT_DIALOGUE_IDENTIFICATION_PROMPT = load_dialogue_identification_prompt()
+DEFAULT_TEMPERAMENT_EXTRACTION_PROMPT = load_temperament_extraction_prompt()

@@ -74,9 +74,7 @@ FIXES TO APPLY:
      WRONG: "Leaning forward eagerly." → RIGHT: "Eager, bright energy, words tumbling out."
      WRONG: "He tries to sound casual." → RIGHT: "Forced casual tone, not quite selling it."
    - Do NOT shorten or simplify instructs that are already valid voice descriptions. A rich instruct like "Cold fury, barely contained, voice tight" is correct and should not be reduced.
-
 ---SEPARATOR---
-
 {context}
 
 Review the following batch of audiobook script entries. Fix any issues matching the 5 categories in your instructions. Return the corrected JSON array with ALL entries (both fixed and unchanged). Remember: NEVER change wording, person, tense, or punctuation. Every output entry MUST have all three fields (speaker, text, instruct). NEVER drop text — every sentence from the input must appear in exactly one output entry.

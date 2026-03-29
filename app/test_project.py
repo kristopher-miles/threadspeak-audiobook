@@ -4,6 +4,7 @@ import tempfile
 import time
 import unittest
 import zipfile
+from unittest.mock import patch
 
 import numpy as np
 import soundfile as sf
@@ -57,7 +58,7 @@ class ReconcileChunkAudioStatesTests(unittest.TestCase):
         self.assertIsNone(reconciled[0]["audio_validation"]["error"])
         self.assertEqual(reconciled[0]["auto_regen_count"], 0)
 
-    def test_does_not_promote_pending_chunk_with_old_audio(self):
+    def test_promotes_pending_chunk_with_valid_audio(self):
         self._write_wav("voicelines/clip.wav", duration_seconds=3.0)
         chunks = [{
             "id": 0,
@@ -73,8 +74,47 @@ class ReconcileChunkAudioStatesTests(unittest.TestCase):
 
         reconciled = self.manager.reconcile_chunk_audio_states()
 
-        self.assertEqual(reconciled[0]["status"], "pending")
-        self.assertIsNone(reconciled[0]["audio_validation"])
+        self.assertEqual(reconciled[0]["status"], "done")
+        self.assertTrue(reconciled[0]["audio_validation"]["is_valid"])
+
+    def test_proofread_batch_commit_preserves_live_generation_token(self):
+        chunks_disk = [{
+            "id": 0,
+            "speaker": "Narrator",
+            "text": "One two three.",
+            "instruct": "",
+            "status": "generating",
+            "generation_token": "live-token",
+            "audio_path": None,
+            "audio_validation": None,
+        }]
+        self.manager.save_chunks(chunks_disk)
+
+        stale_snapshot = [{
+            "id": 0,
+            "speaker": "Narrator",
+            "text": "One two three.",
+            "instruct": "",
+            "status": "pending",
+            "audio_path": None,
+            "audio_validation": None,
+        }]
+        pending_results = {
+            0: {
+                "checked": True,
+                "passed": True,
+                "score": 1.0,
+                "audio_path": "",
+                "transcript_text": "one two three",
+            }
+        }
+
+        self.manager._commit_proofread_results_batch_locked(stale_snapshot, pending_results)
+        merged = self.manager.load_chunks()
+
+        self.assertEqual(merged[0].get("generation_token"), "live-token")
+        self.assertEqual(merged[0].get("status"), "generating")
+        self.assertTrue((merged[0].get("proofread") or {}).get("checked"))
 
     def test_groups_indices_by_resolved_speaker(self):
         chunks = [
@@ -98,6 +138,28 @@ class ReconcileChunkAudioStatesTests(unittest.TestCase):
         )
 
         self.assertEqual(grouped, [0, 2, 1, 3, 4])
+
+    def test_groups_indices_by_resolved_speaker_case_insensitive_keys(self):
+        chunks = [
+            {"id": 0, "speaker": "Narrator"},
+            {"id": 1, "speaker": "NARRATOR"},
+            {"id": 2, "speaker": "narrator"},
+            {"id": 3, "speaker": "Alice"},
+        ]
+        voice_config = {
+            "NARRATOR": {},
+            "Alice": {},
+        }
+
+        grouped = self.manager.group_indices_by_resolved_speaker(
+            [0, 1, 2, 3],
+            chunks=chunks,
+            voice_config=voice_config,
+        )
+
+        self.assertEqual(grouped, [0, 1, 2, 3])
+        self.assertEqual(self.manager.resolve_voice_speaker("Narrator", voice_config), "NARRATOR")
+        self.assertEqual(self.manager.resolve_voice_speaker("narrator", voice_config), "NARRATOR")
 
     def test_recovers_interrupted_generating_chunk_with_valid_audio(self):
         self._write_wav("voicelines/recovered.wav", duration_seconds=3.0)
@@ -193,6 +255,58 @@ class ReconcileChunkAudioStatesTests(unittest.TestCase):
         self.assertEqual(result["reason"], "chunks_current")
         self.assertEqual(synced[0]["uid"], "currentchunk")
         self.assertEqual(synced[0]["status"], "done")
+
+    def test_sync_chunks_from_script_if_stale_preserves_sentence_level_entries_with_paragraph_ids(self):
+        with open(os.path.join(self.root_dir, "annotated_script.json"), "w", encoding="utf-8") as f:
+            json.dump({
+                "entries": [
+                    {
+                        "speaker": "NARRATOR",
+                        "text": "I'm looking for another explanation.",
+                        "instruct": "",
+                        "chapter": "Chapter 1",
+                        "paragraph_id": "p_0001",
+                    },
+                    {
+                        "speaker": "NARRATOR",
+                        "text": "But it's hard to think of what else would do this.",
+                        "instruct": "",
+                        "chapter": "Chapter 1",
+                        "paragraph_id": "p_0001",
+                    },
+                ],
+                "dictionary": [],
+            }, f)
+
+        stale_chunks = [{
+            "id": 0,
+            "uid": "oldchunk",
+            "speaker": "NARRATOR",
+            "text": "Old stale chunk.",
+            "instruct": "",
+            "status": "done",
+            "audio_path": "voicelines/old.mp3",
+            "audio_validation": {"is_valid": True},
+            "auto_regen_count": 0,
+            "chapter": "Old Chapter",
+        }]
+        self.manager.save_chunks(stale_chunks)
+        os.utime(self.manager.chunks_path, (time.time() - 10, time.time() - 10))
+        os.utime(self.manager.script_path, None)
+
+        result = self.manager.sync_chunks_from_script_if_stale()
+        synced = self.manager.load_chunks()
+
+        self.assertTrue(result["synced"])
+        self.assertEqual(len(synced), 2)
+        self.assertEqual(
+            [chunk["text"] for chunk in synced],
+            [
+                "I'm looking for another explanation.",
+                "But it's hard to think of what else would do this.",
+            ],
+        )
+        self.assertTrue(all(chunk.get("paragraph_id") == "p_0001" for chunk in synced))
 
 
 class ChunkBackupTests(unittest.TestCase):
@@ -423,6 +537,13 @@ class TranscriptionCacheTests(unittest.TestCase):
 
 
 class MergeAudioTests(unittest.TestCase):
+    # Policy: do not stub MP3 concat in merge/export integration tests.
+    # These tests must exercise the real encoder path so they fail if libmp3lame is unavailable.
+    NEVER_STUB_MP3_CONCAT_NOTE = (
+        "Do not stub ProjectManager._export_concat_mp3 in merge/optimized export tests. "
+        "These tests intentionally depend on real MP3 encoder availability."
+    )
+
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root_dir = self.temp_dir.name
@@ -453,7 +574,13 @@ class MergeAudioTests(unittest.TestCase):
         sf.write(full_path, samples, sample_rate)
         return full_path
 
+    def _assert_real_mp3_concat_path(self):
+        bound = self.manager._export_concat_mp3
+        self.assertTrue(hasattr(bound, "__func__"), self.NEVER_STUB_MP3_CONCAT_NOTE)
+        self.assertIs(bound.__func__, ProjectManager._export_concat_mp3, self.NEVER_STUB_MP3_CONCAT_NOTE)
+
     def test_merge_audio_reports_progress_and_creates_mp3(self):
+        self._assert_real_mp3_concat_path()
         self._write_wav("voicelines/clip1.wav", duration_seconds=0.5)
         self._write_wav("voicelines/clip2.wav", duration_seconds=0.5)
         self.manager.save_chunks([
@@ -485,7 +612,11 @@ class MergeAudioTests(unittest.TestCase):
         finally:
             self.manager._normalize_audio_file = original_normalize
 
-        self.assertTrue(success)
+        self.assertTrue(
+            success,
+            "Merge audio test requires real MP3 concat success. "
+            + self.NEVER_STUB_MP3_CONCAT_NOTE,
+        )
         self.assertEqual(output_filename, "cloned_audiobook.mp3")
         self.assertTrue(os.path.exists(os.path.join(self.root_dir, output_filename)))
         self.assertGreater(os.path.getsize(os.path.join(self.root_dir, output_filename)), 0)
@@ -530,6 +661,7 @@ class MergeAudioTests(unittest.TestCase):
         self.assertIn("Audio normalization failed", message)
 
     def test_optimized_export_creates_ordered_zip_parts(self):
+        self._assert_real_mp3_concat_path()
         with open(os.path.join(self.root_dir, "state.json"), "w", encoding="utf-8") as f:
             json.dump({"input_file_path": os.path.join(self.root_dir, "My Great Book.txt")}, f)
 
@@ -573,7 +705,11 @@ class MergeAudioTests(unittest.TestCase):
         finally:
             self.manager._normalize_audio_file = original_normalize
 
-        self.assertTrue(success)
+        self.assertTrue(
+            success,
+            "Optimized export ordering test requires real MP3 concat success. "
+            + self.NEVER_STUB_MP3_CONCAT_NOTE,
+        )
         self.assertEqual(output_filename, "optimized_audiobook.zip")
         zip_path = os.path.join(self.root_dir, output_filename)
         self.assertTrue(os.path.exists(zip_path))
@@ -585,7 +721,7 @@ class MergeAudioTests(unittest.TestCase):
             self.assertEqual(stems, expected_stems)
             self.assertTrue(all(name.endswith((".mp3", ".wav")) for name in names))
 
-    def test_optimized_export_falls_back_to_wav_when_mp3_encoding_fails(self):
+    def test_optimized_export_surfaces_mp3_failure_without_wav_fallback(self):
         with open(os.path.join(self.root_dir, "state.json"), "w", encoding="utf-8") as f:
             json.dump({"input_file_path": os.path.join(self.root_dir, "Fallback Book.txt")}, f)
 
@@ -629,11 +765,7 @@ class MergeAudioTests(unittest.TestCase):
             calls.append((os.path.basename(output_path), tuple(codec_args)))
             if tuple(codec_args) == ("-c:a", "libmp3lame", "-q:a", "2"):
                 return False, "simulated mp3 failure"
-
-            sample_rate = 24000
-            samples = np.zeros(int(sample_rate * 0.25), dtype=np.float32)
-            sf.write(output_path, samples, sample_rate)
-            return True, output_path
+            raise AssertionError("WAV fallback should not be attempted when MP3 concat fails")
 
         self.manager._run_ffmpeg_concat = fake_run_ffmpeg_concat
         original_normalize = self.manager._normalize_audio_file
@@ -644,19 +776,15 @@ class MergeAudioTests(unittest.TestCase):
             self.manager._run_ffmpeg_concat = original_run
             self.manager._normalize_audio_file = original_normalize
 
-        self.assertTrue(success)
-        self.assertEqual(output_filename, "optimized_audiobook.zip")
-        zip_path = os.path.join(self.root_dir, output_filename)
-        self.assertTrue(os.path.exists(zip_path))
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            names = zf.namelist()
-            self.assertTrue(names)
-            self.assertTrue(all(name.startswith("fallback-book-") for name in names))
-            self.assertTrue(all(name.endswith(".wav") for name in names))
+        self.assertFalse(success)
+        self.assertIn("MP3 concat export failed", output_filename)
+        zip_path = os.path.join(self.root_dir, "optimized_audiobook.zip")
+        self.assertFalse(os.path.exists(zip_path))
         self.assertTrue(any(codec_args == ("-c:a", "libmp3lame", "-q:a", "2") for _, codec_args in calls))
-        self.assertTrue(any(codec_args == ("-c:a", "pcm_s16le") for _, codec_args in calls))
+        self.assertFalse(any(codec_args == ("-c:a", "pcm_s16le") for _, codec_args in calls))
 
     def test_optimized_export_normalizes_each_part(self):
+        self._assert_real_mp3_concat_path()
         with open(os.path.join(self.root_dir, "state.json"), "w", encoding="utf-8") as f:
             json.dump({"input_file_path": os.path.join(self.root_dir, "Normalize Parts Book.txt")}, f)
 
@@ -705,7 +833,11 @@ class MergeAudioTests(unittest.TestCase):
         finally:
             self.manager._normalize_audio_file = original_normalize
 
-        self.assertTrue(success)
+        self.assertTrue(
+            success,
+            "Optimized export normalization test requires real MP3 concat success. "
+            + self.NEVER_STUB_MP3_CONCAT_NOTE,
+        )
         self.assertEqual(output_filename, "optimized_audiobook.zip")
         self.assertGreaterEqual(len(normalize_calls), 2)
         self.assertTrue(all(name.startswith("normalize-parts-book-") for name in normalize_calls))
@@ -785,6 +917,40 @@ class MergeAudioTests(unittest.TestCase):
         self.assertEqual(trimmed_path, timeline_second[0]["full_path"])
         self.assertEqual(mtime_first, os.path.getmtime(trimmed_path))
 
+    def test_trimmed_cache_only_cuts_boundaries_without_altering_samples(self):
+        self._write_tone_with_silence("voicelines/declick.wav", lead_s=0.12, tone_s=0.25, tail_s=0.12, hz=550)
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "speaker": "Narrator",
+                "text": "Trim edge fade check.",
+                "instruct": "",
+                "chapter": "Chapter 1",
+                "status": "done",
+                "audio_path": "voicelines/declick.wav",
+            },
+        ])
+
+        export_config = SimpleNamespace(
+            trim_clip_silence_enabled=True,
+            trim_silence_threshold_dbfs=-45.0,
+            trim_min_silence_len_ms=50,
+            trim_keep_padding_ms=0,
+        )
+        timeline = self.manager._collect_merge_timeline(export_config=export_config)
+        trimmed = AudioSegment.from_file(timeline[0]["full_path"])
+        source = AudioSegment.from_file(os.path.join(self.root_dir, "voicelines/declick.wav"))
+        expected, _, _, changed = self.manager._trim_audio_segment_boundaries(
+            source,
+            self.manager._resolve_trim_config(export_config),
+        )
+        self.assertTrue(changed)
+
+        expected_samples = np.array(expected.get_array_of_samples(), dtype=np.int64)
+        actual_samples = np.array(trimmed.get_array_of_samples(), dtype=np.int64)
+        self.assertEqual(expected_samples.shape, actual_samples.shape)
+        self.assertEqual(int(np.max(np.abs(expected_samples - actual_samples))), 0)
+
     def test_trim_disabled_uses_original_audio_paths(self):
         original_path = self._write_tone_with_silence("voicelines/no_trim.wav")
         self.manager.save_chunks([
@@ -803,6 +969,158 @@ class MergeAudioTests(unittest.TestCase):
         timeline = self.manager._collect_merge_timeline(export_config=export_config)
         self.assertEqual(len(timeline), 1)
         self.assertEqual(timeline[0]["full_path"], original_path)
+
+    def test_trim_disabled_via_config_ignores_existing_trim_cache(self):
+        original_path = self._write_tone_with_silence("voicelines/no_trim_from_config.wav")
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "speaker": "Narrator",
+                "text": "No trim from config.",
+                "instruct": "",
+                "chapter": "Chapter 1",
+                "status": "done",
+                "audio_path": "voicelines/no_trim_from_config.wav",
+            },
+        ])
+
+        enabled = SimpleNamespace(
+            trim_clip_silence_enabled=True,
+            trim_silence_threshold_dbfs=-45.0,
+            trim_min_silence_len_ms=80,
+            trim_keep_padding_ms=20,
+        )
+        timeline_enabled = self.manager._collect_merge_timeline(export_config=enabled)
+        self.assertIn(f"voicelines{os.sep}.trim_cache{os.sep}", timeline_enabled[0]["full_path"])
+
+        with open(os.path.join(self.root_dir, "app", "config.json"), "w", encoding="utf-8") as f:
+            json.dump({"export": {"trim_clip_silence_enabled": "false"}}, f)
+
+        timeline_disabled = self.manager._collect_merge_timeline(export_config=None)
+        self.assertEqual(timeline_disabled[0]["full_path"], original_path)
+
+    def test_trim_real_title_clip_does_not_gain_loud_tail(self):
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        sample_rel = "voicelines/voiceline_e68a7990dac94b1db5679449c69ccfb8_narrator.mp3"
+        sample_full = os.path.join(repo_root, sample_rel)
+        if not os.path.exists(sample_full):
+            self.skipTest(f"Real sample clip not found: {sample_rel}")
+
+        manager = ProjectManager(repo_root)
+        trim_cfg = manager._resolve_trim_config(SimpleNamespace(
+            trim_clip_silence_enabled=True,
+            trim_silence_threshold_dbfs=-50.0,
+            trim_min_silence_len_ms=80,
+            trim_keep_padding_ms=0,
+        ))
+
+        # Force a recompute so this test verifies the current trim behavior.
+        cache_key = manager._build_trim_cache_key(sample_full, trim_cfg)
+        cache_path = os.path.join(manager._trim_cache_dir(), f"{cache_key}.wav")
+        if os.path.exists(cache_path):
+            os.remove(cache_path)
+
+        trimmed_path, trim_info = manager._resolve_export_audio_path(sample_full, trim_cfg)
+        self.assertTrue(trim_info["trimmed"], "Expected sample clip to be trimmed for this regression test")
+        self.assertGreater(trim_info["tail_ms"], 0, "Expected tail silence to be removed in this regression test")
+
+        original = AudioSegment.from_file(sample_full)
+        trimmed = AudioSegment.from_file(trimmed_path)
+
+        original_samples = np.array(original.get_array_of_samples(), dtype=np.float64)
+        trimmed_samples = np.array(trimmed.get_array_of_samples(), dtype=np.float64)
+        if original.channels > 1:
+            original_samples = original_samples.reshape((-1, original.channels)).mean(axis=1)
+        if trimmed.channels > 1:
+            trimmed_samples = trimmed_samples.reshape((-1, trimmed.channels)).mean(axis=1)
+
+        original_terminal_level = float(abs(original_samples[-1]))
+        trimmed_terminal_level = float(abs(trimmed_samples[-1]))
+
+        # Regression guard: the final sample level of the trimmed clip should stay
+        # near the true final level of the original clip (no hard-edge endpoint pop).
+        self.assertLessEqual(
+            trimmed_terminal_level,
+            max(20.0, original_terminal_level * 8.0),
+            (
+                f"Trimmed terminal sample too loud for real clip "
+                f"(original terminal {original_terminal_level:.2f}, trimmed terminal {trimmed_terminal_level:.2f})"
+            ),
+        )
+
+    def test_trim_guard_discards_longer_than_original_result(self):
+        original_path = self._write_tone_with_silence("voicelines/trim_guard.wav", lead_s=0.05, tone_s=0.20, tail_s=0.05)
+        source = AudioSegment.from_file(original_path)
+
+        injected_longer = source + AudioSegment.silent(duration=50, frame_rate=source.frame_rate)
+        trim_cfg = self.manager._resolve_trim_config(SimpleNamespace(
+            trim_clip_silence_enabled=True,
+            trim_silence_threshold_dbfs=-45.0,
+            trim_min_silence_len_ms=50,
+            trim_keep_padding_ms=0,
+        ))
+        cache_key = self.manager._build_trim_cache_key(original_path, trim_cfg)
+        cache_path = os.path.join(self.manager._trim_cache_dir(), f"{cache_key}.wav")
+        if os.path.exists(cache_path):
+            os.remove(cache_path)
+
+        with patch.object(self.manager, "_trim_audio_segment_boundaries", return_value=(injected_longer, 0, 0, True)):
+            with patch("builtins.print") as print_mock:
+                resolved_path, info = self.manager._resolve_export_audio_path(original_path, trim_cfg)
+
+        self.assertEqual(resolved_path, cache_path)
+        self.assertTrue(os.path.exists(resolved_path))
+        resolved_segment = AudioSegment.from_file(resolved_path)
+        self.assertEqual(len(resolved_segment), len(source))
+        self.assertFalse(info["trimmed"])
+        self.assertEqual(info["lead_ms"], 0)
+        self.assertEqual(info["tail_ms"], 0)
+        self.assertGreaterEqual(print_mock.call_count, 1)
+        printed = " ".join(str(arg) for arg in print_mock.call_args[0])
+        self.assertIn("Trim result longer than original", printed)
+
+    def test_trim_real_clip_refines_start_edge_for_assembly(self):
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        sample_rel = "voicelines/voiceline_f7a3ab93afc94813b75c02d2240cd6b3_narrator.mp3"
+        sample_full = os.path.join(repo_root, sample_rel)
+        if not os.path.exists(sample_full):
+            self.skipTest(f"Real sample clip not found: {sample_rel}")
+
+        manager = ProjectManager(repo_root)
+        trim_cfg = manager._resolve_trim_config(SimpleNamespace(
+            trim_clip_silence_enabled=True,
+            trim_silence_threshold_dbfs=-50.0,
+            trim_min_silence_len_ms=80,
+            trim_keep_padding_ms=0,
+        ))
+        cache_key = manager._build_trim_cache_key(sample_full, trim_cfg)
+        cache_path = os.path.join(manager._trim_cache_dir(), f"{cache_key}.wav")
+        if os.path.exists(cache_path):
+            os.remove(cache_path)
+
+        source = AudioSegment.from_file(sample_full)
+        source_samples = np.array(source.get_array_of_samples(), dtype=np.int64)
+        if source.channels > 1:
+            source_samples = source_samples.reshape((-1, source.channels)).mean(axis=1).astype(np.int64)
+        source_start = abs(int(source_samples[0]))
+
+        trimmed_path, _trim_info = manager._resolve_export_audio_path(sample_full, trim_cfg)
+        trimmed = AudioSegment.from_file(trimmed_path)
+        trimmed_samples = np.array(trimmed.get_array_of_samples(), dtype=np.int64)
+        if trimmed.channels > 1:
+            trimmed_samples = trimmed_samples.reshape((-1, trimmed.channels)).mean(axis=1).astype(np.int64)
+        trimmed_start = abs(int(trimmed_samples[0]))
+
+        self.assertLess(
+            trimmed_start,
+            source_start,
+            f"Expected trim edge refinement to lower start sample level (source={source_start}, trimmed={trimmed_start})",
+        )
+        self.assertLessEqual(
+            trimmed_start,
+            64,
+            f"Expected trimmed start sample to be near zero for smoother assembly (got {trimmed_start})",
+        )
 
     def test_repair_legacy_chunk_order_rewrites_chunks_from_editor_order(self):
         original = [

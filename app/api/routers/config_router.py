@@ -1,9 +1,111 @@
 from fastapi import APIRouter
 from .. import shared as _shared
+from factory_prompt_defaults import load_factory_default_prompts
 
 globals().update({k: v for k, v in vars(_shared).items() if not k.startswith("__")})
 
 router = APIRouter()
+
+_PROMPT_SEPARATOR = "\n\n---SEPARATOR---\n\n"
+_DEFAULT_PROMPTS_PATH = os.path.join(ROOT_DIR, "default_prompts.txt")
+_REVIEW_PROMPTS_PATH = os.path.join(ROOT_DIR, "review_prompts.txt")
+_ATTRIBUTION_PROMPTS_PATH = os.path.join(ROOT_DIR, "attribution_prompts.txt")
+_VOICE_PROMPT_PATH = os.path.join(ROOT_DIR, "voice_prompt.txt")
+_DIALOGUE_PROMPT_PATH = os.path.join(ROOT_DIR, "dialogue_identification_system_prompt.txt")
+_TEMPERAMENT_PROMPT_PATH = os.path.join(ROOT_DIR, "temperament_extraction_system_prompt.txt")
+
+
+def _write_prompt_pair(path: str, system_prompt: str, user_prompt: str):
+    content = f"{(system_prompt or '').strip()}{_PROMPT_SEPARATOR}{(user_prompt or '').strip()}\n"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def _write_single_prompt(path: str, prompt: str):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"{(prompt or '').strip()}\n")
+
+
+def _sync_prompt_files(prompts: dict, existing_prompts: dict):
+    merged = dict(existing_prompts or {})
+    for key, value in (prompts or {}).items():
+        if value is not None:
+            merged[key] = value
+
+    system_prompt = (merged.get("system_prompt") or "").strip()
+    user_prompt = (merged.get("user_prompt") or "").strip()
+    if not system_prompt or not user_prompt:
+        try:
+            default_sys, default_usr = load_default_prompts()
+            system_prompt = system_prompt or default_sys
+            user_prompt = user_prompt or default_usr
+        except RuntimeError:
+            pass
+
+    review_system_prompt = (merged.get("review_system_prompt") or "").strip()
+    review_user_prompt = (merged.get("review_user_prompt") or "").strip()
+    if not review_system_prompt or not review_user_prompt:
+        try:
+            review_sys_default, review_usr_default = load_review_prompts()
+            review_system_prompt = review_system_prompt or review_sys_default
+            review_user_prompt = review_user_prompt or review_usr_default
+        except RuntimeError:
+            pass
+
+    attribution_system_prompt = (merged.get("attribution_system_prompt") or "").strip()
+    attribution_user_prompt = (merged.get("attribution_user_prompt") or "").strip()
+    if not attribution_system_prompt or not attribution_user_prompt:
+        try:
+            attr_sys_default, attr_usr_default = load_attribution_prompts()
+            attribution_system_prompt = attribution_system_prompt or attr_sys_default
+            attribution_user_prompt = attribution_user_prompt or attr_usr_default
+        except RuntimeError:
+            pass
+
+    voice_prompt = (merged.get("voice_prompt") or "").strip()
+    if not voice_prompt:
+        try:
+            voice_prompt = load_voice_prompt()
+        except RuntimeError:
+            voice_prompt = ""
+
+    dialogue_prompt = (merged.get("dialogue_identification_system_prompt") or "").strip()
+    if not dialogue_prompt:
+        try:
+            dialogue_prompt = load_dialogue_identification_prompt()
+        except RuntimeError:
+            dialogue_prompt = DEFAULT_DIALOGUE_IDENTIFICATION_PROMPT
+
+    temperament_prompt = (merged.get("temperament_extraction_system_prompt") or "").strip()
+    if not temperament_prompt:
+        try:
+            temperament_prompt = load_temperament_extraction_prompt()
+        except RuntimeError:
+            temperament_prompt = DEFAULT_TEMPERAMENT_EXTRACTION_PROMPT
+
+    if system_prompt and user_prompt:
+        _write_prompt_pair(_DEFAULT_PROMPTS_PATH, system_prompt, user_prompt)
+        merged["system_prompt"] = system_prompt
+        merged["user_prompt"] = user_prompt
+    if review_system_prompt and review_user_prompt:
+        _write_prompt_pair(_REVIEW_PROMPTS_PATH, review_system_prompt, review_user_prompt)
+        merged["review_system_prompt"] = review_system_prompt
+        merged["review_user_prompt"] = review_user_prompt
+    if attribution_system_prompt and attribution_user_prompt:
+        _write_prompt_pair(_ATTRIBUTION_PROMPTS_PATH, attribution_system_prompt, attribution_user_prompt)
+        merged["attribution_system_prompt"] = attribution_system_prompt
+        merged["attribution_user_prompt"] = attribution_user_prompt
+    if voice_prompt:
+        _write_single_prompt(_VOICE_PROMPT_PATH, voice_prompt)
+        merged["voice_prompt"] = voice_prompt
+    if dialogue_prompt:
+        _write_single_prompt(_DIALOGUE_PROMPT_PATH, dialogue_prompt)
+        merged["dialogue_identification_system_prompt"] = dialogue_prompt
+    if temperament_prompt:
+        _write_single_prompt(_TEMPERAMENT_PROMPT_PATH, temperament_prompt)
+        merged["temperament_extraction_system_prompt"] = temperament_prompt
+
+    return merged
 
 @router.get("/")
 async def read_index():
@@ -111,8 +213,14 @@ async def get_config():
             prompts["voice_prompt"] = load_voice_prompt()
         except RuntimeError:
             pass
-        prompts["dialogue_identification_system_prompt"] = DEFAULT_DIALOGUE_IDENTIFICATION_PROMPT
-        prompts["temperament_extraction_system_prompt"] = DEFAULT_TEMPERAMENT_EXTRACTION_PROMPT
+        try:
+            prompts["dialogue_identification_system_prompt"] = load_dialogue_identification_prompt()
+        except RuntimeError:
+            prompts["dialogue_identification_system_prompt"] = DEFAULT_DIALOGUE_IDENTIFICATION_PROMPT
+        try:
+            prompts["temperament_extraction_system_prompt"] = load_temperament_extraction_prompt()
+        except RuntimeError:
+            prompts["temperament_extraction_system_prompt"] = DEFAULT_TEMPERAMENT_EXTRACTION_PROMPT
         config["prompts"] = prompts
         config_changed = True
     else:
@@ -153,10 +261,16 @@ async def get_config():
             except RuntimeError:
                 pass
         if not config["prompts"].get("dialogue_identification_system_prompt"):
-            config["prompts"]["dialogue_identification_system_prompt"] = DEFAULT_DIALOGUE_IDENTIFICATION_PROMPT
+            try:
+                config["prompts"]["dialogue_identification_system_prompt"] = load_dialogue_identification_prompt()
+            except RuntimeError:
+                config["prompts"]["dialogue_identification_system_prompt"] = DEFAULT_DIALOGUE_IDENTIFICATION_PROMPT
             config_changed = True
         if not config["prompts"].get("temperament_extraction_system_prompt"):
-            config["prompts"]["temperament_extraction_system_prompt"] = DEFAULT_TEMPERAMENT_EXTRACTION_PROMPT
+            try:
+                config["prompts"]["temperament_extraction_system_prompt"] = load_temperament_extraction_prompt()
+            except RuntimeError:
+                config["prompts"]["temperament_extraction_system_prompt"] = DEFAULT_TEMPERAMENT_EXTRACTION_PROMPT
             config_changed = True
 
     # Include current input file info if available
@@ -245,9 +359,20 @@ async def get_default_prompts():
         result["voice_prompt"] = load_voice_prompt()
     except RuntimeError:
         pass
-    result["dialogue_identification_system_prompt"] = DEFAULT_DIALOGUE_IDENTIFICATION_PROMPT
-    result["temperament_extraction_system_prompt"] = DEFAULT_TEMPERAMENT_EXTRACTION_PROMPT
+    try:
+        result["dialogue_identification_system_prompt"] = load_dialogue_identification_prompt()
+    except RuntimeError:
+        result["dialogue_identification_system_prompt"] = DEFAULT_DIALOGUE_IDENTIFICATION_PROMPT
+    try:
+        result["temperament_extraction_system_prompt"] = load_temperament_extraction_prompt()
+    except RuntimeError:
+        result["temperament_extraction_system_prompt"] = DEFAULT_TEMPERAMENT_EXTRACTION_PROMPT
     return result
+
+
+@router.get("/api/factory_default_prompts")
+async def get_factory_default_prompts():
+    return load_factory_default_prompts()
 
 @router.post("/api/config")
 async def save_config(config: AppConfig):
@@ -263,15 +388,7 @@ async def save_config(config: AppConfig):
 
     prompts = payload.get("prompts") or {}
     existing_prompts = existing_config.get("prompts") or {}
-    if prompts.get("voice_prompt") is None:
-        if existing_prompts.get("voice_prompt") is not None:
-            prompts["voice_prompt"] = existing_prompts.get("voice_prompt")
-        else:
-            try:
-                prompts["voice_prompt"] = load_voice_prompt()
-            except RuntimeError:
-                pass
-    payload["prompts"] = prompts
+    payload["prompts"] = _sync_prompt_files(prompts, existing_prompts)
     if payload.get("ui") is None and isinstance(existing_config.get("ui"), dict):
         payload["ui"] = existing_config.get("ui")
 
@@ -280,6 +397,32 @@ async def save_config(config: AppConfig):
     # Reset engine so it picks up new TTS settings on next use
     project_manager.engine = None
     return {"status": "saved"}
+
+
+@router.post("/api/config/export")
+async def save_export_config(export: ExportConfig):
+    payload = export.model_dump()
+    existing_config = {}
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                existing_config = json.load(f)
+        except (json.JSONDecodeError, ValueError):
+            existing_config = {}
+
+    if not isinstance(existing_config, dict):
+        existing_config = {}
+    existing_export = existing_config.get("export")
+    if not isinstance(existing_export, dict):
+        existing_export = {}
+
+    existing_export.update(payload)
+    existing_config["export"] = existing_export
+
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(existing_config, f, indent=2, ensure_ascii=False)
+
+    return {"status": "saved", "export": existing_export}
 
 @router.post("/api/config/preferences")
 async def save_preferences(update: PreferencesUpdate):
@@ -344,6 +487,7 @@ async def upload_file(file: UploadFile = File(...)):
     state["input_file_path"] = file_path
     state["render_prep_complete"] = False
     state.pop(PROCESSING_STAGE_MARKERS_KEY, None)
+    state.pop(NEW_MODE_STAGE_MARKERS_KEY, None)
     with open(state_path, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, ensure_ascii=False)
 
@@ -368,4 +512,3 @@ async def upload_file(file: UploadFile = File(...)):
 @router.get("/api/script_ingestion/preflight")
 async def get_script_ingestion_preflight():
     return _script_ingestion_preflight_summary()
-

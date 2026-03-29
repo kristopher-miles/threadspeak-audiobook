@@ -184,10 +184,26 @@ async def save_script(request: ScriptSaveRequest):
 class ScriptLoadRequest(BaseModel):
     name: str
 
+
+def _audio_generation_active_for_script_load() -> bool:
+    """Return whether audio generation/merge is truly active.
+
+    This recomputes audio state from queue/current-job truth and heals stale
+    `process_state["audio"]["running"]` after reset/cancel races.
+    """
+    with audio_queue_lock:
+        _refresh_audio_process_state_locked(persist=False)
+        return bool(
+            process_state["audio"].get("merge_running")
+            or audio_current_job is not None
+            or audio_queue
+        )
+
+
 @router.post("/api/scripts/load")
 async def load_script(request: ScriptLoadRequest):
     """Load a saved script, replacing the current annotated_script.json and chunks."""
-    if process_state["audio"]["running"]:
+    if _audio_generation_active_for_script_load():
         raise HTTPException(status_code=409, detail="Cannot load a script while audio generation is running.")
 
     src = os.path.join(SCRIPTS_DIR, f"{request.name}.json")
@@ -215,6 +231,9 @@ async def load_script(request: ScriptLoadRequest):
     state["render_prep_complete"] = False
     state["loaded_script_name"] = request.name
     state[PROCESSING_STAGE_MARKERS_KEY] = {"script": {"completed_at": time.time()}}
+    state[NEW_MODE_STAGE_MARKERS_KEY] = {
+        "create_script": {"completed_at": time.time()},
+    }
     _save_project_state_payload(state)
 
     logger.info(f"Script '{request.name}' loaded")
@@ -235,4 +254,3 @@ async def delete_script(name: str):
 
     logger.info(f"Script '{name}' deleted")
     return {"status": "deleted", "name": name}
-
