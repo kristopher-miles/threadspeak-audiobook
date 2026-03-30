@@ -30,10 +30,11 @@
                 // Trigger tab specific loads
                 if (nextTab === 'editor') {
                     syncEditorChunksOnNavigation()
-                        .catch(err => console.error('Editor sync error', err))
-                        .finally(() => {
-                            loadChunks();
-                        });
+                        .then((result) => {
+                            const needsFullRefresh = !Array.isArray(cachedChunks) || cachedChunks.length === 0 || !!result?.synced;
+                            loadChunks(needsFullRefresh);
+                        })
+                        .catch(err => console.error('Editor sync error', err));
                     refreshAudioQueueUI().catch(err => console.error('Audio queue refresh error', err));
                     ensureAudioQueuePolling();
                 } else if (nextTab === 'voices') {

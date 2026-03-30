@@ -44,6 +44,15 @@ async def get_chunks():
     return chunks
 
 
+@router.get("/api/chunks/view")
+async def get_chunks_view(chapter: Optional[str] = None):
+    chunks = project_manager.load_chunks()
+    chapter = (chapter or "").strip()
+    if chapter:
+        chunks = [chunk for chunk in chunks if (chunk.get("chapter") or "").strip() == chapter]
+    return chunks
+
+
 @router.post("/api/chunks/sync_from_script_if_stale")
 async def sync_chunks_from_script_if_stale():
     # Never rewrite chunks while audio generation is active; doing so can clear

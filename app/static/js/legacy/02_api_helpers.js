@@ -59,8 +59,10 @@
                 if (result?.synced) {
                     showToast(`Editor refreshed from the latest script (${result.chunk_count || 0} chunks).`, 'info', 3500);
                 }
+                return result;
             } catch (e) {
                 console.error('Failed to sync editor chunks from script:', e);
+                return null;
             }
         }
 
@@ -168,4 +170,3 @@
                 console.warn('Failed to lock generation mode', e);
             }
         }
-

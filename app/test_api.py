@@ -733,6 +733,28 @@ def test_get_chunks():
             "instruct": data[0].get("instruct", ""),
             "speaker": data[0].get("speaker", ""),
         }
+        shared["chunk0_chapter"] = (data[0].get("chapter") or "").strip()
+
+
+def test_get_chunks_view():
+    r = get("/api/chunks/view")
+    assert_status(r, 200)
+    data = r.json()
+    if not isinstance(data, list):
+        raise TestFailure(f"Expected list, got {type(data).__name__}")
+
+    if shared.get("has_chunks"):
+        if not data:
+            raise TestFailure("Expected visible chunk list to be populated")
+        chapter = shared.get("chunk0_chapter")
+        if chapter:
+            r = get("/api/chunks/view", params={"chapter": chapter})
+            assert_status(r, 200)
+            scoped = r.json()
+            if not isinstance(scoped, list):
+                raise TestFailure(f"Expected list, got {type(scoped).__name__}")
+            if any((chunk.get("chapter") or "").strip() != chapter for chunk in scoped):
+                raise TestFailure(f"Chapter-scoped view returned chunks outside {chapter!r}")
 
 
 def test_update_chunk():

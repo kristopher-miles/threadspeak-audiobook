@@ -237,7 +237,7 @@
             await flushPendingEditorChunkSaves().catch(err => console.error('Failed to flush editor saves before chapter change:', err));
             selectedEditorChapter = chapterId || WHOLE_PROJECT_CHAPTER_ID;
             stopSequence();
-            await loadChunks(true);
+            await loadChunks(false);
         };
 
         window.changeEditorScope = () => {
@@ -288,6 +288,25 @@
                 return chunks;
             }
             return chunks.filter(chunk => getChunkChapterName(chunk) === selectedProofreadChapter);
+        }
+
+        function mergeChunkSnapshots(existingChunks, freshChunks) {
+            const nextByRef = new Map((freshChunks || []).map(chunk => [getChunkRef(chunk), chunk]));
+            const existingRefs = new Set();
+            const merged = (existingChunks || []).map(chunk => {
+                const ref = getChunkRef(chunk);
+                existingRefs.add(ref);
+                return nextByRef.get(ref) || chunk;
+            });
+
+            (freshChunks || []).forEach(chunk => {
+                const ref = getChunkRef(chunk);
+                if (!existingRefs.has(ref)) {
+                    merged.push(chunk);
+                }
+            });
+
+            return merged;
         }
 
         function syncProofreadChapterState(chunks) {
@@ -663,6 +682,10 @@
 
         window.changeProofreadChapter = async (chapterId) => {
             selectedProofreadChapter = chapterId || WHOLE_PROJECT_CHAPTER_ID;
+            if (!Array.isArray(cachedChunks) || cachedChunks.length === 0) {
+                await loadChunks(true);
+                return;
+            }
             renderProofreadTable(cachedChunks);
             syncProofreadChapterState(cachedChunks);
             renderProofreadTaskStatus(await API.get('/api/status/proofread'));
@@ -671,7 +694,7 @@
         async function jumpToNextProofreadFailure(afterChunkRef) {
             let chunks = Array.isArray(cachedChunks) ? cachedChunks : [];
             if (!chunks.length) {
-                chunks = await API.get('/api/chunks');
+                chunks = await API.get('/api/chunks/view');
                 cachedChunks = chunks;
                 syncEditorChapterState(chunks);
                 syncProofreadChapterState(chunks);
@@ -696,7 +719,7 @@
 
             const chapterId = getChunkChapterName(nextFailure) || WHOLE_PROJECT_CHAPTER_ID;
             selectedProofreadChapter = chapterId;
-            renderProofreadTable(chunks);
+            renderProofreadTable(cachedChunks);
             syncProofreadChapterState(chunks);
 
             await new Promise(resolve => requestAnimationFrame(() => resolve()));
@@ -714,7 +737,7 @@
             try {
                 let chunks = Array.isArray(cachedChunks) ? cachedChunks : [];
                 if (!chunks.length) {
-                    chunks = await API.get('/api/chunks');
+                    chunks = await API.get('/api/chunks/view');
                     cachedChunks = chunks;
                     syncEditorChapterState(chunks);
                     syncProofreadChapterState(chunks);
@@ -731,7 +754,7 @@
 
                 const chapterId = getChunkChapterName(firstFailure) || WHOLE_PROJECT_CHAPTER_ID;
                 selectedProofreadChapter = chapterId;
-                renderProofreadTable(chunks);
+                renderProofreadTable(cachedChunks);
                 syncProofreadChapterState(chunks);
                 renderProofreadTaskStatus(await API.get('/api/status/proofread'));
 
@@ -870,7 +893,7 @@
         window.editProofreadChunk = async (chunkRef) => {
             try {
                 const chunk = (cachedChunks || []).find(candidate => getChunkRef(candidate) === String(chunkRef))
-                    || (await API.get('/api/chunks')).find(candidate => getChunkRef(candidate) === String(chunkRef));
+                    || (await API.get('/api/chunks/view')).find(candidate => getChunkRef(candidate) === String(chunkRef));
                 if (!chunk) {
                     showToast('Could not find that clip in the editor.', 'warning');
                     return;
@@ -1032,7 +1055,7 @@
         }
 
         async function focusChunkInEditor(chunkId) {
-            await loadChunks(true);
+            await loadChunks(false);
             const row = document.querySelector(`tr[data-id="${chunkId}"]`);
             if (!row) return false;
             document.querySelectorAll('tr').forEach(r => r.classList.remove('table-primary'));
@@ -1043,7 +1066,7 @@
 
         window.jumpToFirstEditorError = async () => {
             try {
-                const chunks = await API.get('/api/chunks');
+                const chunks = await API.get('/api/chunks/view');
                 const firstError = chunks.find(chunk => chunk.status === 'error');
                 if (!firstError) {
                     showToast('No errored segments found.', 'warning');
@@ -1128,8 +1151,16 @@
             }
 
             try {
-                const chunks = await API.get('/api/chunks');
-                if (chunks.length === 0) {
+                const useChapterScope = !forceFullRedraw
+                    && cachedChunks.length > 0
+                    && selectedEditorChapter !== WHOLE_PROJECT_CHAPTER_ID;
+                const chunks = await API.get(
+                    useChapterScope
+                        ? `/api/chunks/view?chapter=${encodeURIComponent(selectedEditorChapter)}`
+                        : '/api/chunks/view'
+                );
+                const mergedChunks = useChapterScope ? mergeChunkSnapshots(cachedChunks, chunks) : chunks;
+                if (mergedChunks.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="6" class="text-center">No chunks found. Please generate script first.</td></tr>';
                     cachedChunks = [];
                     cachedVisibleChunkIds = [];
@@ -1141,9 +1172,13 @@
                     return;
                 }
 
-                syncEditorChapterState(chunks);
-                syncProofreadChapterState(chunks);
-                const proofreadVisibleChunks = getProofreadVisibleChunks(chunks);
+                if (!useChapterScope || forceFullRedraw || cachedChunks.length === 0) {
+                    syncEditorChapterState(mergedChunks);
+                    syncProofreadChapterState(mergedChunks);
+                    refreshDictionaryCounts(mergedChunks);
+                }
+
+                const proofreadVisibleChunks = getProofreadVisibleChunks(mergedChunks);
                 const proofreadRowIds = Array.from(
                     document.querySelectorAll('#proofread-table-body tr[data-proofread-id]')
                 ).map(row => row.dataset.proofreadId || '');
@@ -1164,21 +1199,20 @@
                     });
                     cachedProofreadVisibleChunkIds = proofreadVisibleChunks.map(chunk => getChunkRef(chunk));
                 } else {
-                    renderProofreadTable(chunks);
+                    renderProofreadTable(mergedChunks);
                 }
                 renderProofreadTaskStatus(latestProofreadStatus || { running: false, progress: {}, logs: [] });
-                const visibleChunks = getVisibleChunks(chunks);
+                const visibleChunks = getVisibleChunks(mergedChunks);
                 const tableRowIds = Array.from(tbody.querySelectorAll('tr[data-id]')).map(row => row.dataset.id || '');
 
-                renderEditorProgressBar(chunks, latestAudioState);
+                renderEditorProgressBar(mergedChunks, latestAudioState);
 
                 // Skip redraw if playing audio (unless forced)
                 if (!forceFullRedraw && (isPlayingSequence || isAudioPlaying())) {
                     // Only update status badges and progress indicators
                     visibleChunks.forEach(chunk => updateChunkRow(chunk));
-                    cachedChunks = chunks;
+                    cachedChunks = mergedChunks;
                     cachedVisibleChunkIds = visibleChunks.map(chunk => getChunkRef(chunk));
-                    refreshDictionaryCounts(chunks);
 
                     return;
                 }
@@ -1239,9 +1273,8 @@
                     }).join('');
                 }
 
-                cachedChunks = chunks;
+                cachedChunks = mergedChunks;
                 cachedVisibleChunkIds = visibleChunks.map(chunk => getChunkRef(chunk));
-                refreshDictionaryCounts(chunks);
 
             } catch (e) {
                 console.error("Error loading chunks:", e);
@@ -1358,7 +1391,7 @@
             const button = document.getElementById('btn-repair-legacy-project');
             const chunks = Array.isArray(cachedChunks) && cachedChunks.length > 0
                 ? cachedChunks
-                : await API.get('/api/chunks');
+                : await API.get('/api/chunks/view');
 
             if (!chunks.length) {
                 showToast('No chunks are loaded to repair.', 'warning');
@@ -1476,7 +1509,7 @@
         async function repairLegacyProjectBeforeExport() {
             const chunks = Array.isArray(cachedChunks) && cachedChunks.length > 0
                 ? cachedChunks
-                : await API.get('/api/chunks');
+                : await API.get('/api/chunks/view');
 
             if (!chunks.length) {
                 throw new Error('No chunks are loaded to export.');
@@ -1694,6 +1727,17 @@
         const _editorChunkSaveTimers = new Map();
         const _editorChunkSavePromises = new Map();
         const EDITOR_CHUNK_SAVE_DEBOUNCE_MS = 350;
+        let _dictionaryCountsRefreshTimer = null;
+
+        function scheduleDictionaryCountsRefresh(chunks = cachedChunks) {
+            if (_dictionaryCountsRefreshTimer) {
+                clearTimeout(_dictionaryCountsRefreshTimer);
+            }
+            _dictionaryCountsRefreshTimer = setTimeout(() => {
+                _dictionaryCountsRefreshTimer = null;
+                refreshDictionaryCounts(chunks);
+            }, 250);
+        }
 
         function scheduleEditorChunkSave(id) {
             const key = String(id);
@@ -1758,7 +1802,7 @@
                 if (cached) {
                     Object.assign(cached, updatedChunk || data);
                     updateChunkRow(cached);
-                    refreshDictionaryCounts(cachedChunks);
+                    scheduleDictionaryCountsRefresh(cachedChunks);
                 }
             } catch (e) {
                 console.error("Update failed", e);
@@ -1789,7 +1833,7 @@
                 if (cached) {
                     Object.assign(cached, updatedChunk || data);
                     updateChunkRow(cached);
-                    refreshDictionaryCounts(cachedChunks);
+                    scheduleDictionaryCountsRefresh(cachedChunks);
                 }
                 console.log(`Chunk ${id} saved successfully`);
                 return updatedChunk;
@@ -1868,7 +1912,7 @@
                 if (!regenerateAll) {
                     await autoPrepareSegmentsBeforeRender();
                 }
-                const chunks = await API.get('/api/chunks');
+                const chunks = await API.get('/api/chunks/view');
                 const targetChunks = getActionTargetChunks(chunks);
                 const toProcess = (regenerateAll ? targetChunks : targetChunks.filter(c => c.status !== 'done'))
                     .filter(c => c.text && c.text.trim());
@@ -1912,7 +1956,7 @@
                 if (!regenerateAll) {
                     await autoPrepareSegmentsBeforeRender();
                 }
-                const chunks = await API.get('/api/chunks');
+                const chunks = await API.get('/api/chunks/view');
                 const targetChunks = getActionTargetChunks(chunks);
                 const toProcess = (regenerateAll ? targetChunks : targetChunks.filter(c => c.status !== 'done'))
                     .filter(c => c.text && c.text.trim());
