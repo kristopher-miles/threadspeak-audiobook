@@ -82,3 +82,8 @@ builtin_lora/builtin_*/
 
 # Dataset builder working directory
 dataset_builder/
+
+# Runtime artifacts (sanity clips, normalized audio, system prompts)
+*sanity*.wav
+*_sanity*_normalized.wav
+*_system_prompt.txt
