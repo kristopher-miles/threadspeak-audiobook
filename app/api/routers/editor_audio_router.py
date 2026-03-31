@@ -348,6 +348,18 @@ async def delete_chunk(index: str):
     deleted, chunks, restore_after_uid = result
     return {"status": "ok", "deleted": deleted, "total": len(chunks), "restore_after_uid": restore_after_uid}
 
+@router.delete("/api/chapters/{chapter_name}")
+async def delete_chapter_endpoint(chapter_name: str):
+    """Delete all chunks and audio files for a chapter."""
+    import urllib.parse
+    if not project_manager:
+        raise HTTPException(status_code=503, detail="Project not loaded")
+    result = project_manager.delete_chapter(urllib.parse.unquote(chapter_name))
+    if result is None:
+        raise HTTPException(status_code=404, detail="Chapter not found or has no chunks")
+    count, chunks = result
+    return {"status": "ok", "deleted_count": count}
+
 @router.post("/api/chunks/{index}/generate")
 async def generate_chunk_endpoint(index: str, background_tasks: BackgroundTasks):
     chunks = project_manager.load_chunks()

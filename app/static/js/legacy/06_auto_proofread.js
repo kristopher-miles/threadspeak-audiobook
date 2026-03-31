@@ -1,7 +1,7 @@
         // --- Auto Proofread toggle ---
         const AUTO_PROOFREAD_KEY = 'alexandria-auto-proofread';
         const savedAutoProofread = localStorage.getItem(AUTO_PROOFREAD_KEY);
-        let autoProofreadEnabled = savedAutoProofread === null ? true : savedAutoProofread === 'true';
+        let autoProofreadEnabled = savedAutoProofread === null ? false : savedAutoProofread === 'true';
         let clipsAtLastAutoProofread = 0;
 
         function _applyAutoProofreadBtn() {

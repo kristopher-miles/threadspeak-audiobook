@@ -39,6 +39,9 @@
                                  <input class="form-check-input" type="checkbox" id="editor-chapter-only" checked onchange="changeEditorScope()">
                                  <label class="form-check-label fw-semibold" for="editor-chapter-only">Chapter Only</label>
                              </div>
+                             <button class="btn btn-outline-danger btn-sm" onclick="deleteChapter()" id="btn-delete-chapter" title="Delete entire chapter and all its clips" style="display:none;">
+                                 <i class="fas fa-book-dead me-1"></i>Delete Chapter
+                             </button>
                          </div>
                          <div class="text-end">
                              <div id="editor-chapter-summary" class="text-muted small">Showing all segments.</div>

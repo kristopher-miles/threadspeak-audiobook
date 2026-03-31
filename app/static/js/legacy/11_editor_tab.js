@@ -161,6 +161,7 @@
                 : `Showing ${visibleCount} segments from ${selectedEditorChapter}.`;
             const scopeLabel = isChapterOnlyEnabled() ? `Batch actions target ${getActionScopeLabel()}.` : 'Batch actions target the entire book.';
             summary.textContent = `${viewLabel} ${scopeLabel}`;
+            updateDeleteChapterButtonVisibility();
         }
 
         function updateChunkRow(chunk) {
@@ -237,8 +238,10 @@
             await flushPendingEditorChunkSaves().catch(err => console.error('Failed to flush editor saves before chapter change:', err));
             selectedEditorChapter = chapterId || WHOLE_PROJECT_CHAPTER_ID;
             stopSequence();
+            updateDeleteChapterButtonVisibility();
             await loadChunks(false);
         };
+
 
         window.changeEditorScope = () => {
             syncEditorChapterState(cachedChunks);
@@ -1219,7 +1222,7 @@
                 `<button class="btn btn-sm btn-primary" onclick='generateChunk(${quotedChunkRef})'><i class="fas fa-play"></i> Gen</button>`;
 
             return `
-                <tr data-id="${escapeHtml(chunkRef)}" class="chunk-row">
+                <tr data-id="${escapeHtml(chunkRef)}" data-chapter="${escapeHtml(getChunkChapterName(chunk) || '')}" class="chunk-row">
                     <td class="text-center align-middle" style="white-space:nowrap;">
                         <button class="chunk-expand-btn" onclick="toggleChunkExpand(this)" title="Expand/collapse"><i class="fas fa-chevron-down"></i></button><button class="chunk-expand-btn" onclick='insertChunkAfter(${quotedChunkRef})' title="Insert line below"><i class="fas fa-plus"></i></button><button class="chunk-expand-btn" onclick='deleteChunk(${quotedChunkRef})' title="Delete line"><i class="fas fa-trash" style="color:#dc3545;"></i></button>
                     </td>
@@ -1736,6 +1739,79 @@
             } catch (e) {
                 showToast('Undo failed: ' + e.message, 'error');
             }
+        };
+
+        function updateDeleteChapterButtonVisibility() {
+            const btn = document.getElementById('btn-delete-chapter');
+            if (btn) {
+                btn.style.display = (selectedEditorChapter === WHOLE_PROJECT_CHAPTER_ID) ? 'none' : 'inline-block';
+            }
+        }
+
+        window.deleteChapter = async () => {
+            if (selectedEditorChapter === WHOLE_PROJECT_CHAPTER_ID) {
+                showToast('Cannot delete the entire project. Select a specific chapter first.', 'warning');
+                return;
+            }
+            const chapter = selectedEditorChapter;
+            if (!chapter) {
+                showToast('No chapter selected.', 'warning');
+                return;
+            }
+            const chapterChunks = cachedChunks.filter(c => getChunkChapterName(c) === chapter);
+            const chunkCount = chapterChunks.length;
+            if (chunkCount === 0) {
+                showToast('No clips found for this chapter.', 'warning');
+                return;
+            }
+            if (!await showConfirm(`Delete chapter "${chapter}" and all ${chunkCount} clips? This cannot be undone.`)) return;
+
+            const chapterChunkRefs = chapterChunks.map(c => getChunkRef(c));
+
+            // Optimistically remove rows from DOM
+            chapterChunkRefs.forEach(ref => {
+                pendingDeleteRefs.add(ref);
+                const editorRow = document.querySelector(`tr[data-id="${ref}"]`);
+                if (editorRow) editorRow.remove();
+                const proofreadRow = document.querySelector(`tr[data-proofread-id="${ref}"]`);
+                if (proofreadRow) proofreadRow.remove();
+            });
+
+            // Filter from caches
+            cachedChunks = cachedChunks.filter(c => getChunkChapterName(c) !== chapter);
+            cachedVisibleChunkIds = cachedVisibleChunkIds.filter(ref => !chapterChunkRefs.includes(ref));
+            if (typeof cachedProofreadVisibleChunkIds !== 'undefined') {
+                cachedProofreadVisibleChunkIds = cachedProofreadVisibleChunkIds.filter(ref => !chapterChunkRefs.includes(ref));
+            }
+
+            try {
+                const res = await fetch(`/api/chapters/${encodeURIComponent(chapter)}`, { method: 'DELETE' });
+                if (!res.ok) {
+                    const err = await res.json();
+                    showToast(err.detail || 'Failed to delete chapter.', 'error');
+                    await loadChunks(true);
+                    return;
+                }
+                const data = await res.json();
+                showToast(`Deleted chapter "${chapter}" (${data.deleted_count} clips).`, 'success');
+            } catch (e) {
+                showToast('Error deleting chapter: ' + e.message, 'error');
+                await loadChunks(true);
+                return;
+            }
+
+            chapterChunkRefs.forEach(ref => pendingDeleteRefs.delete(ref));
+
+            // Clean up undo state if the last deleted chunk was in this chapter
+            if (_lastDeleted && chapterChunkRefs.includes(String(_lastDeleted.chunk?.id))) {
+                _lastDeleted = null;
+                clearTimeout(_undoTimer);
+            }
+
+            // Re-sync chapter dropdown and button visibility
+            syncEditorChapterState(cachedChunks);
+            updateDeleteChapterButtonVisibility();
+            await loadChunks(true);
         };
 
         window.stopOthers = (id) => {

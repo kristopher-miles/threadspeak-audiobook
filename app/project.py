@@ -71,7 +71,7 @@ COMMON_PROOFREAD_ABBREVIATIONS = {
     "sr": ("senior",),
     "vs": ("versus",),
 }
-TRIM_CACHE_VERSION = 3
+TRIM_CACHE_VERSION = 4
 TRIM_SILENCE_THRESHOLD_DBFS = -50.0
 TRIM_MIN_SILENCE_LEN_MS = 150
 TRIM_KEEP_PADDING_MS = 40
@@ -578,11 +578,11 @@ class ProjectManager:
         cache_dir = self._trim_cache_dir()
         os.makedirs(cache_dir, exist_ok=True)
         cache_key = self._build_trim_cache_key(full_path, trim_cfg)
-        cache_path = os.path.join(cache_dir, f"{cache_key}.wav")
+        cache_path = os.path.join(cache_dir, f"{cache_key}.mp3")
 
         if os.path.exists(cache_path):
             try:
-                if os.path.getsize(cache_path) > 44:
+                if os.path.getsize(cache_path) > 0:
                     return cache_path, {"cache_hit": True, "trimmed": False, "lead_ms": 0, "tail_ms": 0}
             except OSError:
                 pass
@@ -604,10 +604,10 @@ class ProjectManager:
             tail_ms = 0
             changed = False
 
-        exported = trimmed_segment.export(cache_path, format="wav")
+        exported = trimmed_segment.export(cache_path, format="mp3", bitrate="128k")
         if hasattr(exported, "close"):
             exported.close()
-        if not os.path.exists(cache_path) or os.path.getsize(cache_path) <= 44:
+        if not os.path.exists(cache_path) or os.path.getsize(cache_path) <= 0:
             raise RuntimeError(f"Trim cache export produced invalid file: {cache_path}")
 
         return cache_path, {
@@ -664,7 +664,9 @@ class ProjectManager:
 
         last_prepare_bucket = -1
         prepare_started_at = merge_started_at or time.time()
+        clip_times = []
         for processed_index, (chunk, full_path) in enumerate(eligible_chunks, start=1):
+            clip_start = time.time()
             resolved_path = full_path
             if trim_cfg["enabled"]:
                 try:
@@ -679,6 +681,7 @@ class ProjectManager:
                 except Exception:
                     trim_stats["fallback_originals"] += 1
                     resolved_path = full_path
+            clip_times.append(time.time() - clip_start)
             item = {
                 "chunk": chunk,
                 "full_path": resolved_path,
@@ -698,7 +701,8 @@ class ProjectManager:
                     elapsed = max(0.0, time.time() - prepare_started_at)
                     rate = processed_index / elapsed if elapsed > 0 else 0.0
                     remaining_items = max(total_candidates - processed_index, 0)
-                    eta_seconds = (remaining_items / rate) if rate > 0 and remaining_items > 0 else 0.0
+                    avg_clip_s = sum(clip_times) / len(clip_times) if clip_times else 0.0
+                    eta_seconds = avg_clip_s * remaining_items
                     if trim_cfg["enabled"]:
                         chapter_label = (
                             f"Trimming clips: {int(round(percent_complete))}% "
@@ -709,6 +713,7 @@ class ProjectManager:
                             f"Indexing clips: {int(round(percent_complete))}% "
                             f"({processed_index}/{total_candidates}, {remaining_items} remaining)"
                         )
+                        eta_seconds = (remaining_items / rate) if rate > 0 and remaining_items > 0 else 0.0
                     progress_callback({
                         "stage": "preparing",
                         "chapter_index": 0,
@@ -725,6 +730,15 @@ class ProjectManager:
                         "eta_seconds": round(eta_seconds, 1),
                         "trim_enabled": bool(trim_cfg["enabled"]),
                     })
+                    if trim_cfg["enabled"]:
+                        eta_m, eta_s = divmod(int(eta_seconds), 60)
+                        eta_str = f"{eta_m}m{eta_s:02d}s" if eta_m else f"{eta_s}s"
+                        print(
+                            f"[trim] {processed_index}/{total_candidates} clips"
+                            f" — avg {avg_clip_s * 1000:.0f}ms/clip"
+                            f" — ETA {eta_str}",
+                            flush=True,
+                        )
                     last_prepare_bucket = progress_bucket
 
         if log_callback and trim_cfg["enabled"]:
@@ -4170,6 +4184,42 @@ class ProjectManager:
 
             self._atomic_json_write(chunks, self.chunks_path)
             return deleted, chunks, restore_after_uid
+
+    def delete_chapter(self, chapter_name):
+        """Delete all chunks belonging to a chapter and remove their audio files.
+        Returns (deleted_count, updated_chunks) or None on failure.
+        """
+        if not chapter_name or not isinstance(chapter_name, str) or not chapter_name.strip():
+            return None
+        chapter_name = chapter_name.strip()
+        with self._chunks_lock:
+            if not os.path.exists(self.chunks_path):
+                return None
+            with open(self.chunks_path, "r", encoding="utf-8") as f:
+                chunks = json.load(f)
+
+            deleted = [c for c in chunks if c.get("chapter") == chapter_name]
+            if not deleted:
+                return None
+            keep = [c for c in chunks if c.get("chapter") != chapter_name]
+
+            # Re-number all IDs
+            for i, chunk in enumerate(keep):
+                chunk["id"] = i
+
+            # Collect and delete audio files for deleted chunks
+            for chunk in deleted:
+                ap = chunk.get("audio_path")
+                if ap:
+                    full_ap = os.path.join(self.root_dir, ap)
+                    if os.path.exists(full_ap):
+                        try:
+                            os.remove(full_ap)
+                        except OSError:
+                            pass
+
+            self._atomic_json_write(keep, self.chunks_path)
+            return len(deleted), keep
 
     def restore_chunk(self, at_index, chunk_data, after_uid=None):
         """Re-insert a chunk at a specific index. Returns the updated chunk list."""
