@@ -5,7 +5,7 @@
                     <div class="d-flex flex-wrap gap-2 align-items-center">
                         <div class="input-group input-group-sm" style="width: 220px;">
                             <span class="input-group-text">Certainty</span>
-                            <input type="number" id="proofread-threshold" class="form-control" min="0" max="1" step="0.01" value="1.0" oninput="previewProofreadThreshold()" onchange="saveProofreadThreshold()">
+                            <input type="number" id="proofread-threshold" class="form-control" min="0" max="1" step="0.01" value="0.7" oninput="previewProofreadThreshold()" onchange="saveProofreadThreshold()">
                         </div>
                         <button class="btn btn-primary btn-sm" id="btn-proofread-sequence" onclick="startProofreadSequence()">
                             <i class="fas fa-spell-check me-1"></i>Proofread Sequence
@@ -15,6 +15,9 @@
                         </button>
                         <button class="btn btn-outline-secondary btn-sm" id="btn-proofread-discard-selection" onclick="discardProofreadSelection()">
                             <i class="fas fa-eraser me-1"></i>Discard Selection
+                        </button>
+                        <button class="btn btn-outline-secondary btn-sm" id="btn-proofread-regrade-book" onclick="regradeBook()">
+                            <i class="fas fa-sync-alt me-1"></i>Regrade Book
                         </button>
                         <button class="btn btn-outline-danger btn-sm" id="btn-proofread-clear-local" onclick="clearProofreadFailuresLocal()">
                             <i class="fas fa-trash me-1"></i>Clear Local Failures

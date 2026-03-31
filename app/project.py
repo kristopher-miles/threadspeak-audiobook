@@ -3941,8 +3941,6 @@ class ProjectManager:
                 ) as f:
                     tmp_path = f.name
                     json.dump(data, f, indent=2, ensure_ascii=False)
-                    f.flush()
-                    os.fsync(f.fileno())
                 os.replace(tmp_path, target_path)
                 return
             except OSError as e:
@@ -3962,7 +3960,7 @@ class ProjectManager:
     def _atomic_json_write(self, data, target_path, max_retries=5):
         self._atomic_json_write_raw(data, target_path, max_retries=max_retries)
         if os.path.abspath(target_path) == os.path.abspath(self.chunks_path):
-            self._update_chunks_backups(data)
+            threading.Thread(target=self._update_chunks_backups, args=(data,), daemon=True).start()
 
     def save_chunks(self, chunks):
         with self._chunks_lock:
@@ -4148,7 +4146,7 @@ class ProjectManager:
                 chunk["id"] = i
 
             self._atomic_json_write(chunks, self.chunks_path)
-            return chunks
+            return new_chunk, chunks
 
     def delete_chunk(self, chunk_ref):
         """Delete a chunk at the given index. Returns (deleted_chunk, updated_chunks) or None."""

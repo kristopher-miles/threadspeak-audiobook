@@ -82,8 +82,23 @@ if _this_module is not None and isinstance(_this_module, types.ModuleType):
     _this_module.__dict__.update(globals())
 
 
+class _SuppressOKAccessFilter(logging.Filter):
+    """Drop 2xx/3xx access-log lines; keep 4xx/5xx and everything else."""
+    def filter(self, record):
+        try:
+            # uvicorn access records have args = (client, method, path, http_ver, status_code)
+            return int(record.args[4]) >= 400
+        except (TypeError, IndexError, ValueError):
+            return True
+
+
 if __name__ == "__main__":
+    import logging
     import uvicorn
+
+    log_level_env = (os.getenv("LOG_LEVEL") or "default").strip().lower()
+    if log_level_env != "full":
+        logging.getLogger("uvicorn.access").addFilter(_SuppressOKAccessFilter())
 
     share_local_raw = (os.getenv("PINOKIO_SHARE_LOCAL") or "").strip().lower()
     share_local_enabled = share_local_raw in {"1", "true", "yes", "on"}

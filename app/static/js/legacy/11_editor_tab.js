@@ -213,7 +213,7 @@
                     const nextFingerprint = getChunkAudioFingerprint(chunk);
 
                     if (existingNoAudio) {
-                        const audioHtml = `<audio class="chunk-audio" data-id="${escapeHtml(chunkRef)}" data-audio-path="${escapeHtml(chunk.audio_path)}" data-audio-fingerprint="${escapeHtml(nextFingerprint)}" controls src="${newSrc}" style="width: 200px; height: 30px;" onplay='stopOthers(${JSON.stringify(chunkRef)})'></audio>`;
+                        const audioHtml = `<audio class="chunk-audio" data-id="${escapeHtml(chunkRef)}" data-audio-path="${escapeHtml(chunk.audio_path)}" data-audio-fingerprint="${escapeHtml(nextFingerprint)}" controls preload="none" src="${newSrc}" style="width: 200px; height: 30px;" onplay='stopOthers(${JSON.stringify(chunkRef)})'></audio>`;
                         existingNoAudio.outerHTML = audioHtml;
                     } else if (existingAudio) {
                         const currentFingerprint = existingAudio.dataset.audioFingerprint || '';
@@ -351,8 +351,8 @@
 
         function getProofreadThreshold() {
             const input = document.getElementById('proofread-threshold');
-            const value = parseFloat(input?.value || '1');
-            return Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 1.0;
+            const value = parseFloat(input?.value || '0.7');
+            return Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0.7;
         }
 
         function getProofreadRowStyle(chunk, threshold) {
@@ -491,8 +491,10 @@
             const cachedTranscriptDetail = (!proofread.checked && transcriptText)
                 ? '<div class="small text-muted mt-1">Cached transcript from repair.</div>'
                 : '';
-            const durationDetail = proofread.actual_duration_sec != null
-                ? `<div class="small text-muted mt-1">Duration ${proofread.actual_duration_sec}s vs expected ${proofread.expected_duration_sec || 0}s</div>`
+            const _actual = proofread.actual_duration_sec;
+            const _expected = proofread.expected_duration_sec || 0;
+            const durationDetail = (_actual != null && (_actual < 0.1 || Math.abs(_actual - _expected) >= 2))
+                ? `<div class="small text-muted mt-1">Duration ${_actual}s vs expected ${_expected}s</div>`
                 : '';
             const regenButton = getProofreadGenerateButtonHtml(chunk, chunkRef);
             const compareButton = shouldShowProofreadCompare(chunk)
@@ -520,10 +522,21 @@
                 transcriptCell.innerHTML = `<div>${transcript}</div>${durationDetail}`;
             }
             if (audioCell) {
-                const audioHtml = chunk.audio_path
-                    ? `<audio controls src="${buildChunkAudioSrc(chunk, Date.now().toString())}" style="width: 210px; height: 30px;"></audio>`
-                    : '<span class="text-muted small">No audio</span>';
-                audioCell.innerHTML = `${audioHtml}<div>${regenButton}${compareButton}${validateButton}${editButton}</div>`;
+                const newAudioSrc = chunk.audio_path ? buildChunkAudioSrc(chunk) : '';
+                const existingAudio = audioCell.querySelector('audio');
+                const existingSrc = existingAudio ? existingAudio.getAttribute('src') : null;
+                if (existingSrc !== newAudioSrc) {
+                    const audioHtml = newAudioSrc
+                        ? `<audio controls preload="none" src="${newAudioSrc}" style="width: 210px; height: 30px;"></audio>`
+                        : '<span class="text-muted small">No audio</span>';
+                    audioCell.innerHTML = `${audioHtml}<div></div>`;
+                }
+                const btnDiv = audioCell.querySelector('div') || (() => {
+                    const d = document.createElement('div');
+                    audioCell.appendChild(d);
+                    return d;
+                })();
+                btnDiv.innerHTML = `${regenButton}${compareButton}${validateButton}${editButton}`;
             }
             row.dataset.proofreadFingerprint = getProofreadFingerprint(chunk, threshold);
             return true;
@@ -539,6 +552,13 @@
                 tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No segments in this chapter yet.</td></tr>';
                 return;
             }
+
+            // Save live audio elements before wiping — avoids re-requesting already-cached files
+            const savedAudio = new Map();
+            tbody.querySelectorAll('tr[data-proofread-id]').forEach(row => {
+                const audio = row.children[4]?.querySelector('audio');
+                if (audio) savedAudio.set(row.dataset.proofreadId, audio);
+            });
 
             tbody.innerHTML = visibleChunks.map(chunk => {
                 const proofread = chunk.proofread || {};
@@ -560,11 +580,13 @@
                 const cachedTranscriptDetail = (!proofread.checked && transcriptText)
                     ? '<div class="small text-muted mt-1">Cached transcript from repair.</div>'
                     : '';
-                const durationDetail = proofread.actual_duration_sec != null
-                    ? `<div class="small text-muted mt-1">Duration ${proofread.actual_duration_sec}s vs expected ${proofread.expected_duration_sec || 0}s</div>`
+                const _actual = proofread.actual_duration_sec;
+                const _expected = proofread.expected_duration_sec || 0;
+                const durationDetail = (_actual != null && (_actual < 0.1 || Math.abs(_actual - _expected) >= 2))
+                    ? `<div class="small text-muted mt-1">Duration ${_actual}s vs expected ${_expected}s</div>`
                     : '';
                 const audioHtml = chunk.audio_path
-                    ? `<audio controls src="${buildChunkAudioSrc(chunk, Date.now().toString())}" style="width: 210px; height: 30px;"></audio>`
+                    ? `<audio controls preload="none" src="${buildChunkAudioSrc(chunk, Date.now().toString())}" style="width: 210px; height: 30px;"></audio>`
                     : '<span class="text-muted small">No audio</span>';
                 const regenButton = getProofreadGenerateButtonHtml(chunk, chunkRef);
                 const compareButton = shouldShowProofreadCompare(chunk)
@@ -595,6 +617,19 @@
                     </tr>
                 `;
             }).join('');
+
+            // Restore audio elements whose src hasn't changed — preserves in-progress loads
+            if (savedAudio.size > 0) {
+                tbody.querySelectorAll('tr[data-proofread-id]').forEach(newRow => {
+                    const oldAudio = savedAudio.get(newRow.dataset.proofreadId);
+                    if (!oldAudio) return;
+                    const newAudio = newRow.children[4]?.querySelector('audio');
+                    if (newAudio && newAudio.getAttribute('src') === oldAudio.getAttribute('src')) {
+                        newAudio.replaceWith(oldAudio);
+                    }
+                });
+            }
+
             cachedProofreadVisibleChunkIds = visibleChunks.map(chunk => getChunkRef(chunk));
         }
 
@@ -678,6 +713,7 @@
             document.getElementById('btn-proofread-sequence').disabled = running;
             document.getElementById('btn-proofread-book').disabled = running;
             document.getElementById('btn-proofread-discard-selection').disabled = running;
+            document.getElementById('btn-proofread-regrade-book').disabled = running;
         }
 
         window.changeProofreadChapter = async (chapterId) => {
@@ -702,7 +738,7 @@
 
             const isFailure = chunk => {
                 const p = chunk?.proofread || {};
-                return Boolean(p.checked) && !Boolean(p.passed);
+                return Boolean(p.checked) && !Boolean(p.passed) && !Boolean(p.manual_validated) && !Boolean(p.manual_failed);
             };
 
             const currentIndex = afterChunkRef != null
@@ -745,7 +781,7 @@
 
                 const firstFailure = chunks.find(chunk => {
                     const proofread = chunk?.proofread || {};
-                    return Boolean(proofread.checked) && !Boolean(proofread.passed);
+                    return Boolean(proofread.checked) && !Boolean(proofread.passed) && !Boolean(proofread.manual_validated) && !Boolean(proofread.manual_failed);
                 });
                 if (!firstFailure) {
                     showToast('No proofread failures were found.', 'info', 2500);
@@ -825,6 +861,18 @@
             }
         };
 
+        window.regradeBook = async () => {
+            try {
+                // Discard all proofread results for the whole book, preserving transcripts
+                await API.post('/api/proofread/discard_selection', { chapter: null });
+                // Re-run proofread on the whole book — transcribes missing clips, re-scores all
+                await startProofreadRun(null);
+                showToast('Book regrade complete.', 'success', 4000);
+            } catch (e) {
+                showToast('Regrade failed: ' + e.message, 'error');
+            }
+        };
+
         window.discardProofreadSelection = async () => {
             try {
                 const result = await API.post('/api/proofread/discard_selection', {
@@ -852,11 +900,23 @@
             }
         };
 
+        function applyProofreadChunkUpdate(updatedChunk) {
+            // Patch cachedChunks in-place so jumpToNextProofreadFailure and
+            // renderProofreadTable see the correct state even when loadChunks(false)
+            // used chapter scope and didn't fetch this chunk's chapter.
+            if (!updatedChunk) return;
+            const ref = getChunkRef(updatedChunk);
+            const idx = cachedChunks.findIndex(c => getChunkRef(c) === ref);
+            if (idx >= 0) cachedChunks[idx] = updatedChunk;
+            updateProofreadRow(updatedChunk);
+        }
+
         window.validateProofreadChunk = async (chunkRef) => {
             try {
-                await API.post(`/api/proofread/${encodeURIComponent(chunkRef)}/validate`, {
+                const result = await API.post(`/api/proofread/${encodeURIComponent(chunkRef)}/validate`, {
                     threshold: getProofreadThreshold(),
                 });
+                applyProofreadChunkUpdate(result.chunk);
                 showToast('Clip validated.', 'success', 2000);
                 await loadChunks(false);
                 await jumpToNextProofreadFailure(chunkRef);
@@ -867,9 +927,10 @@
 
         window.rejectProofreadChunk = async (chunkRef) => {
             try {
-                await API.post(`/api/proofread/${encodeURIComponent(chunkRef)}/reject`, {
+                const result = await API.post(`/api/proofread/${encodeURIComponent(chunkRef)}/reject`, {
                     threshold: getProofreadThreshold(),
                 });
+                applyProofreadChunkUpdate(result.chunk);
                 showToast('Clip rejected.', 'warning', 2000);
                 await loadChunks(false);
                 await jumpToNextProofreadFailure(chunkRef);
@@ -1141,6 +1202,41 @@
             pollAudioQueueOnce();
         }
 
+        function buildChunkRowHtml(chunk) {
+            const chunkRef = getChunkRef(chunk);
+            const quotedChunkRef = JSON.stringify(chunkRef);
+            const { statusColor, statusDetail } = getChunkStatusMeta(chunk);
+            const audioFingerprint = getChunkAudioFingerprint(chunk);
+
+            const audioPlayer = chunk.audio_path ?
+                `<audio class="chunk-audio" data-id="${escapeHtml(chunkRef)}" data-audio-path="${escapeHtml(chunk.audio_path)}" data-audio-fingerprint="${escapeHtml(audioFingerprint)}" controls preload="none" src="${buildChunkAudioSrc(chunk, Date.now().toString())}" style="width: 200px; height: 30px;" onplay='stopOthers(${quotedChunkRef})'></audio>` :
+                '<span class="text-muted small">No audio</span>';
+
+            const actionArea = chunk.status === 'generating' ?
+                `<div class="progress" style="width: 100px; height: 20px;">
+                    <div class="progress-bar progress-bar-striped progress-bar-animated bg-warning" role="progressbar" style="width: 100%"></div>
+                 </div>` :
+                `<button class="btn btn-sm btn-primary" onclick='generateChunk(${quotedChunkRef})'><i class="fas fa-play"></i> Gen</button>`;
+
+            return `
+                <tr data-id="${escapeHtml(chunkRef)}" class="chunk-row">
+                    <td class="text-center align-middle" style="white-space:nowrap;">
+                        <button class="chunk-expand-btn" onclick="toggleChunkExpand(this)" title="Expand/collapse"><i class="fas fa-chevron-down"></i></button><button class="chunk-expand-btn" onclick='insertChunkAfter(${quotedChunkRef})' title="Insert line below"><i class="fas fa-plus"></i></button><button class="chunk-expand-btn" onclick='deleteChunk(${quotedChunkRef})' title="Delete line"><i class="fas fa-trash" style="color:#dc3545;"></i></button>
+                    </td>
+                    <td><input type="text" class="form-control form-control-sm" value="${escapeHtml(chunk.speaker)}" data-editor-field="speaker" oninput='scheduleEditorChunkSave(${quotedChunkRef})' onchange='flushEditorChunkSave(${quotedChunkRef})'></td>
+                    <td><textarea class="form-control form-control-sm chunk-text" rows="2" data-editor-field="text" oninput='scheduleEditorChunkSave(${quotedChunkRef})' onchange='flushEditorChunkSave(${quotedChunkRef})'>${escapeHtml(chunk.text)}</textarea></td>
+                    <td><textarea class="form-control form-control-sm chunk-instruct" rows="2" data-editor-field="instruct" oninput='scheduleEditorChunkSave(${quotedChunkRef})' onchange='flushEditorChunkSave(${quotedChunkRef})' title="Short TTS direction (3-8 words)">${escapeHtml(chunk.instruct || '')}</textarea></td>
+                    <td class="chunk-status-cell"><span class="badge bg-${statusColor}">${chunk.status}</span>${statusDetail}</td>
+                    <td>
+                        <div class="d-flex align-items-center gap-2">
+                            ${actionArea}
+                            ${audioPlayer}
+                        </div>
+                    </td>
+                </tr>
+            `;
+        }
+
         async function loadChunks(forceFullRedraw = false) {
             const tbody = document.getElementById('chunks-table-body');
 
@@ -1159,7 +1255,11 @@
                         ? `/api/chunks/view?chapter=${encodeURIComponent(selectedEditorChapter)}`
                         : '/api/chunks/view'
                 );
-                const mergedChunks = useChapterScope ? mergeChunkSnapshots(cachedChunks, chunks) : chunks;
+                const rawMerged = useChapterScope ? mergeChunkSnapshots(cachedChunks, chunks) : chunks;
+                // Filter out any UIDs still being deleted (guards against polling race)
+                const mergedChunks = pendingDeleteRefs.size > 0
+                    ? rawMerged.filter(c => !pendingDeleteRefs.has(getChunkRef(c)))
+                    : rawMerged;
                 if (mergedChunks.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="6" class="text-center">No chunks found. Please generate script first.</td></tr>';
                     cachedChunks = [];
@@ -1237,40 +1337,7 @@
                     // Full redraw needed
                     tbody.innerHTML = visibleChunks.length === 0
                         ? '<tr><td colspan="6" class="text-center text-muted">No segments in this chapter yet.</td></tr>'
-                        : visibleChunks.map(chunk => {
-                        const chunkRef = getChunkRef(chunk);
-                        const quotedChunkRef = JSON.stringify(chunkRef);
-                        const { statusColor, statusDetail } = getChunkStatusMeta(chunk);
-                        const audioFingerprint = getChunkAudioFingerprint(chunk);
-
-                        const audioPlayer = chunk.audio_path ?
-                            `<audio class="chunk-audio" data-id="${escapeHtml(chunkRef)}" data-audio-path="${escapeHtml(chunk.audio_path)}" data-audio-fingerprint="${escapeHtml(audioFingerprint)}" controls src="${buildChunkAudioSrc(chunk, Date.now().toString())}" style="width: 200px; height: 30px;" onplay='stopOthers(${quotedChunkRef})'></audio>` :
-                            '<span class="text-muted small">No audio</span>';
-
-                        const actionArea = chunk.status === 'generating' ?
-                            `<div class="progress" style="width: 100px; height: 20px;">
-                                <div class="progress-bar progress-bar-striped progress-bar-animated bg-warning" role="progressbar" style="width: 100%"></div>
-                             </div>` :
-                            `<button class="btn btn-sm btn-primary" onclick='generateChunk(${quotedChunkRef})'><i class="fas fa-play"></i> Gen</button>`;
-
-                        return `
-                            <tr data-id="${escapeHtml(chunkRef)}" class="chunk-row">
-                                <td class="text-center align-middle" style="white-space:nowrap;">
-                                    <button class="chunk-expand-btn" onclick="toggleChunkExpand(this)" title="Expand/collapse"><i class="fas fa-chevron-down"></i></button><button class="chunk-expand-btn" onclick='insertChunkAfter(${quotedChunkRef})' title="Insert line below"><i class="fas fa-plus"></i></button><button class="chunk-expand-btn" onclick='deleteChunk(${quotedChunkRef})' title="Delete line"><i class="fas fa-trash" style="color:#dc3545;"></i></button>
-                                </td>
-                                <td><input type="text" class="form-control form-control-sm" value="${chunk.speaker}" data-editor-field="speaker" oninput='scheduleEditorChunkSave(${quotedChunkRef})' onchange='flushEditorChunkSave(${quotedChunkRef})'></td>
-                                <td><textarea class="form-control form-control-sm chunk-text" rows="2" data-editor-field="text" oninput='scheduleEditorChunkSave(${quotedChunkRef})' onchange='flushEditorChunkSave(${quotedChunkRef})'>${chunk.text}</textarea></td>
-                                <td><textarea class="form-control form-control-sm chunk-instruct" rows="2" data-editor-field="instruct" oninput='scheduleEditorChunkSave(${quotedChunkRef})' onchange='flushEditorChunkSave(${quotedChunkRef})' title="Short TTS direction (3-8 words)">${chunk.instruct || ''}</textarea></td>
-                                <td class="chunk-status-cell"><span class="badge bg-${statusColor}">${chunk.status}</span>${statusDetail}</td>
-                                <td>
-                                    <div class="d-flex align-items-center gap-2">
-                                        ${actionArea}
-                                        ${audioPlayer}
-                                    </div>
-                                </td>
-                            </tr>
-                        `;
-                    }).join('');
+                        : visibleChunks.map(buildChunkRowHtml).join('');
                 }
 
                 cachedChunks = mergedChunks;
@@ -1302,8 +1369,29 @@
 
         window.insertChunkAfter = async (id) => {
             try {
-                await API.post(`/api/chunks/${id}/insert`, {});
-                await loadChunks(true);
+                const data = await API.post(`/api/chunks/${id}/insert`, {});
+                const newChunk = data.chunk;
+                const newRef = getChunkRef(newChunk);
+                const targetRow = document.querySelector(`tr[data-id="${id}"]`);
+                if (targetRow) {
+                    targetRow.insertAdjacentHTML('afterend', buildChunkRowHtml(newChunk));
+                } else {
+                    // Fallback: target row not found, do a full reload
+                    await loadChunks(true);
+                    return;
+                }
+                const insertIdx = cachedChunks.findIndex(c => getChunkRef(c) === String(id));
+                if (insertIdx >= 0) {
+                    cachedChunks.splice(insertIdx + 1, 0, newChunk);
+                } else {
+                    cachedChunks.push(newChunk);
+                }
+                const visibleInsertIdx = cachedVisibleChunkIds.indexOf(String(id));
+                if (visibleInsertIdx >= 0) {
+                    cachedVisibleChunkIds.splice(visibleInsertIdx + 1, 0, newRef);
+                } else {
+                    cachedVisibleChunkIds.push(newRef);
+                }
             } catch (e) {
                 showToast('Failed to insert line: ' + e.message, 'error');
             }
@@ -1566,8 +1654,23 @@
 
         let _lastDeleted = null;
         let _undoTimer = null;
+        const pendingDeleteRefs = new Set();
 
         window.deleteChunk = async (id) => {
+            const deletedRef = String(id);
+
+            // Optimistically remove the row immediately so the UI feels instant.
+            // pendingDeleteRefs guards the polling loop from re-adding the row
+            // if a fetch completes before the DELETE API returns.
+            pendingDeleteRefs.add(deletedRef);
+            const editorRow = document.querySelector(`tr[data-id="${deletedRef}"]`);
+            if (editorRow) editorRow.remove();
+            const proofreadRow = document.querySelector(`tr[data-proofread-id="${deletedRef}"]`);
+            if (proofreadRow) proofreadRow.remove();
+            cachedChunks = cachedChunks.filter(c => getChunkRef(c) !== deletedRef);
+            cachedVisibleChunkIds = cachedVisibleChunkIds.filter(ref => ref !== deletedRef);
+            cachedProofreadVisibleChunkIds = cachedProofreadVisibleChunkIds.filter(ref => ref !== deletedRef);
+
             try {
                 const res = await fetch(`/api/chunks/${id}`, { method: 'DELETE' });
                 await API._handleError(res);
@@ -1597,11 +1700,14 @@
 
                 // Clear undo data after timeout
                 _undoTimer = setTimeout(() => { _lastDeleted = null; }, 8000);
-
-                await loadChunks(true);
             } catch (e) {
+                // Restore the row if the delete failed
+                pendingDeleteRefs.delete(deletedRef);
                 showToast('Failed to delete line: ' + e.message, 'error');
+                await loadChunks(true);
+                return;
             }
+            pendingDeleteRefs.delete(deletedRef);
         };
 
         window.undoDeleteChunk = async (toastId) => {

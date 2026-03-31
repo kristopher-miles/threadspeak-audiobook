@@ -333,10 +333,11 @@ async def update_chunk(index: str, update: ChunkUpdate):
 @router.post("/api/chunks/{index}/insert")
 async def insert_chunk(index: str):
     """Insert an empty chunk after the given index."""
-    chunks = project_manager.insert_chunk(index)
-    if chunks is None:
+    result = project_manager.insert_chunk(index)
+    if result is None:
         raise HTTPException(status_code=404, detail="Invalid chunk index")
-    return {"status": "ok", "total": len(chunks)}
+    new_chunk, chunks = result
+    return {"status": "ok", "total": len(chunks), "chunk": new_chunk}
 
 @router.delete("/api/chunks/{index}")
 async def delete_chunk(index: str):

@@ -348,7 +348,7 @@
             document.getElementById('merge-narrators').checked = false;
             document.getElementById('orphaned-text-to-narrator-on-repair').checked = true;
             document.getElementById('auto-regenerate-bad-clip-attempts').value = 3;
-            document.getElementById('proofread-threshold').value = 1.0;
+            document.getElementById('proofread-threshold').value = 0.7;
             refreshPromptTextareaHeights();
         };
 
@@ -425,7 +425,7 @@
                     legacy_mode: document.getElementById('legacy-mode-toggle').checked
                 },
                 proofread: {
-                    certainty_threshold: parseFloat(document.getElementById('proofread-threshold').value) || 1.0
+                    certainty_threshold: parseFloat(document.getElementById('proofread-threshold').value) || 0.7
                 },
                 export: {
                     ...collectExportConfigFromUI()
