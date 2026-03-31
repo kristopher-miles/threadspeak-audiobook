@@ -83,6 +83,11 @@
                                 </div>
                                 <div class="form-text">Attempts controls retry count after an error. Positive numbers retry that many times. `0` or invalid disables retries.</div>
                             </div>
+                            <div class="col-md-2">
+                                <label class="form-label">Script Max Length</label>
+                                <input type="number" class="form-control" id="script-max-length" value="100" min="-1" step="1">
+                                <div class="form-text">Max chars per audio chunk when creating the script. -1 = one chunk per sentence (legacy).</div>
+                            </div>
                         </div>
                         <div class="row mb-3" id="tts-local-options" style="display:none;">
                             <div class="col-md-2">

@@ -134,6 +134,7 @@
                 if (config.tts.sub_batch_max_items != null) {
                     document.getElementById('sub-batch-max-items').value = config.tts.sub_batch_max_items;
                 }
+                document.getElementById('script-max-length').value = config.tts.script_max_length ?? 100;
                 toggleTTSMode();
 
                 // Load custom prompts if they exist and are non-empty
@@ -396,7 +397,8 @@
                     sub_batch_min_size: parseInt(document.getElementById('sub-batch-min-size').value) || 4,
                     sub_batch_ratio: parseFloat(document.getElementById('sub-batch-ratio').value) || 5,
                     sub_batch_max_chars: parseInt(document.getElementById('sub-batch-max-chars').value) || 3000,
-                    sub_batch_max_items: parseInt(document.getElementById('sub-batch-max-items').value) || 0
+                    sub_batch_max_items: parseInt(document.getElementById('sub-batch-max-items').value) || 0,
+                    script_max_length: parseInt(document.getElementById('script-max-length').value) || 100
                 },
                 prompts: {
                     system_prompt: document.getElementById('system-prompt').value,

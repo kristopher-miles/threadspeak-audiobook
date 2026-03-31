@@ -3974,7 +3974,7 @@ class ProjectManager:
     def _atomic_json_write(self, data, target_path, max_retries=5):
         self._atomic_json_write_raw(data, target_path, max_retries=max_retries)
         if os.path.abspath(target_path) == os.path.abspath(self.chunks_path):
-            threading.Thread(target=self._update_chunks_backups, args=(data,), daemon=True).start()
+            self._update_chunks_backups(data)
 
     def save_chunks(self, chunks):
         with self._chunks_lock:

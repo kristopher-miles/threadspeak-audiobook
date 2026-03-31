@@ -946,7 +946,13 @@ class MergeAudioTests(unittest.TestCase):
         )
         self.assertTrue(changed)
 
-        expected_samples = np.array(expected.get_array_of_samples(), dtype=np.int64)
+        # Round-trip expected through MP3 to match the lossy encoding used in the trim cache
+        import io as _io
+        mp3_buf = _io.BytesIO()
+        expected.export(mp3_buf, format="mp3", bitrate="128k")
+        mp3_buf.seek(0)
+        expected_mp3 = AudioSegment.from_file(mp3_buf, format="mp3")
+        expected_samples = np.array(expected_mp3.get_array_of_samples(), dtype=np.int64)
         actual_samples = np.array(trimmed.get_array_of_samples(), dtype=np.int64)
         self.assertEqual(expected_samples.shape, actual_samples.shape)
         self.assertEqual(int(np.max(np.abs(expected_samples - actual_samples))), 0)
@@ -1060,7 +1066,7 @@ class MergeAudioTests(unittest.TestCase):
             trim_keep_padding_ms=0,
         ))
         cache_key = self.manager._build_trim_cache_key(original_path, trim_cfg)
-        cache_path = os.path.join(self.manager._trim_cache_dir(), f"{cache_key}.wav")
+        cache_path = os.path.join(self.manager._trim_cache_dir(), f"{cache_key}.mp3")
         if os.path.exists(cache_path):
             os.remove(cache_path)
 
@@ -1696,8 +1702,7 @@ class StableAudioFilenameTests(unittest.TestCase):
             chunk_uid="chunk-b",
         )
 
-        chunks = self.manager.insert_chunk(0)
-        inserted = chunks[1]
+        inserted, chunks = self.manager.insert_chunk(0)
         inserted["text"] = "Inserted line also has enough words for validation to pass cleanly."
         self.manager.save_chunks(chunks)
 

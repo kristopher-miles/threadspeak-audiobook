@@ -17,7 +17,12 @@ No LLM calls are made.  This is a pure deterministic transformation.
 
 CLI usage:
     create_script.py <paragraphs_path> <voice_config_path> <script_output_path> <chunks_output_path>
+                     [--max-length N]
+
+--max-length N  Max characters per audio chunk (default 100).
+                -1 = legacy mode: split on every sentence boundary.
 """
+import argparse
 import json
 import os
 import re
@@ -31,6 +36,9 @@ QUOTE_RE = re.compile(r'["\u201c][^"\u201d]{2,}["\u201d]', re.DOTALL)
 
 # Split after sentence-ending punctuation followed by whitespace.
 SENT_RE = re.compile(r'(?<=[.!?])\s+')
+
+# Matches 2+ consecutive dots (ellipsis or longer run).
+_ELLIPSIS_RE = re.compile(r'\.\.+')
 
 # Used to detect whether a fragment contains any letter characters.
 HAS_LETTER = re.compile(r'[A-Za-z]')
@@ -95,18 +103,99 @@ def split_sentences(text: str) -> list[str]:
     return result
 
 
+def split_sentences_new(text: str) -> list[str]:
+    """
+    Like split_sentences() but treats sequences of 2+ dots ('...') as NOT a
+    sentence boundary. Period, ! and ? are still valid sentence-end markers.
+    """
+    ellipses: list[str] = []
+
+    def _protect(m: re.Match) -> str:
+        ellipses.append(m.group())
+        return f'\x00{len(ellipses) - 1}\x00'
+
+    protected = _ELLIPSIS_RE.sub(_protect, text)
+    raw = [s.strip() for s in SENT_RE.split(protected) if s.strip()]
+    result: list[str] = []
+    for part in raw:
+        restored = re.sub(r'\x00(\d+)\x00', lambda m: ellipses[int(m.group(1))], part)
+        if HAS_LETTER.search(restored):
+            result.append(restored)
+        else:
+            if result:
+                result[-1] = result[-1] + " " + restored
+    return result
+
+
+def _split_on_comma(text: str) -> list[str]:
+    """Last-resort: split on commas. Comma stays with its preceding text."""
+    parts = re.split(r',\s+', text)
+    if len(parts) <= 1:
+        return [text]
+    result = [p + ',' for p in parts[:-1]] + [parts[-1]]
+    return [r.strip() for r in result if r.strip()]
+
+
+def _balanced_split(parts: list[str], max_length: int) -> list[str]:
+    """
+    Recursively split a list of consecutive text parts into chunks, choosing
+    the split point that minimises |len(left) - len(right)|.
+    Stops recursing when a chunk fits within max_length or has only one part.
+    """
+    joined = ' '.join(parts)
+    if len(joined) <= max_length or len(parts) == 1:
+        return [joined]
+
+    best_idx = 1
+    best_diff = float('inf')
+    for i in range(1, len(parts)):
+        diff = abs(len(' '.join(parts[:i])) - len(' '.join(parts[i:])))
+        if diff < best_diff:
+            best_diff = diff
+            best_idx = i
+
+    return (
+        _balanced_split(parts[:best_idx], max_length) +
+        _balanced_split(parts[best_idx:], max_length)
+    )
+
+
+def chunk_text(text: str, max_length: int) -> list[str]:
+    """
+    Split text into chunks as close as possible to max_length characters.
+    - Never splits mid-sentence.
+    - '...' (2+ consecutive dots) is not treated as a sentence boundary.
+    - Period, ! and ? are valid sentence-end markers.
+    - Falls back to comma splits only when no sentence boundaries exist.
+    - Returns [text] unchanged if no valid split point exists at all.
+    """
+    if len(text) <= max_length:
+        return [text]
+
+    parts = split_sentences_new(text)
+
+    if len(parts) <= 1:
+        # No sentence boundaries — try comma as absolute last resort
+        parts = _split_on_comma(text)
+        if len(parts) <= 1:
+            return [text]
+
+    return _balanced_split(parts, max_length)
+
+
 # ── Paragraph → ordered segment list ──────────────────────────────────────────
 
-def paragraph_to_segments(para: dict) -> list[dict]:
+def paragraph_to_segments(para: dict, max_length: int = -1) -> list[dict]:
     """
-    Decompose a paragraph into an ordered list of sentence-level fragments,
-    tagging each as dialogue or narration.
+    Decompose a paragraph into an ordered list of fragments, tagging each as
+    dialogue or narration.
 
-    Dialogue spans (quoted text) are extracted first; the remaining pieces
-    are narration.  Both types are further split on sentence boundaries.
-    Dialogue spanning multiple sentences produces multiple fragments that all
-    share the same speaker and dialogue_mood.
+    When max_length < 0 (legacy): splits on every sentence boundary.
+    When max_length >= 0: consolidates sentences into chunks up to max_length,
+    splitting into most-equal pieces only when necessary.
     """
+    split_fn = split_sentences if max_length < 0 else (lambda t: chunk_text(t, max_length))
+
     text = para["text"]
     segments: list[dict] = []
     last_end = 0
@@ -115,11 +204,11 @@ def paragraph_to_segments(para: dict) -> list[dict]:
         # Narration before this dialogue span
         narration = text[last_end:m.start()].strip()
         if narration:
-            for s in split_sentences(narration):
+            for s in split_fn(narration):
                 segments.append({"text": s, "is_dialogue": False})
 
         # Dialogue span — split internally too
-        for s in split_sentences(m.group(0).strip()):
+        for s in split_fn(m.group(0).strip()):
             segments.append({"text": s, "is_dialogue": True})
 
         last_end = m.end()
@@ -127,7 +216,7 @@ def paragraph_to_segments(para: dict) -> list[dict]:
     # Trailing narration after the last dialogue span
     trailing = text[last_end:].strip()
     if trailing:
-        for s in split_sentences(trailing):
+        for s in split_fn(trailing):
             segments.append({"text": s, "is_dialogue": False})
 
     return segments
@@ -157,15 +246,24 @@ def _make_chunk(idx: int, speaker: str, text: str, instruct: str, chapter: str, 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
-    if len(sys.argv) < 5:
-        _log("Usage: create_script.py <paragraphs_path> <voice_config_path> "
-             "<script_output_path> <chunks_output_path>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="Build annotated_script.json and chunks.json from paragraphs.json."
+    )
+    parser.add_argument("paragraphs_path")
+    parser.add_argument("voice_config_path")
+    parser.add_argument("script_output_path")
+    parser.add_argument("chunks_output_path")
+    parser.add_argument(
+        "--max-length", type=int, default=100, dest="max_length",
+        help="Max chars per audio chunk. -1 = one chunk per sentence (legacy).",
+    )
+    args = parser.parse_args()
 
-    paragraphs_path    = sys.argv[1]
-    voice_config_path  = sys.argv[2]
-    script_output_path = sys.argv[3]
-    chunks_output_path = sys.argv[4]
+    paragraphs_path    = args.paragraphs_path
+    voice_config_path  = args.voice_config_path
+    script_output_path = args.script_output_path
+    chunks_output_path = args.chunks_output_path
+    max_length         = args.max_length
 
     # ── Load paragraphs ────────────────────────────────────────────────────────
     try:
@@ -226,6 +324,12 @@ def main():
     entries: list[dict] = []   # for annotated_script.json
     chunks:  list[dict] = []   # for chunks.json — 1:1 with entries, no merging
 
+    # Choose the splitting function based on max_length
+    if max_length < 0:
+        para_split_fn = split_sentences
+    else:
+        para_split_fn = lambda t: chunk_text(t, max_length)
+
     for chapter_idx, (chapter_name, paras) in enumerate(chapters):
         chapter_line_count = 0
 
@@ -236,8 +340,8 @@ def main():
 
             para_id = para.get("id")
             if not para.get("has_dialogue"):
-                # Pure narration — every sentence is NARRATOR
-                for s in split_sentences(para["text"]):
+                # Pure narration — split according to max_length
+                for s in para_split_fn(para["text"]):
                     entries.append({
                         "speaker": "NARRATOR",
                         "text": s,
@@ -248,7 +352,7 @@ def main():
                     chapter_line_count += 1
             else:
                 # Mixed paragraph — preserve narration/dialogue order
-                for seg in paragraph_to_segments(para):
+                for seg in paragraph_to_segments(para, max_length=max_length):
                     if seg["is_dialogue"]:
                         entries.append({
                             "speaker": speaker or "NARRATOR",

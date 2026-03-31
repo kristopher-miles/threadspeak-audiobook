@@ -418,6 +418,7 @@ class TTSConfig(BaseModel):
     sub_batch_max_chars: int = 3000  # max total chars per sub-batch (lower for less VRAM)
     sub_batch_max_items: int = 0  # hard cap on sequences per sub-batch (0 = auto from VRAM estimate)
     batch_group_by_type: bool = False  # group chunks by voice type for efficient batching
+    script_max_length: int = 100  # Max chars per chunk in Create Script (-1 = one chunk per sentence)
 
 class GenerationConfig(BaseModel):
     chunk_size: int = 3000
@@ -2834,8 +2835,9 @@ def _run_create_script_task(run_id: str, paragraphs_path: str, voice_config_path
         tts = cfg.get("tts", {})
         if tts.get("auto_regenerate_bad_clips", False):
             retry_attempts = max(0, int(tts.get("auto_regenerate_bad_clip_attempts", 3) or 0))
+        script_max_length = int(tts.get("script_max_length", 100))
     except Exception:
-        pass
+        script_max_length = 100
 
     if dialogue_errors and retry_attempts > 0:
         run_process(
@@ -2848,7 +2850,8 @@ def _run_create_script_task(run_id: str, paragraphs_path: str, voice_config_path
     # ── Build the script ──────────────────────────────────────────────────────
     run_process(
         [sys.executable, "-u", "create_script.py",
-         paragraphs_path, voice_config_path, script_output_path, chunks_output_path],
+         paragraphs_path, voice_config_path, script_output_path, chunks_output_path,
+         "--max-length", str(script_max_length)],
         "create_script",
         run_id,
     )
