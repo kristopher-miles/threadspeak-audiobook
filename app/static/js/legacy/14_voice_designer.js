@@ -131,7 +131,7 @@
                 const voice = (window._cloneVoicesCache || []).find(v => v.id === voiceId);
                 if (voice) {
                     refAudio.value = `clone_voices/${voice.filename}`;
-                    refText.value = '';
+                    refText.value = voice.sample_text || '';
                     refAudio.readOnly = true;
                     if (playBtn) playBtn.style.display = 'inline-block';
                     if (deleteBtn) deleteBtn.style.display = 'inline-block';

@@ -287,10 +287,11 @@
         }
 
         function getProofreadVisibleChunks(chunks) {
+            const nonSilence = chunks.filter(chunk => chunk.type !== 'silence');
             if (selectedProofreadChapter === WHOLE_PROJECT_CHAPTER_ID) {
-                return chunks;
+                return nonSilence;
             }
-            return chunks.filter(chunk => getChunkChapterName(chunk) === selectedProofreadChapter);
+            return nonSilence.filter(chunk => getChunkChapterName(chunk) === selectedProofreadChapter);
         }
 
         function mergeChunkSnapshots(existingChunks, freshChunks) {
@@ -1205,7 +1206,28 @@
             pollAudioQueueOnce();
         }
 
+        function buildSilenceRowHtml(chunk) {
+            const chunkRef = getChunkRef(chunk);
+            const quotedChunkRef = JSON.stringify(chunkRef);
+            const durVal = chunk.silence_duration_s != null ? chunk.silence_duration_s : 1.0;
+            return `
+                <tr data-id="${escapeHtml(chunkRef)}" data-chapter="${escapeHtml(getChunkChapterName(chunk) || '')}" class="chunk-row chunk-silence-row" style="background:rgba(0,0,0,0.04);">
+                    <td class="text-center align-middle" style="white-space:nowrap;">
+                        <button class="chunk-expand-btn" onclick='deleteChunk(${quotedChunkRef})' title="Delete silence"><i class="fas fa-trash" style="color:#dc3545;"></i></button>
+                    </td>
+                    <td colspan="3" class="align-middle ps-3">
+                        <span class="text-muted me-2"><i class="fas fa-hourglass-half"></i> Silence</span>
+                        <input type="number" class="form-control form-control-sm d-inline-block" style="width:80px;" value="${durVal}" min="0" step="0.1" oninput='validateSilenceDuration(this)' onchange='saveSilenceDuration(${quotedChunkRef}, this)' title="Duration in seconds">
+                        <span class="text-muted small ms-1">seconds</span>
+                    </td>
+                    <td></td>
+                    <td></td>
+                </tr>
+            `;
+        }
+
         function buildChunkRowHtml(chunk) {
+            if (chunk.type === 'silence') return buildSilenceRowHtml(chunk);
             const chunkRef = getChunkRef(chunk);
             const quotedChunkRef = JSON.stringify(chunkRef);
             const { statusColor, statusDetail } = getChunkStatusMeta(chunk);
@@ -1224,7 +1246,7 @@
             return `
                 <tr data-id="${escapeHtml(chunkRef)}" data-chapter="${escapeHtml(getChunkChapterName(chunk) || '')}" class="chunk-row">
                     <td class="text-center align-middle" style="white-space:nowrap;">
-                        <button class="chunk-expand-btn" onclick="toggleChunkExpand(this)" title="Expand/collapse"><i class="fas fa-chevron-down"></i></button><button class="chunk-expand-btn" onclick='insertChunkAfter(${quotedChunkRef})' title="Insert line below"><i class="fas fa-plus"></i></button><button class="chunk-expand-btn" onclick='deleteChunk(${quotedChunkRef})' title="Delete line"><i class="fas fa-trash" style="color:#dc3545;"></i></button>
+                        <button class="chunk-expand-btn" onclick="toggleChunkExpand(this)" title="Expand/collapse"><i class="fas fa-chevron-down"></i></button><button class="chunk-expand-btn" onclick='insertChunkAfter(${quotedChunkRef})' title="Insert line below"><i class="fas fa-plus"></i></button><button class="chunk-expand-btn" onclick='insertSilenceAfter(${quotedChunkRef})' title="Insert silence below"><i class="fas fa-asterisk"></i></button><button class="chunk-expand-btn" onclick='deleteChunk(${quotedChunkRef})' title="Delete line"><i class="fas fa-trash" style="color:#dc3545;"></i></button>
                     </td>
                     <td><input type="text" class="form-control form-control-sm" value="${escapeHtml(chunk.speaker)}" data-editor-field="speaker" oninput='scheduleEditorChunkSave(${quotedChunkRef})' onchange='flushEditorChunkSave(${quotedChunkRef})'></td>
                     <td><textarea class="form-control form-control-sm chunk-text" rows="2" data-editor-field="text" oninput='scheduleEditorChunkSave(${quotedChunkRef})' onchange='flushEditorChunkSave(${quotedChunkRef})'>${escapeHtml(chunk.text)}</textarea></td>
@@ -1397,6 +1419,58 @@
                 }
             } catch (e) {
                 showToast('Failed to insert line: ' + e.message, 'error');
+            }
+        };
+
+        window.insertSilenceAfter = async (id) => {
+            try {
+                const data = await API.post(`/api/chunks/${id}/insert_silence`, {});
+                const newChunk = data.chunk;
+                const newRef = getChunkRef(newChunk);
+                const targetRow = document.querySelector(`tr[data-id="${id}"]`);
+                if (targetRow) {
+                    targetRow.insertAdjacentHTML('afterend', buildSilenceRowHtml(newChunk));
+                } else {
+                    await loadChunks(true);
+                    return;
+                }
+                const insertIdx = cachedChunks.findIndex(c => getChunkRef(c) === String(id));
+                if (insertIdx >= 0) {
+                    cachedChunks.splice(insertIdx + 1, 0, newChunk);
+                } else {
+                    cachedChunks.push(newChunk);
+                }
+                const visibleInsertIdx = cachedVisibleChunkIds.indexOf(String(id));
+                if (visibleInsertIdx >= 0) {
+                    cachedVisibleChunkIds.splice(visibleInsertIdx + 1, 0, newRef);
+                } else {
+                    cachedVisibleChunkIds.push(newRef);
+                }
+            } catch (e) {
+                showToast('Failed to insert silence: ' + e.message, 'error');
+            }
+        };
+
+        function validateSilenceDuration(input) {
+            const val = parseFloat(input.value);
+            if (isNaN(val) || val < 0) {
+                input.style.borderColor = 'red';
+                input.style.boxShadow = '0 0 0 0.2rem rgba(220,53,69,.25)';
+            } else {
+                input.style.borderColor = '';
+                input.style.boxShadow = '';
+            }
+        }
+
+        window.saveSilenceDuration = async (id, input) => {
+            const val = parseFloat(input.value);
+            if (isNaN(val) || val < 0) return;
+            try {
+                await API.post(`/api/chunks/${id}`, { silence_duration_s: val });
+                const idx = cachedChunks.findIndex(c => getChunkRef(c) === String(id));
+                if (idx >= 0) cachedChunks[idx].silence_duration_s = val;
+            } catch (e) {
+                showToast('Failed to save silence duration: ' + e.message, 'error');
             }
         };
 

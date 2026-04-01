@@ -497,6 +497,7 @@ class ChunkUpdate(BaseModel):
     text: Optional[str] = None
     instruct: Optional[str] = None
     speaker: Optional[str] = None
+    silence_duration_s: Optional[float] = None
 
 class ChunkDecomposeRequest(BaseModel):
     chapter: Optional[str] = None
@@ -2031,10 +2032,28 @@ def _restore_audio_queue_state():
         logger.warning(f"Failed to restore audio queue state: {e}")
         return
 
+    # Guard: if there are no valid chunks (project was reset or deleted while the
+    # server was down), discard the stale queue state rather than resuming generation
+    # against a non-existent or empty project.
+    try:
+        preloaded_chunks = project_manager.load_chunks()
+        has_valid_chunks = any(c.get("text") or c.get("voice") for c in preloaded_chunks)
+    except Exception:
+        preloaded_chunks = []
+        has_valid_chunks = False
+
+    if not has_valid_chunks:
+        try:
+            os.remove(AUDIO_QUEUE_STATE_PATH)
+        except OSError:
+            pass
+        logger.info("Discarded stale audio queue state — no valid project chunks found.")
+        return
+
     with audio_queue_condition:
         project_manager.recover_interrupted_generating_chunks()
         project_manager.reconcile_chunk_audio_states()
-        chunks = project_manager.load_chunks()
+        chunks = preloaded_chunks
         process_state["audio"]["metrics"] = _new_audio_metrics()
         process_state["audio"]["heartbeat"] = _new_audio_heartbeat_state()
         process_state["audio"]["logs"] = []

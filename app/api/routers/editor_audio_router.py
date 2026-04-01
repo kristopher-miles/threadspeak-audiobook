@@ -339,6 +339,15 @@ async def insert_chunk(index: str):
     new_chunk, chunks = result
     return {"status": "ok", "total": len(chunks), "chunk": new_chunk}
 
+@router.post("/api/chunks/{index}/insert_silence")
+async def insert_silence_chunk(index: str):
+    """Insert a silence block after the given index."""
+    result = project_manager.insert_silence_chunk(index)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Invalid chunk index")
+    new_chunk, chunks = result
+    return {"status": "ok", "total": len(chunks), "chunk": new_chunk}
+
 @router.delete("/api/chunks/{index}")
 async def delete_chunk(index: str):
     """Delete a chunk at the given index."""

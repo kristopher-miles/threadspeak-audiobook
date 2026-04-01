@@ -113,13 +113,18 @@
                             </div>
                         </div>
                     </div>
-                    <div class="d-flex flex-wrap gap-2 justify-content-center mb-3">
+                    <div class="d-flex flex-wrap gap-2 justify-content-center mb-2">
                         <button class="btn btn-warning" id="btn-merge"><i class="fas fa-file-audio me-1"></i>Merge All</button>
                         <button class="btn btn-outline-warning" id="btn-merge-optimized"><i class="fas fa-box-archive me-1"></i>Optimized Export</button>
-                        <button class="btn btn-outline-info" id="btn-trim-sanity-first-clip"><i class="fas fa-vial me-1"></i>Sanity Trim First Clip</button>
-                        <button class="btn btn-outline-info" id="btn-assemble-sanity-first5"><i class="fas fa-vial me-1"></i>Assemble First 5 Clips</button>
-                        <button class="btn btn-outline-info" id="btn-assemble-sanity-first5-normalized"><i class="fas fa-vial me-1"></i>Assemble + Normalize First 5</button>
-                        <button class="btn btn-outline-secondary" id="btn-clear-trim-cache"><i class="fas fa-broom me-1"></i>Clear Trim Cache</button>
+                        <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#export-advanced-row" aria-expanded="false"><i class="fas fa-sliders-h me-1"></i>Advanced</button>
+                    </div>
+                    <div class="collapse mb-3" id="export-advanced-row">
+                        <div class="d-flex flex-wrap gap-2 justify-content-center">
+                            <button class="btn btn-outline-info btn-sm" id="btn-trim-sanity-first-clip"><i class="fas fa-vial me-1"></i>Sanity Trim First Clip</button>
+                            <button class="btn btn-outline-info btn-sm" id="btn-assemble-sanity-first5"><i class="fas fa-vial me-1"></i>Assemble First 5 Clips</button>
+                            <button class="btn btn-outline-info btn-sm" id="btn-assemble-sanity-first5-normalized"><i class="fas fa-vial me-1"></i>Assemble + Normalize First 5</button>
+                            <button class="btn btn-outline-secondary btn-sm" id="btn-clear-trim-cache"><i class="fas fa-broom me-1"></i>Clear Trim Cache</button>
+                        </div>
                     </div>
                     <div id="audio-player-container" class="text-center" style="display:none;">
                         <h5>Your Audiobook</h5>

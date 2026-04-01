@@ -24,6 +24,7 @@ import os
 import re
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from openai import OpenAI
@@ -74,6 +75,16 @@ def _progress(current: int, total: int, message: str):
     )
 
 
+def _format_eta(start_time: float, done: int, total: int) -> str:
+    if done <= 0 or total <= done:
+        return ""
+    elapsed = time.time() - start_time
+    remaining_seconds = (elapsed / done) * (total - done)
+    if remaining_seconds < 60:
+        return f" (~{int(remaining_seconds)}s remaining)"
+    return f" (~{int(remaining_seconds // 60)}m {int(remaining_seconds % 60)}s remaining)"
+
+
 def build_context_window(paragraphs: list, target_idx: int, budget: int) -> str:
     """
     Centre paragraphs[target_idx] in a block of at most `budget` characters.
@@ -122,9 +133,14 @@ def extract_dialogue_only(text: str) -> str:
 def call_sentiment(client, model_name: str, system_prompt: str, user_msg: str, max_tokens: int) -> str:
     """
     Call the LLM with identify_sentiment tool forced.
+    Streams the response and exits as soon as the first complete tool call JSON arrives,
+    preventing local models from looping and re-emitting the same tool call.
     Returns the mood string, or empty string on failure (caller handles logging).
     """
-    response = client.chat.completions.create(
+    tool_call_args = ""
+    reasoning_content = ""
+
+    stream = client.chat.completions.create(
         model=model_name,
         messages=[
             {"role": "system", "content": system_prompt},
@@ -132,20 +148,45 @@ def call_sentiment(client, model_name: str, system_prompt: str, user_msg: str, m
         ],
         tools=[IDENTIFY_SENTIMENT_TOOL],
         tool_choice="required",
+        parallel_tool_calls=False,
         temperature=0.1,
         max_tokens=max_tokens,
+        stream=True,
     )
-    msg = response.choices[0].message
-    tool_calls = getattr(msg, "tool_calls", None)
-    if tool_calls:
-        args = json.loads(tool_calls[0].function.arguments)
-        return (args.get("mood") or "").strip()
+    for chunk in stream:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        # Accumulate reasoning_content for models (e.g. Nemotron) that emit XML there.
+        rc = getattr(delta, "reasoning_content", None)
+        if rc:
+            reasoning_content += rc
+        if delta.tool_calls:
+            frag = delta.tool_calls[0].function.arguments
+            if frag:
+                tool_call_args += frag
+        # Stop as soon as we have parseable JSON — don't let the model loop.
+        if tool_call_args:
+            try:
+                args = json.loads(tool_call_args)
+                stream.close()
+                return (args.get("mood") or "").strip()
+            except json.JSONDecodeError:
+                pass
 
-    # Some models (e.g. Nemotron) put the tool call in reasoning_content as XML.
-    reasoning = getattr(msg, "reasoning_content", None) or ""
-    m = re.search(r"<parameter=mood>\s*(.*?)\s*</parameter>", reasoning, re.DOTALL | re.IGNORECASE)
-    if m:
-        return m.group(1).strip()
+    # Fallback: try parsing whatever tool-call JSON we accumulated.
+    if tool_call_args:
+        try:
+            args = json.loads(tool_call_args)
+            return (args.get("mood") or "").strip()
+        except json.JSONDecodeError:
+            pass
+
+    # Final fallback: Nemotron/XML models emit the call in reasoning_content.
+    if reasoning_content:
+        m = re.search(r"<parameter=mood>\s*(.*?)\s*</parameter>", reasoning_content, re.DOTALL | re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
 
     return ""
 
@@ -199,8 +240,8 @@ def main():
 
     client = OpenAI(base_url=base_url, api_key=api_key, timeout=600)
 
-    narration_paras = [(i, p) for i, p in enumerate(paragraphs) if not p.get("has_dialogue")]
-    dialogue_paras  = [(i, p) for i, p in enumerate(paragraphs) if p.get("has_dialogue")]
+    all_narration_paras = [(i, p) for i, p in enumerate(paragraphs) if not p.get("has_dialogue")]
+    all_dialogue_paras  = [(i, p) for i, p in enumerate(paragraphs) if p.get("has_dialogue")]
 
     tone_errors: list[str] = []
     dialogue_mood_errors: list[str] = []
@@ -208,11 +249,20 @@ def main():
     # ══════════════════════════════════════════════════════════════════════════
     # PASS 1 — Narrator tone for narration-only paragraphs
     # ══════════════════════════════════════════════════════════════════════════
+    # Skip paragraphs that already have a valid tone from a prior run.
+    narration_paras = [
+        (i, p) for i, p in all_narration_paras
+        if not p.get("tone") or p.get("temperament_error")
+    ]
     total1 = len(narration_paras)
+    already1 = len(all_narration_paras) - total1
+    if already1:
+        _log(f"[Pass 1/3] Resuming: {already1} already done, {total1} remaining.")
     _log(f"[Pass 1/3] Narrator tone for {total1} narration-only paragraphs (workers={workers})...")
 
     lock1 = threading.Lock()
     done1 = [0]
+    pass1_start = time.time()
 
     def process_pass1(idx_para):
         idx, para = idx_para
@@ -246,12 +296,16 @@ def main():
                     tone_errors.append(para_id)
             done1[0] += 1
             if done1[0] % 10 == 0 or done1[0] == total1:
-                _progress(done1[0], total1, f"[Pass 1/3] Narrator tone: {done1[0]}/{total1}...")
+                eta = _format_eta(pass1_start, done1[0], total1)
+                _progress(done1[0], total1, f"[Pass 1/3] Narrator tone: {done1[0]}/{total1}{eta}...")
+            if done1[0] % 10 == 0:
+                _atomic_write(paragraphs_path, paragraphs_doc)
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(process_pass1, item) for item in narration_paras]
-        for future in as_completed(futures):
-            future.result()
+    if total1 > 0:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(process_pass1, item) for item in narration_paras]
+            for future in as_completed(futures):
+                future.result()
 
     _log(f"[Pass 1/3] Done. {total1 - len(tone_errors)}/{total1} succeeded.")
     _atomic_write(paragraphs_path, paragraphs_doc)
@@ -259,11 +313,20 @@ def main():
     # ══════════════════════════════════════════════════════════════════════════
     # PASS 2 — Narrator tone for dialogue paragraphs (dialogue stripped out)
     # ══════════════════════════════════════════════════════════════════════════
-    total2 = len(dialogue_paras)
+    # Skip paragraphs that already have a valid tone from a prior run.
+    dialogue_paras_p2 = [
+        (i, p) for i, p in all_dialogue_paras
+        if not p.get("tone") or p.get("temperament_error")
+    ]
+    total2 = len(dialogue_paras_p2)
+    already2 = len(all_dialogue_paras) - total2
+    if already2:
+        _log(f"[Pass 2/3] Resuming: {already2} already done, {total2} remaining.")
     _log(f"[Pass 2/3] Narrator tone for {total2} dialogue paragraphs (dialogue text removed, workers={workers})...")
 
     lock2 = threading.Lock()
     done2 = [0]
+    pass2_start = time.time()
 
     def process_pass2(idx_para):
         idx, para = idx_para
@@ -298,23 +361,37 @@ def main():
                     tone_errors.append(para_id)
             done2[0] += 1
             if done2[0] % 10 == 0 or done2[0] == total2:
-                _progress(done2[0], total2, f"[Pass 2/3] Narrator tone (dialogue): {done2[0]}/{total2}...")
+                eta = _format_eta(pass2_start, done2[0], total2)
+                _progress(done2[0], total2, f"[Pass 2/3] Narrator tone (dialogue): {done2[0]}/{total2}{eta}...")
+            if done2[0] % 10 == 0:
+                _atomic_write(paragraphs_path, paragraphs_doc)
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(process_pass2, item) for item in dialogue_paras]
-        for future in as_completed(futures):
-            future.result()
+    if total2 > 0:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(process_pass2, item) for item in dialogue_paras_p2]
+            for future in as_completed(futures):
+                future.result()
 
-    _log(f"[Pass 2/3] Done. {total2 - sum(1 for e in tone_errors if e in [p['id'] for _, p in dialogue_paras])}/{total2} succeeded.")
+    _log(f"[Pass 2/3] Done. {total2 - sum(1 for e in tone_errors if e in [p['id'] for _, p in dialogue_paras_p2])}/{total2} succeeded.")
     _atomic_write(paragraphs_path, paragraphs_doc)
 
     # ══════════════════════════════════════════════════════════════════════════
     # PASS 3 — Dialogue mood for dialogue paragraphs
     # ══════════════════════════════════════════════════════════════════════════
-    _log(f"[Pass 3/3] Dialogue mood for {total2} dialogue paragraphs (workers={workers})...")
+    # Skip paragraphs that already have a valid dialogue_mood from a prior run.
+    dialogue_paras_p3 = [
+        (i, p) for i, p in all_dialogue_paras
+        if not p.get("dialogue_mood") or p.get("dialogue_mood_error")
+    ]
+    total3 = len(dialogue_paras_p3)
+    already3 = len(all_dialogue_paras) - total3
+    if already3:
+        _log(f"[Pass 3/3] Resuming: {already3} already done, {total3} remaining.")
+    _log(f"[Pass 3/3] Dialogue mood for {total3} dialogue paragraphs (workers={workers})...")
 
     lock3 = threading.Lock()
     done3 = [0]
+    pass3_start = time.time()
 
     def process_pass3(idx_para):
         idx, para = idx_para
@@ -331,8 +408,11 @@ def main():
                 if para_id not in dialogue_mood_errors:
                     dialogue_mood_errors.append(para_id)
                 done3[0] += 1
-                if done3[0] % 10 == 0 or done3[0] == total2:
-                    _progress(done3[0], total2, f"[Pass 3/3] Dialogue mood: {done3[0]}/{total2}...")
+                if done3[0] % 10 == 0 or done3[0] == total3:
+                    eta = _format_eta(pass3_start, done3[0], total3)
+                    _progress(done3[0], total3, f"[Pass 3/3] Dialogue mood: {done3[0]}/{total3}{eta}...")
+                if done3[0] % 10 == 0:
+                    _atomic_write(paragraphs_path, paragraphs_doc)
             return
 
         user_msg = (
@@ -360,32 +440,37 @@ def main():
                 if para_id not in dialogue_mood_errors:
                     dialogue_mood_errors.append(para_id)
             done3[0] += 1
-            if done3[0] % 10 == 0 or done3[0] == total2:
-                _progress(done3[0], total2, f"[Pass 3/3] Dialogue mood: {done3[0]}/{total2}...")
+            if done3[0] % 10 == 0 or done3[0] == total3:
+                eta = _format_eta(pass3_start, done3[0], total3)
+                _progress(done3[0], total3, f"[Pass 3/3] Dialogue mood: {done3[0]}/{total3}{eta}...")
+            if done3[0] % 10 == 0:
+                _atomic_write(paragraphs_path, paragraphs_doc)
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(process_pass3, item) for item in dialogue_paras]
-        for future in as_completed(futures):
-            future.result()
+    if total3 > 0:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(process_pass3, item) for item in dialogue_paras_p3]
+            for future in as_completed(futures):
+                future.result()
 
     # ── Save final results ─────────────────────────────────────────────────────
+    # Collect errors from all paragraphs (includes any carried over from prior runs).
+    all_tone_errors = [p["id"] for p in paragraphs if p.get("temperament_error")]
+    all_dialogue_mood_errors = [p["id"] for p in paragraphs if p.get("dialogue_mood_error")]
     paragraphs_doc["temperament_extraction_complete"] = True
-    paragraphs_doc["temperament_errors"] = tone_errors
-    paragraphs_doc["dialogue_mood_errors"] = dialogue_mood_errors
+    paragraphs_doc["temperament_errors"] = all_tone_errors
+    paragraphs_doc["dialogue_mood_errors"] = all_dialogue_mood_errors
     _atomic_write(paragraphs_path, paragraphs_doc)
 
-    _log(
-        f"[Pass 3/3] Done. {total2 - len(dialogue_mood_errors)}/{total2} succeeded."
-    )
+    _log(f"[Pass 3/3] Done. {total3 - len(dialogue_mood_errors)}/{total3} succeeded.")
     _log(
         f"All passes complete. "
-        f"Tone errors: {len(tone_errors)}. "
-        f"Dialogue mood errors: {len(dialogue_mood_errors)}."
+        f"Tone errors: {len(all_tone_errors)}. "
+        f"Dialogue mood errors: {len(all_dialogue_mood_errors)}."
     )
-    if tone_errors:
-        _log(f"Tone error paragraphs: {', '.join(tone_errors)}")
-    if dialogue_mood_errors:
-        _log(f"Dialogue mood error paragraphs: {', '.join(dialogue_mood_errors)}")
+    if all_tone_errors:
+        _log(f"Tone error paragraphs: {', '.join(all_tone_errors)}")
+    if all_dialogue_mood_errors:
+        _log(f"Dialogue mood error paragraphs: {', '.join(all_dialogue_mood_errors)}")
 
 
 def _atomic_write(path: str, data: dict):

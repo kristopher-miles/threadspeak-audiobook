@@ -15,6 +15,7 @@ import os
 import re
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from openai import OpenAI
@@ -151,6 +152,71 @@ def extract_dialogue_lines(text: str) -> list[str]:
     return QUOTE_RE.findall(text)
 
 
+def _call_identify_dialogue(client, model_name: str, system_prompt: str, user_msg: str, max_tokens: int) -> str:
+    """
+    Stream a single identify_dialogue tool call and return the speaker string.
+    Exits as soon as the first complete tool call JSON is received so local
+    models cannot loop and re-emit the same call repeatedly.
+    Returns normalized speaker name, or empty string on failure.
+    """
+    tool_call_args = ""
+    reasoning_content = ""
+
+    stream = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_msg},
+        ],
+        tools=[IDENTIFY_DIALOGUE_TOOL],
+        tool_choice="required",
+        parallel_tool_calls=False,
+        temperature=0.1,
+        max_tokens=max_tokens,
+        stream=True,
+    )
+    for chunk in stream:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        # Accumulate reasoning_content for models (e.g. Nemotron) that emit XML there.
+        rc = getattr(delta, "reasoning_content", None)
+        if rc:
+            reasoning_content += rc
+        if delta.tool_calls:
+            frag = delta.tool_calls[0].function.arguments
+            if frag:
+                tool_call_args += frag
+        # Stop as soon as we have parseable JSON — don't let the model loop.
+        if tool_call_args:
+            try:
+                args = json.loads(tool_call_args)
+                stream.close()
+                return _normalize_speaker_name(args.get("speaker"))
+            except json.JSONDecodeError:
+                pass
+
+    # Fallback: try parsing whatever tool-call JSON we accumulated.
+    if tool_call_args:
+        try:
+            args = json.loads(tool_call_args)
+            return _normalize_speaker_name(args.get("speaker"))
+        except json.JSONDecodeError:
+            pass
+
+    # Final fallback: Nemotron/XML models emit the call in reasoning_content.
+    if reasoning_content:
+        m = re.search(
+            r"<parameter=speaker>\s*(.*?)\s*</parameter>",
+            reasoning_content,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if m:
+            return _normalize_speaker_name(m.group(1))
+
+    return ""
+
+
 def main():
     if len(sys.argv) < 3:
         _log("Usage: assign_dialogue.py <paragraphs_path> <config_path> [--retry-errors <N>]")
@@ -248,34 +314,9 @@ def main():
             speaker = ""
             for attempt in range(1, retry_max + 1):
                 try:
-                    response = client.chat.completions.create(
-                        model=model_name,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user",   "content": user_msg},
-                        ],
-                        tools=[IDENTIFY_DIALOGUE_TOOL],
-                        tool_choice="required",
-                        temperature=0.1,
-                        max_tokens=max_tokens,
-                    )
-                    msg = response.choices[0].message
-                    tool_calls = getattr(msg, "tool_calls", None)
-                    if tool_calls:
-                        raw_args = tool_calls[0].function.arguments
-                        args = json.loads(raw_args)
-                        speaker = _normalize_speaker_name(args.get("speaker"))
-                    else:
-                        reasoning = getattr(msg, "reasoning_content", None) or ""
-                        m = re.search(
-                            r"<parameter=speaker>\s*(.*?)\s*</parameter>",
-                            reasoning,
-                            re.DOTALL | re.IGNORECASE,
-                        )
-                        if m:
-                            speaker = _normalize_speaker_name(m.group(1))
-                        if not speaker:
-                            _log(f"RETRY {para_id} attempt {attempt}/{retry_max}: model returned no speaker")
+                    speaker = _call_identify_dialogue(client, model_name, system_prompt, user_msg, max_tokens)
+                    if not speaker:
+                        _log(f"RETRY {para_id} attempt {attempt}/{retry_max}: model returned no speaker")
                 except Exception as e:
                     _log(f"RETRY {para_id} attempt {attempt}/{retry_max}: API error — {e}")
 
@@ -305,23 +346,47 @@ def main():
         _log(f"Error correction done. Fixed: {fixed_ref[0]}/{len(error_paras)}. Remaining errors: {len(error_ids)}.")
         return
 
-    # ── Filter dialogue paragraphs ─────────────────────────────────────────────
-    dialogue_paras = [(i, p) for i, p in enumerate(paragraphs) if p.get("has_dialogue")]
+    # ── Filter dialogue paragraphs — skip any already successfully assigned ──────
+    all_dialogue_paras = [(i, p) for i, p in enumerate(paragraphs) if p.get("has_dialogue")]
+    dialogue_paras = [
+        (i, p) for i, p in all_dialogue_paras
+        if not p.get("speaker") or p.get("dialogue_error")
+    ]
     total = len(dialogue_paras)
+    already_done = len(all_dialogue_paras) - total
 
-    if total == 0:
+    if not all_dialogue_paras:
         _log("No dialogue paragraphs found. Nothing to assign.")
         paragraphs_doc["dialogue_assignment_complete"] = True
         paragraphs_doc["dialogue_errors"] = []
         _atomic_write(paragraphs_path, paragraphs_doc)
         return
 
+    if total == 0:
+        _log("All dialogue paragraphs already assigned. Nothing to do.")
+        all_errors = [p["id"] for _, p in all_dialogue_paras if p.get("dialogue_error")]
+        paragraphs_doc["dialogue_assignment_complete"] = True
+        paragraphs_doc["dialogue_errors"] = all_errors
+        _atomic_write(paragraphs_path, paragraphs_doc)
+        return
+
+    if already_done:
+        _log(f"Resuming: {already_done} already assigned, {total} remaining.")
     _log(f"Assigning speakers to {total} dialogue paragraphs (workers={workers})...")
 
+    # Pre-populate known_speakers from any paragraphs already successfully assigned.
+    seen_speakers: set[str] = set()
     known_speakers: list[str] = []
+    for _, p in all_dialogue_paras:
+        s = p.get("speaker")
+        if s and not p.get("dialogue_error") and s not in seen_speakers:
+            seen_speakers.add(s)
+            known_speakers.append(s)
+
     errors: list[str] = []
     lock = threading.Lock()
     done_ref = [0]
+    task_start_time = time.time()
 
     def process_para(idx_para):
         idx, para = idx_para
@@ -337,7 +402,9 @@ def main():
                 errors.append(para_id)
                 done_ref[0] += 1
                 _log(f"ERROR {para_id}: tagged as dialogue but no quoted text found")
-                _maybe_progress(done_ref[0], total)
+                _maybe_progress(done_ref[0], total, task_start_time)
+                if done_ref[0] % 10 == 0:
+                    _atomic_write(paragraphs_path, paragraphs_doc)
             return
 
         with lock:
@@ -354,37 +421,10 @@ def main():
 
         speaker = ""
         try:
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": user_msg},
-                ],
-                tools=[IDENTIFY_DIALOGUE_TOOL],
-                tool_choice="required",
-                temperature=0.1,
-                max_tokens=max_tokens,
-            )
-            msg = response.choices[0].message
-            tool_calls = getattr(msg, "tool_calls", None)
-            if tool_calls:
-                raw_args = tool_calls[0].function.arguments
-                args = json.loads(raw_args)
-                speaker = _normalize_speaker_name(args.get("speaker"))
-            else:
-                # Some models (e.g. Nemotron) put the tool call in reasoning_content
-                # as XML instead of populating tool_calls. Parse it from there.
-                reasoning = getattr(msg, "reasoning_content", None) or ""
-                m = re.search(
-                    r"<parameter=speaker>\s*(.*?)\s*</parameter>",
-                    reasoning,
-                    re.DOTALL | re.IGNORECASE,
-                )
-                if m:
-                    speaker = _normalize_speaker_name(m.group(1))
-                if not speaker:
-                    _log(f"ERROR {para_id}: model did not return a speaker")
-                    _log(f"--- REQUEST THAT FAILED (system) ---\n{system_prompt}\n--- REQUEST THAT FAILED (user) ---\n{user_msg}\n--- END REQUEST ---")
+            speaker = _call_identify_dialogue(client, model_name, system_prompt, user_msg, max_tokens)
+            if not speaker:
+                _log(f"ERROR {para_id}: model did not return a speaker")
+                _log(f"--- REQUEST THAT FAILED (system) ---\n{system_prompt}\n--- REQUEST THAT FAILED (user) ---\n{user_msg}\n--- END REQUEST ---")
         except Exception as e:
             _log(f"ERROR {para_id}: API call failed — {e}")
 
@@ -401,7 +441,9 @@ def main():
                 if para_id not in errors:
                     errors.append(para_id)
             done_ref[0] += 1
-            _maybe_progress(done_ref[0], total)
+            _maybe_progress(done_ref[0], total, task_start_time)
+            if done_ref[0] % 10 == 0:
+                _atomic_write(paragraphs_path, paragraphs_doc)
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [executor.submit(process_para, item) for item in dialogue_paras]
@@ -409,19 +451,32 @@ def main():
             future.result()
 
     # ── Save results ───────────────────────────────────────────────────────────
+    # Collect errors from all dialogue paragraphs (including any from prior runs).
+    all_errors = [p["id"] for _, p in all_dialogue_paras if p.get("dialogue_error")]
     paragraphs_doc["dialogue_assignment_complete"] = True
-    paragraphs_doc["dialogue_errors"] = errors
+    paragraphs_doc["dialogue_errors"] = all_errors
     _atomic_write(paragraphs_path, paragraphs_doc)
 
     assigned = total - len(errors)
     _log(f"Done. Assigned: {assigned}/{total}. Errors: {len(errors)}.")
-    if errors:
-        _log(f"Paragraphs with errors: {', '.join(errors)}")
+    if all_errors:
+        _log(f"Paragraphs with errors: {', '.join(all_errors)}")
 
 
-def _maybe_progress(done: int, total: int):
+def _format_eta(start_time: float, done: int, total: int) -> str:
+    if done <= 0 or total <= done:
+        return ""
+    elapsed = time.time() - start_time
+    remaining_seconds = (elapsed / done) * (total - done)
+    if remaining_seconds < 60:
+        return f" (~{int(remaining_seconds)}s remaining)"
+    return f" (~{int(remaining_seconds // 60)}m {int(remaining_seconds % 60)}s remaining)"
+
+
+def _maybe_progress(done: int, total: int, start_time: float):
     if done % 10 == 0 or done == total:
-        _progress(done, total, f"Assigned {done}/{total} dialogue paragraphs...")
+        eta = _format_eta(start_time, done, total)
+        _progress(done, total, f"Assigned {done}/{total} dialogue paragraphs...{eta}")
 
 
 def _atomic_write(path: str, data: dict):

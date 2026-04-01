@@ -617,7 +617,7 @@ class ProjectManager:
             "tail_ms": int(tail_ms),
         }
 
-    def _collect_merge_timeline(self, progress_callback=None, merge_started_at=None, export_config=None, log_callback=None):
+    def _collect_merge_timeline(self, progress_callback=None, merge_started_at=None, export_config=None, log_callback=None, temp_dir=None):
         chunks = self.load_chunks()
         timeline = []
         timeline_size_bytes = 0
@@ -631,17 +631,20 @@ class ProjectManager:
             "tail_ms_removed": 0,
             "fallback_originals": 0,
         }
-        eligible_chunks = []
+        # Build ordered list of (kind, chunk[, full_path]) preserving chunk order
+        ordered_items = []
         for chunk in chunks:
-            if chunk.get("status") != "done":
-                continue
-            path = chunk.get("audio_path")
-            if not path:
-                continue
-            full_path = os.path.join(self.root_dir, path)
-            if not os.path.exists(full_path):
-                continue
-            eligible_chunks.append((chunk, full_path))
+            if chunk.get("type") == "silence":
+                ordered_items.append(("silence", chunk))
+            elif chunk.get("status") == "done":
+                path = chunk.get("audio_path")
+                if not path:
+                    continue
+                full_path = os.path.join(self.root_dir, path)
+                if not os.path.exists(full_path):
+                    continue
+                ordered_items.append(("audio", chunk, full_path))
+        eligible_chunks = [(c, p) for kind, c, p in (x for x in ordered_items if x[0] == "audio")]
         total_candidates = len(eligible_chunks)
 
         if progress_callback:
@@ -662,9 +665,12 @@ class ProjectManager:
                 "trim_enabled": bool(trim_cfg["enabled"]),
             })
 
+        # Pre-process audio clips (trim/index), then build final ordered timeline
         last_prepare_bucket = -1
         prepare_started_at = merge_started_at or time.time()
         clip_times = []
+        # Map uid -> resolved_path for audio chunks after trim processing
+        resolved_audio_paths = {}
         for processed_index, (chunk, full_path) in enumerate(eligible_chunks, start=1):
             clip_start = time.time()
             resolved_path = full_path
@@ -682,13 +688,7 @@ class ProjectManager:
                     trim_stats["fallback_originals"] += 1
                     resolved_path = full_path
             clip_times.append(time.time() - clip_start)
-            item = {
-                "chunk": chunk,
-                "full_path": resolved_path,
-                "file_size_bytes": os.path.getsize(resolved_path),
-            }
-            timeline.append(item)
-            timeline_size_bytes += item["file_size_bytes"]
+            resolved_audio_paths[chunk["uid"]] = resolved_path
             if progress_callback and total_candidates > 0:
                 percent_complete = (processed_index / total_candidates) * 100.0
                 progress_bucket = int(percent_complete // 5)
@@ -740,6 +740,33 @@ class ProjectManager:
                             flush=True,
                         )
                     last_prepare_bucket = progress_bucket
+
+        # Build final timeline in chunk order, interleaving silence blocks
+        for entry in ordered_items:
+            kind = entry[0]
+            chunk = entry[1]
+            if kind == "silence":
+                duration_ms = int(float(chunk.get("silence_duration_s", 1.0)) * 1000)
+                item = {
+                    "chunk": chunk,
+                    "full_path": None,  # WAV generated later with correct audio format
+                    "file_size_bytes": 0,
+                    "is_silence_block": True,
+                    "silence_duration_ms": duration_ms,
+                }
+                timeline.append(item)
+            else:
+                # audio chunk
+                resolved_path = resolved_audio_paths.get(chunk["uid"])
+                if resolved_path is None:
+                    continue
+                item = {
+                    "chunk": chunk,
+                    "full_path": resolved_path,
+                    "file_size_bytes": os.path.getsize(resolved_path),
+                }
+                timeline.append(item)
+                timeline_size_bytes += item["file_size_bytes"]
 
         if log_callback and trim_cfg["enabled"]:
             total_removed_ms = trim_stats["lead_ms_removed"] + trim_stats["tail_ms_removed"]
@@ -822,12 +849,13 @@ class ProjectManager:
                 reference_channels = None
                 reference_sample_width = None
 
-        # Keep pause assets uncompressed to avoid boundary artifacts that can be
-        # introduced by repeatedly concatenating tiny lossy MP3 silence files.
-        default_silence_path = os.path.join(temp_dir, "pause_default.wav")
-        same_silence_path = os.path.join(temp_dir, "pause_same_speaker.wav")
-        chapter_end_silence_path = os.path.join(temp_dir, "pause_chapter_end.wav")
-        paragraph_silence_path = os.path.join(temp_dir, "pause_paragraph.wav")
+        # Silence files must be MP3 so they are the same codec as the audio clips.
+        # FFmpeg's concat demuxer skips files whose codec differs from the first
+        # entry in the concat list, which caused all silence to be dropped silently.
+        default_silence_path = os.path.join(temp_dir, "pause_default.mp3")
+        same_silence_path = os.path.join(temp_dir, "pause_same_speaker.mp3")
+        chapter_end_silence_path = os.path.join(temp_dir, "pause_chapter_end.mp3")
+        paragraph_silence_path = os.path.join(temp_dir, "pause_paragraph.mp3")
 
         def _write(path, duration_ms):
             seg = AudioSegment.silent(duration=max(0, duration_ms))
@@ -837,7 +865,7 @@ class ProjectManager:
                 seg = seg.set_channels(reference_channels)
             if reference_sample_width:
                 seg = seg.set_sample_width(reference_sample_width)
-            exp = seg.export(path, format="wav")
+            exp = seg.export(path, format="mp3", parameters=["-q:a", "2"])
             if hasattr(exp, "close"):
                 exp.close()
 
@@ -855,6 +883,8 @@ class ProjectManager:
             "same_size_bytes": os.path.getsize(same_silence_path),
             "chapter_end_size_bytes": os.path.getsize(chapter_end_silence_path),
             "paragraph_size_bytes": os.path.getsize(paragraph_silence_path),
+            # Reference format for use when generating additional silence WAVs
+            "_write": _write,
         }
 
     @staticmethod
@@ -4162,6 +4192,32 @@ class ProjectManager:
             self._atomic_json_write(chunks, self.chunks_path)
             return new_chunk, chunks
 
+    def insert_silence_chunk(self, after_ref, duration_s=1.0):
+        """Insert a silence block after the given chunk. Returns (new_chunk, chunks) or None."""
+        with self._chunks_lock:
+            if not os.path.exists(self.chunks_path):
+                return None
+            with open(self.chunks_path, "r", encoding="utf-8") as f:
+                chunks = json.load(f)
+            after_index = self.resolve_chunk_index(after_ref, chunks)
+            if after_index is None or not (0 <= after_index < len(chunks)):
+                return None
+            source = chunks[after_index]
+            new_chunk = {
+                "id": after_index + 1,
+                "uid": self._new_chunk_uid(),
+                "type": "silence",
+                "silence_duration_s": float(duration_s),
+                "status": "done",
+            }
+            if source.get("chapter"):
+                new_chunk["chapter"] = source["chapter"]
+            chunks.insert(after_index + 1, new_chunk)
+            for i, chunk in enumerate(chunks):
+                chunk["id"] = i
+            self._atomic_json_write(chunks, self.chunks_path)
+            return new_chunk, chunks
+
     def delete_chunk(self, chunk_ref):
         """Delete a chunk at the given index. Returns (deleted_chunk, updated_chunks) or None."""
         with self._chunks_lock:
@@ -4565,9 +4621,12 @@ class ProjectManager:
                 chunk["instruct"] = data["instruct"]
             if "speaker" in data:
                 chunk["speaker"] = data["speaker"]
+            if "silence_duration_s" in data:
+                chunk["silence_duration_s"] = float(data["silence_duration_s"])
 
             # If text/instruct/speaker changed, invalidate the old audio immediately.
-            if "text" in data or "instruct" in data or "speaker" in data:
+            # Silence chunks have no audio to invalidate.
+            if chunk.get("type") != "silence" and ("text" in data or "instruct" in data or "speaker" in data):
                 chunk["audio_path"] = None
                 chunk["status"] = "pending"
                 chunk["audio_validation"] = None
@@ -4859,29 +4918,42 @@ class ProjectManager:
 
     def merge_audio(self, progress_callback=None, log_callback=None, export_config=None):
         merge_started_at = time.time()
+        output_filename = "cloned_audiobook.mp3"
+        output_path = os.path.join(self.root_dir, output_filename)
+        temp_dir = tempfile.mkdtemp(prefix="merge_audio_", dir=self.root_dir)
         timeline = self._collect_merge_timeline(
             progress_callback=progress_callback,
             merge_started_at=merge_started_at,
             export_config=export_config,
             log_callback=log_callback,
+            temp_dir=temp_dir,
         )
 
         if not timeline:
+            shutil.rmtree(temp_dir, ignore_errors=True)
             return False, "No audio segments found"
 
         chapter_groups = self._group_timeline_by_chapter(timeline)
-
-        output_filename = "cloned_audiobook.mp3"
-        output_path = os.path.join(self.root_dir, output_filename)
-        temp_dir = tempfile.mkdtemp(prefix="merge_audio_", dir=self.root_dir)
         concat_path = os.path.join(temp_dir, "concat.txt")
 
         try:
+            first_audio_path = next(
+                (item["full_path"] for item in timeline if not item.get("is_silence_block")), None
+            )
             silence_assets = self._create_silence_assets(
                 temp_dir,
                 export_config,
-                reference_audio_path=timeline[0]["full_path"] if timeline else None,
+                reference_audio_path=first_audio_path,
             )
+
+            # Generate silence block WAVs now that reference audio format is known
+            _write_silence = silence_assets["_write"]
+            for item in timeline:
+                if item.get("is_silence_block") and item["full_path"] is None:
+                    wav_path = os.path.join(temp_dir, f"silence_block_{item['chunk']['uid']}.wav")
+                    _write_silence(wav_path, item["silence_duration_ms"])
+                    item["full_path"] = wav_path
+                    item["file_size_bytes"] = os.path.getsize(wav_path)
 
             estimated_size_bytes = 0
             previous_item = None
@@ -4893,12 +4965,14 @@ class ProjectManager:
             with open(concat_path, "w", encoding="utf-8") as concat_file:
                 for chapter_index, (chapter_label, chapter_items) in enumerate(chapter_groups, start=1):
                     if previous_item is not None and chapter_items:
-                        pause_path, pause_size = self._pick_silence(
-                            previous_item, chapter_items[0], silence_assets, is_chapter_boundary=True
-                        )
-                        self._write_concat_line(concat_file, pause_path)
-                        estimated_size_bytes += pause_size
-                        total_chapter_end += 1
+                        first_item = chapter_items[0]
+                        if not previous_item.get("is_silence_block") and not first_item.get("is_silence_block"):
+                            pause_path, pause_size = self._pick_silence(
+                                previous_item, first_item, silence_assets, is_chapter_boundary=True
+                            )
+                            self._write_concat_line(concat_file, pause_path)
+                            estimated_size_bytes += pause_size
+                            total_chapter_end += 1
 
                     chapter_same = 0
                     chapter_diff = 0
@@ -4906,18 +4980,19 @@ class ProjectManager:
                     prev_item_in_chapter = None
                     for item in chapter_items:
                         if prev_item_in_chapter is not None:
-                            pause_path, pause_size = self._pick_silence(prev_item_in_chapter, item, silence_assets)
-                            self._write_concat_line(concat_file, pause_path)
-                            estimated_size_bytes += pause_size
-                            # Tally silence type for diagnostics
-                            prev_pid = prev_item_in_chapter["chunk"].get("paragraph_id")
-                            curr_pid = item["chunk"].get("paragraph_id")
-                            if prev_pid and curr_pid and prev_pid != curr_pid:
-                                chapter_para += 1
-                            elif prev_item_in_chapter["chunk"]["speaker"] == item["chunk"]["speaker"]:
-                                chapter_same += 1
-                            else:
-                                chapter_diff += 1
+                            if not item.get("is_silence_block") and not prev_item_in_chapter.get("is_silence_block"):
+                                pause_path, pause_size = self._pick_silence(prev_item_in_chapter, item, silence_assets)
+                                self._write_concat_line(concat_file, pause_path)
+                                estimated_size_bytes += pause_size
+                                # Tally silence type for diagnostics
+                                prev_pid = prev_item_in_chapter["chunk"].get("paragraph_id")
+                                curr_pid = item["chunk"].get("paragraph_id")
+                                if prev_pid and curr_pid and prev_pid != curr_pid:
+                                    chapter_para += 1
+                                elif prev_item_in_chapter["chunk"].get("speaker") == item["chunk"].get("speaker"):
+                                    chapter_same += 1
+                                else:
+                                    chapter_diff += 1
                         self._write_concat_line(concat_file, item["full_path"])
                         estimated_size_bytes += item["file_size_bytes"]
                         prev_item_in_chapter = item
@@ -5027,26 +5102,41 @@ class ProjectManager:
 
     def export_optimized_mp3_zip(self, progress_callback=None, log_callback=None, export_config=None, max_part_seconds=7200):
         merge_started_at = time.time()
+        zip_path = os.path.join(self.root_dir, "optimized_audiobook.zip")
+        temp_dir = tempfile.mkdtemp(prefix="optimized_export_", dir=self.root_dir)
         timeline = self._collect_merge_timeline(
             progress_callback=progress_callback,
             merge_started_at=merge_started_at,
             export_config=export_config,
             log_callback=log_callback,
+            temp_dir=temp_dir,
         )
         if not timeline:
+            shutil.rmtree(temp_dir, ignore_errors=True)
             return False, "No audio segments found"
 
         chapter_groups = self._group_timeline_by_chapter(timeline)
-        zip_path = os.path.join(self.root_dir, "optimized_audiobook.zip")
-        temp_dir = tempfile.mkdtemp(prefix="optimized_export_", dir=self.root_dir)
         chapter_end_ms = getattr(export_config, "silence_end_of_chapter_ms", 3000)
 
         try:
+            first_audio_path = next(
+                (item["full_path"] for item in timeline if not item.get("is_silence_block")), None
+            )
             silence_assets = self._create_silence_assets(
                 temp_dir,
                 export_config,
-                reference_audio_path=timeline[0]["full_path"] if timeline else None,
+                reference_audio_path=first_audio_path,
             )
+
+            # Generate silence block WAVs now that reference audio format is known
+            _write_silence = silence_assets["_write"]
+            for item in timeline:
+                if item.get("is_silence_block") and item["full_path"] is None:
+                    wav_path = os.path.join(temp_dir, f"silence_block_{item['chunk']['uid']}.wav")
+                    _write_silence(wav_path, item["silence_duration_ms"])
+                    item["full_path"] = wav_path
+                    item["file_size_bytes"] = os.path.getsize(wav_path)
+
             chapter_exports = []
             estimated_size_bytes = 0
             total_same = 0
@@ -5065,17 +5155,18 @@ class ProjectManager:
                 with open(concat_path, "w", encoding="utf-8") as concat_file:
                     for item in chapter_items:
                         if prev_item_in_chapter is not None:
-                            pause_path, pause_size = self._pick_silence(prev_item_in_chapter, item, silence_assets)
-                            self._write_concat_line(concat_file, pause_path)
-                            chapter_estimated_size += pause_size
-                            prev_pid = prev_item_in_chapter["chunk"].get("paragraph_id")
-                            curr_pid = item["chunk"].get("paragraph_id")
-                            if prev_pid and curr_pid and prev_pid != curr_pid:
-                                chapter_para += 1
-                            elif prev_item_in_chapter["chunk"]["speaker"] == item["chunk"]["speaker"]:
-                                chapter_same += 1
-                            else:
-                                chapter_diff += 1
+                            if not item.get("is_silence_block") and not prev_item_in_chapter.get("is_silence_block"):
+                                pause_path, pause_size = self._pick_silence(prev_item_in_chapter, item, silence_assets)
+                                self._write_concat_line(concat_file, pause_path)
+                                chapter_estimated_size += pause_size
+                                prev_pid = prev_item_in_chapter["chunk"].get("paragraph_id")
+                                curr_pid = item["chunk"].get("paragraph_id")
+                                if prev_pid and curr_pid and prev_pid != curr_pid:
+                                    chapter_para += 1
+                                elif prev_item_in_chapter["chunk"].get("speaker") == item["chunk"].get("speaker"):
+                                    chapter_same += 1
+                                else:
+                                    chapter_diff += 1
                         self._write_concat_line(concat_file, item["full_path"])
                         chapter_estimated_size += item["file_size_bytes"]
                         prev_item_in_chapter = item
@@ -5265,25 +5356,30 @@ class ProjectManager:
         prev_speaker = None
         cursor_ms = 0
 
+        prev_item = None
         for item in timeline_items:
             chunk = item["chunk"]
-            full_path = item["full_path"]
-            try:
-                segment = AudioSegment.from_file(full_path)
-            except Exception as e:
-                print(f"Error loading audio for Audacity export {full_path}: {e}")
-                continue
-
-            speaker = chunk["speaker"]
-            if prev_speaker is not None:
-                if speaker == prev_speaker:
-                    cursor_ms += SAME_SPEAKER_PAUSE_MS
-                else:
-                    cursor_ms += DEFAULT_PAUSE_MS
+            if item.get("is_silence_block"):
+                segment = AudioSegment.silent(duration=item["silence_duration_ms"])
+                # No auto-silence before/after explicit silence blocks
+            else:
+                try:
+                    segment = AudioSegment.from_file(item["full_path"])
+                except Exception as e:
+                    print(f"Error loading audio for Audacity export {item['full_path']}: {e}")
+                    prev_item = item
+                    continue
+                if prev_item is not None and not prev_item.get("is_silence_block"):
+                    speaker = chunk.get("speaker", "")
+                    prev_speaker = prev_item["chunk"].get("speaker", "")
+                    if speaker == prev_speaker:
+                        cursor_ms += SAME_SPEAKER_PAUSE_MS
+                    else:
+                        cursor_ms += DEFAULT_PAUSE_MS
 
             timeline.append((chunk, segment, cursor_ms))
             cursor_ms += len(segment)
-            prev_speaker = speaker
+            prev_item = item
 
         if not timeline:
             return False, "No audio segments found"
@@ -5294,9 +5390,10 @@ class ProjectManager:
         speakers_ordered = []
         seen = set()
         for chunk, segment, start_ms in timeline:
-            if chunk["speaker"] not in seen:
-                speakers_ordered.append(chunk["speaker"])
-                seen.add(chunk["speaker"])
+            speaker = chunk.get("speaker")
+            if speaker and speaker not in seen:
+                speakers_ordered.append(speaker)
+                seen.add(speaker)
 
         speaker_tracks = {}
         for speaker in speakers_ordered:
@@ -5304,7 +5401,7 @@ class ProjectManager:
             track = AudioSegment.empty()
 
             for chunk, segment, start_ms in timeline:
-                if chunk["speaker"] != speaker:
+                if chunk.get("speaker") != speaker:
                     continue
                 # Insert silence gap from current track position to this chunk's start
                 gap = start_ms - track_cursor
@@ -5374,28 +5471,33 @@ class ProjectManager:
         prev_chunk = None
         cursor_ms = 0
 
+        prev_item = None
         for item in timeline_items:
             chunk = item["chunk"]
-            full_path = item["full_path"]
-            try:
-                segment = AudioSegment.from_file(full_path)
-            except Exception as e:
-                print(f"Error loading audio for M4B export {full_path}: {e}")
-                continue
-
-            if prev_chunk is not None:
-                prev_pid = prev_chunk.get("paragraph_id")
-                curr_pid = chunk.get("paragraph_id")
-                if prev_pid and curr_pid and prev_pid != curr_pid:
-                    cursor_ms += paragraph_ms
-                elif chunk["speaker"] == prev_chunk["speaker"]:
-                    cursor_ms += same_speaker_ms
-                else:
-                    cursor_ms += between_speakers_ms
+            if item.get("is_silence_block"):
+                segment = AudioSegment.silent(duration=item["silence_duration_ms"])
+                # No auto-silence before/after explicit silence blocks
+            else:
+                try:
+                    segment = AudioSegment.from_file(item["full_path"])
+                except Exception as e:
+                    print(f"Error loading audio for M4B export {item['full_path']}: {e}")
+                    prev_item = item
+                    continue
+                if prev_item is not None and not prev_item.get("is_silence_block"):
+                    prev_chunk = prev_item["chunk"]
+                    prev_pid = prev_chunk.get("paragraph_id")
+                    curr_pid = chunk.get("paragraph_id")
+                    if prev_pid and curr_pid and prev_pid != curr_pid:
+                        cursor_ms += paragraph_ms
+                    elif chunk.get("speaker") == prev_chunk.get("speaker"):
+                        cursor_ms += same_speaker_ms
+                    else:
+                        cursor_ms += between_speakers_ms
 
             timeline.append((chunk, segment, cursor_ms))
             cursor_ms += len(segment)
-            prev_chunk = chunk
+            prev_item = item
 
         if not timeline:
             return False, "No audio segments found"
@@ -5405,8 +5507,9 @@ class ProjectManager:
         print(f"  M4B: {len(chapters)} chapters")
 
         # Phase 3 — Combine audio and export to temp WAV
+        # Silence blocks are already AudioSegment objects; treat them as their own "speaker"
         audio_segments = [seg for _, seg, _ in timeline]
-        speakers = [chunk["speaker"] for chunk, _, _ in timeline]
+        speakers = [chunk.get("speaker", "") for chunk, _, _ in timeline]
         final_audio = combine_audio_with_pauses(
             audio_segments, speakers,
             pause_ms=between_speakers_ms,
