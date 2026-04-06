@@ -2246,8 +2246,32 @@
             }
         };
 
+        async function populateExportChapterSelect() {
+            const select = document.getElementById('export-chapter-select');
+            if (!select) return;
+            try {
+                const chunks = await API.get('/api/chunks');
+                const seen = new Set();
+                const opts = [new Option('Full Project', '')];
+                for (const chunk of chunks) {
+                    const ch = (chunk.chapter || '').trim();
+                    if (ch && !seen.has(ch)) {
+                        seen.add(ch);
+                        opts.push(new Option(ch, ch));
+                    }
+                }
+                const current = select.value;
+                select.replaceChildren(...opts);
+                if ([...select.options].some(o => o.value === current)) select.value = current;
+            } catch (e) { /* non-fatal */ }
+        }
+        window.populateExportChapterSelect = populateExportChapterSelect;
+
         document.getElementById('btn-merge').addEventListener('click', async () => {
-             if (!await showConfirm("Merge all valid audio chunks into final audiobook?")) return;
+             const chapterSelect = document.getElementById('export-chapter-select');
+             const chapter = chapterSelect ? chapterSelect.value : '';
+             const scopeLabel = chapter ? `chapter "${chapter}"` : 'the full project';
+             if (!await showConfirm(`Merge ${scopeLabel} into an MP3?`)) return;
 
              try {
                  let exportConfig = null;
@@ -2255,7 +2279,7 @@
                      exportConfig = await window.persistExportConfigFromUI();
                  }
                  await repairLegacyProjectBeforeExport();
-                 await API.post('/api/merge', { export: exportConfig || undefined });
+                 await API.post('/api/merge', { export: exportConfig || undefined, chapter: chapter || undefined });
                  markTaskActionRequested('audio', 'merge');
                  // Switch to Export tab and poll
                  document.querySelector('[data-tab="audio"]').click();
@@ -2266,6 +2290,28 @@
         });
 
         document.getElementById('btn-merge-optimized').addEventListener('click', async () => {
+             const chapterSelect = document.getElementById('export-chapter-select');
+             const chapter = chapterSelect ? chapterSelect.value : '';
+
+             if (chapter) {
+                 // Single chapter: optimized export not supported, route to merge
+                 if (!await showConfirm(`Export chapter "${chapter}" as MP3? (Optimized export targets the full project only.)`)) return;
+                 try {
+                     let exportConfig = null;
+                     if (window.persistExportConfigFromUI) {
+                         exportConfig = await window.persistExportConfigFromUI();
+                     }
+                     await repairLegacyProjectBeforeExport();
+                     await API.post('/api/merge', { export: exportConfig || undefined, chapter });
+                     markTaskActionRequested('audio', 'merge');
+                     document.querySelector('[data-tab="audio"]').click();
+                     pollLogs('audio', 'audio-logs');
+                 } catch (e) {
+                     showToast("Export failed: " + e.message, 'error');
+                 }
+                 return;
+             }
+
              if (!await showConfirm("Create an optimized export zip with audiobook parts capped at about 2 hours each?")) return;
 
              try {

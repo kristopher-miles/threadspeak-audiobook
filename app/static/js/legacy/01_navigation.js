@@ -48,6 +48,8 @@
                     loadLoraModels();
                 } else if (nextTab === 'dataset-builder') {
                     dsbLoadProjects(dsbCurrentProject);
+                } else if (nextTab === 'audio') {
+                    if (window.populateExportChapterSelect) window.populateExportChapterSelect();
                 }
 
                 reconnectTaskLogs().catch(err => console.error('Task log reconnect error', err));

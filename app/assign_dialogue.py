@@ -29,7 +29,7 @@ IDENTIFY_DIALOGUE_TOOL = {
     "type": "function",
     "function": {
         "name": "identify_dialogue",
-        "description": "Record the name of the character who speaks the dialogue in this paragraph.",
+        "description": "Record the name of the character who speaks this quoted text.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -38,7 +38,8 @@ IDENTIFY_DIALOGUE_TOOL = {
                     "description": (
                         "Name of the character speaking. Use an existing name from the "
                         "known-characters list when one fits, or supply a new name if none does. "
-                        "Use NARRATOR only for clearly unvoiced internal thoughts inside quotes."
+                        "Return NARRATOR if the quoted text is a scare quote, figure of speech, "
+                        "or clearly not spoken aloud by a character."
                     ),
                 }
             },
@@ -58,6 +59,7 @@ def _normalize_speaker_name(raw_speaker: str) -> str:
     """Normalize a model-returned speaker name to canonical form.
 
     Rules:
+    - Return "NARRATOR" unchanged for scare-quote/non-dialogue markers.
     - Convert non-alphanumeric characters to spaces.
     - Drop all leading characters until the first letter.
     - Reject names with no letters.
@@ -67,6 +69,10 @@ def _normalize_speaker_name(raw_speaker: str) -> str:
     raw = str(raw_speaker or "").strip()
     if not raw:
         return ""
+
+    # Preserve the NARRATOR sentinel regardless of case/spacing.
+    if raw.upper() == "NARRATOR":
+        return "NARRATOR"
 
     # Keep only letters/numbers; convert everything else to spaces.
     sanitized = "".join(ch if ch.isalnum() else " " for ch in raw)
@@ -283,10 +289,14 @@ def main():
                        if p.get("dialogue_error") and p["id"] in error_ids]
         _log(f"=== Error Correction: retrying {len(error_paras)} paragraph(s) with up to {retry_max} attempt(s) each (workers={workers}) ===")
 
-        known_speakers: list[str] = [
-            p.get("speaker") for p in paragraphs
-            if p.get("speaker") and not p.get("dialogue_error")
-        ]
+        seen_retry: set[str] = set()
+        known_speakers: list[str] = []
+        for p in paragraphs:
+            if not p.get("dialogue_error"):
+                for s in (p.get("speakers") or []):
+                    if s and s != "NARRATOR" and s not in seen_retry:
+                        seen_retry.add(s)
+                        known_speakers.append(s)
 
         retry_lock = threading.Lock()
         fixed_ref = [0]
@@ -294,47 +304,63 @@ def main():
         def retry_one(idx_para):
             idx, para = idx_para
             para_id = para["id"]
-            dialogue_lines = extract_dialogue_lines(para["text"])
-            if not dialogue_lines:
+            quotes = extract_dialogue_lines(para["text"])
+            if not quotes:
                 _log(f"SKIP {para_id}: no quoted text — cannot retry")
                 return
 
             context_text = build_context_window(paragraphs, idx, context_budget)
             with retry_lock:
                 char_list = ", ".join(known_speakers) if known_speakers else "(none yet)"
-            dialogue_block = "\n".join(f'- "{line}"' for line in dialogue_lines)
-            user_msg = (
-                f"PASSAGE CONTEXT:\n{context_text}\n\n"
-                f"KNOWN CHARACTERS SO FAR: {char_list}\n\n"
-                f"DIALOGUE IN THE TARGET PARAGRAPH:\n{dialogue_block}\n\n"
-                "Use the identify_dialogue tool to name the speaker of this dialogue. "
-                "If none of the known characters fits, supply the new character's name."
-            )
 
-            speaker = ""
-            for attempt in range(1, retry_max + 1):
-                try:
-                    speaker = _call_identify_dialogue(client, model_name, system_prompt, user_msg, max_tokens)
-                    if not speaker:
-                        _log(f"RETRY {para_id} attempt {attempt}/{retry_max}: model returned no speaker")
-                except Exception as e:
-                    _log(f"RETRY {para_id} attempt {attempt}/{retry_max}: API error — {e}")
+            current_speakers = list(para.get("speakers") or [""] * len(quotes))
+            current_errors = list(para.get("quote_errors") or [True] * len(quotes))
+            # Pad to match current quote count (text may have changed)
+            while len(current_speakers) < len(quotes):
+                current_speakers.append("")
+                current_errors.append(True)
 
-                if speaker:
-                    break
+            for qi, quote_text in enumerate(quotes):
+                if not current_errors[qi]:
+                    continue  # Already succeeded
+                user_msg = (
+                    f"PASSAGE CONTEXT:\n{context_text}\n\n"
+                    f"KNOWN CHARACTERS SO FAR: {char_list}\n\n"
+                    f"QUOTED TEXT:\n\"{quote_text}\"\n\n"
+                    "Use the identify_dialogue tool to name the speaker of this quoted text. "
+                    "If none of the known characters fits, supply the new character's name. "
+                    "If this is a scare quote, figure of speech, or clearly not spoken aloud by a character, "
+                    "return NARRATOR as the speaker."
+                )
+                speaker = ""
+                for attempt in range(1, retry_max + 1):
+                    try:
+                        speaker = _call_identify_dialogue(client, model_name, system_prompt, user_msg, max_tokens)
+                        if not speaker:
+                            _log(f"RETRY {para_id} q{qi} attempt {attempt}/{retry_max}: model returned no speaker")
+                    except Exception as e:
+                        _log(f"RETRY {para_id} q{qi} attempt {attempt}/{retry_max}: API error — {e}")
+                    if speaker:
+                        break
+
+                with retry_lock:
+                    if speaker:
+                        current_speakers[qi] = speaker
+                        current_errors[qi] = False
+                        if speaker != "NARRATOR" and speaker not in known_speakers:
+                            known_speakers.append(speaker)
+                            _log(f"New character: {speaker}")
+                        _log(f"FIXED {para_id} q{qi}: speaker = {speaker}")
+                    else:
+                        _log(f"FAILED {para_id} q{qi}: still no speaker after {retry_max} attempt(s)")
 
             with retry_lock:
-                if speaker:
-                    para["speaker"] = speaker
-                    para["dialogue_error"] = False
-                    if speaker not in known_speakers:
-                        known_speakers.append(speaker)
-                        _log(f"New character: {speaker}")
+                para["speakers"] = current_speakers
+                para["quote_errors"] = current_errors
+                para["dialogue_error"] = any(current_errors)
+                if not para["dialogue_error"]:
                     error_ids.discard(para_id)
                     fixed_ref[0] += 1
-                    _log(f"FIXED {para_id}: speaker = {speaker}")
-                else:
-                    _log(f"FAILED {para_id}: still no speaker after {retry_max} attempt(s)")
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [executor.submit(retry_one, item) for item in error_paras]
@@ -350,7 +376,7 @@ def main():
     all_dialogue_paras = [(i, p) for i, p in enumerate(paragraphs) if p.get("has_dialogue")]
     dialogue_paras = [
         (i, p) for i, p in all_dialogue_paras
-        if not p.get("speaker") or p.get("dialogue_error")
+        if not p.get("speakers") or p.get("dialogue_error")
     ]
     total = len(dialogue_paras)
     already_done = len(all_dialogue_paras) - total
@@ -378,10 +404,12 @@ def main():
     seen_speakers: set[str] = set()
     known_speakers: list[str] = []
     for _, p in all_dialogue_paras:
-        s = p.get("speaker")
-        if s and not p.get("dialogue_error") and s not in seen_speakers:
-            seen_speakers.add(s)
-            known_speakers.append(s)
+        if p.get("dialogue_error"):
+            continue
+        for s in (p.get("speakers") or []):
+            if s and s != "NARRATOR" and s not in seen_speakers:
+                seen_speakers.add(s)
+                known_speakers.append(s)
 
     errors: list[str] = []
     lock = threading.Lock()
@@ -393,11 +421,12 @@ def main():
         para_id = para["id"]
 
         context_text = build_context_window(paragraphs, idx, context_budget)
-        dialogue_lines = extract_dialogue_lines(para["text"])
-        if not dialogue_lines:
+        quotes = extract_dialogue_lines(para["text"])
+        if not quotes:
             # has_dialogue was set but no quoted text found — treat as error
             with lock:
-                para["speaker"] = None
+                para["speakers"] = []
+                para["quote_errors"] = []
                 para["dialogue_error"] = True
                 errors.append(para_id)
                 done_ref[0] += 1
@@ -410,36 +439,39 @@ def main():
         with lock:
             char_list = ", ".join(known_speakers) if known_speakers else "(none yet)"
 
-        dialogue_block = "\n".join(f'- "{line}"' for line in dialogue_lines)
-        user_msg = (
-            f"PASSAGE CONTEXT:\n{context_text}\n\n"
-            f"KNOWN CHARACTERS SO FAR: {char_list}\n\n"
-            f"DIALOGUE IN THE TARGET PARAGRAPH:\n{dialogue_block}\n\n"
-            "Use the identify_dialogue tool to name the speaker of this dialogue. "
-            "If none of the known characters fits, supply the new character's name."
-        )
-
-        speaker = ""
-        try:
-            speaker = _call_identify_dialogue(client, model_name, system_prompt, user_msg, max_tokens)
-            if not speaker:
-                _log(f"ERROR {para_id}: model did not return a speaker")
-                _log(f"--- REQUEST THAT FAILED (system) ---\n{system_prompt}\n--- REQUEST THAT FAILED (user) ---\n{user_msg}\n--- END REQUEST ---")
-        except Exception as e:
-            _log(f"ERROR {para_id}: API call failed — {e}")
+        speakers = []
+        quote_errors = []
+        for quote_text in quotes:
+            user_msg = (
+                f"PASSAGE CONTEXT:\n{context_text}\n\n"
+                f"KNOWN CHARACTERS SO FAR: {char_list}\n\n"
+                f"QUOTED TEXT:\n\"{quote_text}\"\n\n"
+                "Use the identify_dialogue tool to name the speaker of this quoted text. "
+                "If none of the known characters fits, supply the new character's name. "
+                "If this is a scare quote, figure of speech, or clearly not spoken aloud by a character, "
+                "return NARRATOR as the speaker."
+            )
+            speaker = ""
+            try:
+                speaker = _call_identify_dialogue(client, model_name, system_prompt, user_msg, max_tokens)
+                if not speaker:
+                    _log(f"ERROR {para_id} quote '{quote_text[:40]}': model returned no speaker")
+                    _log(f"--- REQUEST THAT FAILED (system) ---\n{system_prompt}\n--- REQUEST THAT FAILED (user) ---\n{user_msg}\n--- END REQUEST ---")
+            except Exception as e:
+                _log(f"ERROR {para_id} quote '{quote_text[:40]}': API call failed — {e}")
+            speakers.append(speaker)
+            quote_errors.append(not bool(speaker))
 
         with lock:
-            if speaker:
-                para["speaker"] = speaker
-                para["dialogue_error"] = False
-                if speaker not in known_speakers:
-                    known_speakers.append(speaker)
-                    _log(f"New character: {speaker}")
-            else:
-                para["speaker"] = None
-                para["dialogue_error"] = True
-                if para_id not in errors:
-                    errors.append(para_id)
+            para["speakers"] = speakers
+            para["quote_errors"] = quote_errors
+            para["dialogue_error"] = any(quote_errors)
+            for s in speakers:
+                if s and s != "NARRATOR" and s not in known_speakers:
+                    known_speakers.append(s)
+                    _log(f"New character: {s}")
+            if para.get("dialogue_error") and para_id not in errors:
+                errors.append(para_id)
             done_ref[0] += 1
             _maybe_progress(done_ref[0], total, task_start_time)
             if done_ref[0] % 10 == 0:

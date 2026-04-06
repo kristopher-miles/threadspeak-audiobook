@@ -9,6 +9,7 @@ router = APIRouter()
 
 class MergeRequest(BaseModel):
     export: Optional[ExportConfig] = None
+    chapter: Optional[str] = None
 
 SANITY_TRIM_FIRST_CLIP_PATH = os.path.join(ROOT_DIR, "trim_sanity_first_clip.wav")
 SANITY_ASSEMBLE_FIRST5_PATH = os.path.join(ROOT_DIR, "assemble_sanity_first5.wav")
@@ -511,10 +512,12 @@ async def merge_audio_endpoint(request: Optional[MergeRequest] = None, backgroun
                 merge_log_state["last_stage"] = stage
 
             selected_export = request.export if request and request.export is not None else _load_export_config()
+            selected_chapter = (request.chapter or "").strip() or None if request else None
             success, msg = project_manager.merge_audio(
                 progress_callback=on_progress,
                 log_callback=_append_audio_log_locked,
                 export_config=selected_export,
+                chapter=selected_chapter,
             )
             if success:
                 process_state["audio"]["logs"].append(f"Merge complete: {msg}")

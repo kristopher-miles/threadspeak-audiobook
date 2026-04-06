@@ -4916,7 +4916,7 @@ class ProjectManager:
             self._cleanup_temp_file(os.path.join(self.root_dir, f"temp_chunk_{index}.wav"))
             return False, str(e)
 
-    def merge_audio(self, progress_callback=None, log_callback=None, export_config=None):
+    def merge_audio(self, progress_callback=None, log_callback=None, export_config=None, chapter=None):
         merge_started_at = time.time()
         output_filename = "cloned_audiobook.mp3"
         output_path = os.path.join(self.root_dir, output_filename)
@@ -4928,6 +4928,14 @@ class ProjectManager:
             log_callback=log_callback,
             temp_dir=temp_dir,
         )
+
+        if chapter:
+            chapter = chapter.strip()
+            timeline = [
+                item for item in timeline
+                if item.get("is_silence_block") or
+                   (item.get("chunk") or {}).get("chapter", "").strip() == chapter
+            ]
 
         if not timeline:
             shutil.rmtree(temp_dir, ignore_errors=True)

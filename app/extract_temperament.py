@@ -376,18 +376,18 @@ def main():
     _atomic_write(paragraphs_path, paragraphs_doc)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # PASS 3 — Dialogue mood for dialogue paragraphs
+    # PASS 3 — Dialogue mood per individual quote in dialogue paragraphs
     # ══════════════════════════════════════════════════════════════════════════
-    # Skip paragraphs that already have a valid dialogue_mood from a prior run.
+    # Skip paragraphs that already have a valid dialogue_moods array from a prior run.
     dialogue_paras_p3 = [
         (i, p) for i, p in all_dialogue_paras
-        if not p.get("dialogue_mood") or p.get("dialogue_mood_error")
+        if not p.get("dialogue_moods") or p.get("dialogue_mood_error")
     ]
     total3 = len(dialogue_paras_p3)
     already3 = len(all_dialogue_paras) - total3
     if already3:
         _log(f"[Pass 3/3] Resuming: {already3} already done, {total3} remaining.")
-    _log(f"[Pass 3/3] Dialogue mood for {total3} dialogue paragraphs (workers={workers})...")
+    _log(f"[Pass 3/3] Dialogue mood per quote for {total3} dialogue paragraphs (workers={workers})...")
 
     lock3 = threading.Lock()
     done3 = [0]
@@ -396,14 +396,15 @@ def main():
     def process_pass3(idx_para):
         idx, para = idx_para
         para_id = para["id"]
-        speaker = (para.get("speaker") or "").strip() or "Unknown Speaker"
+        speakers_list = para.get("speakers") or []
         context_text = build_context_window(paragraphs, idx, context_budget)
-        dialogue_text = extract_dialogue_only(para["text"])
+        quotes = QUOTE_RE.findall(para["text"])  # full match strings including outer quotes
 
-        if not dialogue_text:
+        if not quotes:
             _log(f"WARNING {para_id}: no dialogue text found, skipping dialogue mood")
             with lock3:
-                para["dialogue_mood"] = ""
+                para["dialogue_moods"] = []
+                para["quote_mood_errors"] = []
                 para["dialogue_mood_error"] = True
                 if para_id not in dialogue_mood_errors:
                     dialogue_mood_errors.append(para_id)
@@ -415,30 +416,54 @@ def main():
                     _atomic_write(paragraphs_path, paragraphs_doc)
             return
 
-        user_msg = (
-            f"PASSAGE CONTEXT:\n{context_text}\n\n"
-            f"Identify the correct delivery emotion of the following dialogue as spoken by {speaker}.\n\n"
-            f"DIALOGUE:\n{dialogue_text}"
-        )
+        moods = []
+        mood_errors = []
+        narration_text = strip_dialogue(para["text"])
 
-        mood = ""
-        try:
-            mood = call_sentiment(client, model_name, system_prompt, user_msg, max_tokens)
-            if not mood:
-                _log(f"ERROR {para_id}: model did not return a dialogue mood")
-        except Exception as e:
-            _log(f"ERROR {para_id}: API call failed — {e}")
+        for qi, quote_str in enumerate(quotes):
+            speaker = (speakers_list[qi] if qi < len(speakers_list) else "").strip() or "Unknown Speaker"
+            inner = quote_str.strip('"\u201c\u201d')
+
+            if speaker == "NARRATOR":
+                # Scare quote — derive narrator delivery from the surrounding narration
+                user_msg = (
+                    f"PASSAGE CONTEXT:\n{context_text}\n\n"
+                    f"TARGET PARAGRAPH:\n{narration_text}\n\n"
+                    "Identify the spoken emotional sentiment and delivery of the given narration "
+                    "portion of the paragraph. Ignore any dialogue when describing the emotional delivery:"
+                )
+            else:
+                user_msg = (
+                    f"PASSAGE CONTEXT:\n{context_text}\n\n"
+                    f"Identify the correct delivery emotion of the following dialogue as spoken by {speaker}.\n\n"
+                    f"DIALOGUE:\n{inner}"
+                )
+
+            mood = ""
+            try:
+                mood = call_sentiment(client, model_name, system_prompt, user_msg, max_tokens)
+                if not mood:
+                    _log(f"ERROR {para_id} q{qi}: model did not return a dialogue mood")
+            except Exception as e:
+                _log(f"ERROR {para_id} q{qi}: API call failed — {e}")
+
+            moods.append(mood)
+            mood_errors.append(not bool(mood))
 
         with lock3:
-            if mood:
-                para["dialogue_mood"] = mood
-                para["dialogue_mood_error"] = False
-                _log(f"[{para_id}] Dialogue mood ({speaker}): {mood}")
-            else:
-                para["dialogue_mood"] = ""
-                para["dialogue_mood_error"] = True
+            para["dialogue_moods"] = moods
+            para["quote_mood_errors"] = mood_errors
+            para["dialogue_mood_error"] = any(mood_errors)
+            if para.get("dialogue_mood_error"):
                 if para_id not in dialogue_mood_errors:
                     dialogue_mood_errors.append(para_id)
+            else:
+                if para_id in dialogue_mood_errors:
+                    dialogue_mood_errors.remove(para_id)
+            for qi, mood in enumerate(moods):
+                if mood:
+                    spk = (speakers_list[qi] if qi < len(speakers_list) else "Unknown Speaker")
+                    _log(f"[{para_id}] Dialogue mood q{qi} ({spk}): {mood}")
             done3[0] += 1
             if done3[0] % 10 == 0 or done3[0] == total3:
                 eta = _format_eta(pass3_start, done3[0], total3)

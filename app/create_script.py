@@ -62,6 +62,49 @@ def _strip_quotes(text: str) -> str:
     return text.strip(_QUOTE_CHARS)
 
 
+def _build_para_blocks(text: str, speakers_list: list, narration_speaker: str = "NARRATOR") -> list[dict]:
+    """
+    Decompose a mixed paragraph into ordered blocks, fusing same-speaker
+    quoted spans into adjacent narration text.
+
+    When a quote's assigned speaker matches narration_speaker, its text
+    (WITH quotation marks) is folded into the surrounding narration so
+    split_fn treats the whole run as one continuous chunk.  Quotes with a
+    different speaker flush the current narration block and become their
+    own block.
+
+    Returns list of {"text": str, "speaker": str, "quote_index": int|None}.
+    Narration/fused blocks have quote_index=None; dialogue blocks carry the
+    quote_index needed to look up dialogue_moods.
+    """
+    blocks = []
+    current_text = ""
+    last_end = 0
+
+    for qi, m in enumerate(QUOTE_RE.finditer(text)):
+        current_text += text[last_end:m.start()]
+        quote_speaker = speakers_list[qi] if qi < len(speakers_list) else narration_speaker
+
+        if quote_speaker == narration_speaker:
+            # Same speaker — fold quoted text (WITH marks) into the running block
+            current_text += m.group(0)
+        else:
+            # Different speaker — flush accumulated narration, emit dialogue block
+            if current_text.strip():
+                blocks.append({"text": current_text.strip(), "speaker": narration_speaker, "quote_index": None})
+            current_text = ""
+            blocks.append({"text": m.group(0), "speaker": quote_speaker, "quote_index": qi})
+
+        last_end = m.end()
+
+    # Trailing narration after the last quote
+    current_text += text[last_end:]
+    if current_text.strip():
+        blocks.append({"text": current_text.strip(), "speaker": narration_speaker, "quote_index": None})
+
+    return blocks
+
+
 def _log(msg: str):
     print(msg, flush=True)
 
@@ -200,6 +243,7 @@ def paragraph_to_segments(para: dict, max_length: int = -1) -> list[dict]:
     segments: list[dict] = []
     last_end = 0
 
+    quote_match_idx = 0
     for m in QUOTE_RE.finditer(text):
         # Narration before this dialogue span
         narration = text[last_end:m.start()].strip()
@@ -207,9 +251,10 @@ def paragraph_to_segments(para: dict, max_length: int = -1) -> list[dict]:
             for s in split_fn(narration):
                 segments.append({"text": s, "is_dialogue": False})
 
-        # Dialogue span — split internally too
+        # Dialogue span — split internally too; all sub-chunks share the same quote_index
         for s in split_fn(m.group(0).strip()):
-            segments.append({"text": s, "is_dialogue": True})
+            segments.append({"text": s, "is_dialogue": True, "quote_index": quote_match_idx})
+        quote_match_idx += 1
 
         last_end = m.end()
 
@@ -290,8 +335,10 @@ def main():
     # ── Collect all speakers and ensure NARRATOR is included ───────────────────
     raw_speakers: set[str] = set()
     for p in paragraphs:
-        if p.get("has_dialogue") and p.get("speaker"):
-            raw_speakers.add(p["speaker"].strip())
+        if p.get("has_dialogue"):
+            for s in (p.get("speakers") or []):
+                if s and s != "NARRATOR":
+                    raw_speakers.add(s.strip())
     raw_speakers.add("NARRATOR")
 
     all_voices = sorted(raw_speakers)  # alphabetical
@@ -334,9 +381,9 @@ def main():
         chapter_line_count = 0
 
         for para in paras:
-            speaker       = (para.get("speaker") or "").strip()
             tone          = _fix_instruct((para.get("tone") or "").strip())
-            dialogue_mood = _fix_instruct((para.get("dialogue_mood") or "").strip())
+            speakers_list = para.get("speakers") or []
+            moods_list    = [_fix_instruct((m or "").strip()) for m in (para.get("dialogue_moods") or [])]
 
             para_id = para.get("id")
             if not para.get("has_dialogue"):
@@ -351,25 +398,29 @@ def main():
                     })
                     chapter_line_count += 1
             else:
-                # Mixed paragraph — preserve narration/dialogue order
-                for seg in paragraph_to_segments(para, max_length=max_length):
-                    if seg["is_dialogue"]:
-                        entries.append({
-                            "speaker": speaker or "NARRATOR",
-                            "text": _strip_quotes(seg["text"]),
-                            "instruct": dialogue_mood,
-                            "chapter": chapter_name,
-                            "paragraph_id": para_id,
-                        })
-                    else:
-                        entries.append({
-                            "speaker": "NARRATOR",
-                            "text": seg["text"],
-                            "instruct": tone,
-                            "chapter": chapter_name,
-                            "paragraph_id": para_id,
-                        })
-                    chapter_line_count += 1
+                # Mixed paragraph — fuse same-speaker quoted spans into narration,
+                # keep different-speaker quotes as their own blocks.
+                for block in _build_para_blocks(para["text"], speakers_list):
+                    for s in para_split_fn(block["text"]):
+                        if block["speaker"] == "NARRATOR":
+                            entries.append({
+                                "speaker": "NARRATOR",
+                                "text": s,          # quotes preserved for TTS emphasis
+                                "instruct": tone,
+                                "chapter": chapter_name,
+                                "paragraph_id": para_id,
+                            })
+                        else:
+                            qi = block["quote_index"]
+                            instruct = moods_list[qi] if qi is not None and qi < len(moods_list) else tone
+                            entries.append({
+                                "speaker": block["speaker"],
+                                "text": _strip_quotes(s),
+                                "instruct": instruct,
+                                "chapter": chapter_name,
+                                "paragraph_id": para_id,
+                            })
+                        chapter_line_count += 1
 
         chapter_label = chapter_name or "(no chapter)"
         _log(f"Chapter '{chapter_label}': {chapter_line_count} lines")
