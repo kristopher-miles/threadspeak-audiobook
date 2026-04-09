@@ -347,7 +347,9 @@ def main():
         print("Warning: config.json not found. Using defaults.")
 
     llm_config = config.get("llm", {})
-    base_url = llm_config.get("base_url", "http://localhost:11434/v1")
+    base_url = llm_config.get("base_url", "http://localhost:11434/v1").rstrip("/")
+    if not base_url.endswith("/v1"):
+        base_url += "/v1"
     api_key = llm_config.get("api_key", "local")
     model_name = llm_config.get("model_name", "local-model")
 

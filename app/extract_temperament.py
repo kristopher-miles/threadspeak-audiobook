@@ -82,7 +82,15 @@ def _format_eta(start_time: float, done: int, total: int) -> str:
     remaining_seconds = (elapsed / done) * (total - done)
     if remaining_seconds < 60:
         return f" (~{int(remaining_seconds)}s remaining)"
-    return f" (~{int(remaining_seconds // 60)}m {int(remaining_seconds % 60)}s remaining)"
+    minutes = int(remaining_seconds // 60)
+    if minutes >= 60:
+        return f" (~{minutes // 60}h {minutes % 60}m remaining)"
+    return f" (~{minutes}m {int(remaining_seconds % 60)}s remaining)"
+
+
+def _dots(done: int, total: int) -> str:
+    filled = min(10, int(done / total * 10)) if total > 0 else 0
+    return "[" + "•" * filled + "·" * (10 - filled) + "]"
 
 
 def build_context_window(paragraphs: list, target_idx: int, budget: int) -> str:
@@ -130,15 +138,16 @@ def extract_dialogue_only(text: str) -> str:
     return "\n".join(QUOTE_RE.findall(text))
 
 
-def call_sentiment(client, model_name: str, system_prompt: str, user_msg: str, max_tokens: int) -> str:
+def call_sentiment(client, model_name: str, system_prompt: str, user_msg: str, max_tokens: int) -> tuple:
     """
     Call the LLM with identify_sentiment tool forced.
     Streams the response and exits as soon as the first complete tool call JSON arrives,
     preventing local models from looping and re-emitting the same tool call.
-    Returns the mood string, or empty string on failure (caller handles logging).
+    Returns (mood, raw_response), or ("", raw_response) on failure.
     """
     tool_call_args = ""
     reasoning_content = ""
+    text_content = ""
 
     stream = client.chat.completions.create(
         model=model_name,
@@ -161,6 +170,8 @@ def call_sentiment(client, model_name: str, system_prompt: str, user_msg: str, m
         rc = getattr(delta, "reasoning_content", None)
         if rc:
             reasoning_content += rc
+        if delta.content:
+            text_content += delta.content
         if delta.tool_calls:
             frag = delta.tool_calls[0].function.arguments
             if frag:
@@ -170,7 +181,7 @@ def call_sentiment(client, model_name: str, system_prompt: str, user_msg: str, m
             try:
                 args = json.loads(tool_call_args)
                 stream.close()
-                return (args.get("mood") or "").strip()
+                return ((args.get("mood") or "").strip(), tool_call_args)
             except json.JSONDecodeError:
                 pass
 
@@ -178,7 +189,7 @@ def call_sentiment(client, model_name: str, system_prompt: str, user_msg: str, m
     if tool_call_args:
         try:
             args = json.loads(tool_call_args)
-            return (args.get("mood") or "").strip()
+            return ((args.get("mood") or "").strip(), tool_call_args)
         except json.JSONDecodeError:
             pass
 
@@ -186,9 +197,9 @@ def call_sentiment(client, model_name: str, system_prompt: str, user_msg: str, m
     if reasoning_content:
         m = re.search(r"<parameter=mood>\s*(.*?)\s*</parameter>", reasoning_content, re.DOTALL | re.IGNORECASE)
         if m:
-            return m.group(1).strip()
+            return (m.group(1).strip(), reasoning_content)
 
-    return ""
+    return ("", tool_call_args or reasoning_content or text_content)
 
 
 def main():
@@ -224,7 +235,9 @@ def main():
     gen_cfg = config.get("generation") or {}
     prompts = config.get("prompts") or {}
 
-    base_url   = llm_cfg.get("base_url", "http://localhost:1234/v1")
+    base_url   = llm_cfg.get("base_url", "http://localhost:1234/v1").rstrip("/")
+    if not base_url.endswith("/v1"):
+        base_url += "/v1"
     api_key    = llm_cfg.get("api_key", "local")
     model_name = llm_cfg.get("model_name", "local-model")
     chunk_size = int(gen_cfg.get("chunk_size") or 3000)
@@ -233,8 +246,7 @@ def main():
 
     system_prompt = (prompts.get("temperament_extraction_system_prompt") or "").strip() or DEFAULT_SYSTEM_PROMPT
 
-    tts_cfg = config.get("tts") or {}
-    workers = max(1, int(tts_cfg.get("parallel_workers", 1) or 1))
+    workers = max(1, int(llm_cfg.get("llm_workers", 1) or 1))
 
     _log(f"Model: {model_name}  |  Context budget: {context_budget} chars  |  Max tokens: {max_tokens}  |  Workers: {workers}")
 
@@ -278,11 +290,13 @@ def main():
 
         mood = ""
         try:
-            mood = call_sentiment(client, model_name, system_prompt, user_msg, max_tokens)
+            mood, raw = call_sentiment(client, model_name, system_prompt, user_msg, max_tokens)
             if not mood:
-                _log(f"ERROR {para_id}: model did not return a mood")
+                raw_tail = raw[-1024:] if len(raw) > 1024 else raw
+                _log(f"Begin model did not return a mood: {para_id} : Extract Temperament\n{para['text']}\n{raw_tail}\nEnd model did not return a mood: {para_id} : Extract Temperament")
         except Exception as e:
-            _log(f"ERROR {para_id}: API call failed — {e}")
+            raw_tail = str(e)[-1024:]
+            _log(f"Begin API call failed: {para_id} : Extract Temperament\n{para['text']}\n{raw_tail}\nEnd API call failed: {para_id} : Extract Temperament")
 
         with lock1:
             if mood:
@@ -297,7 +311,7 @@ def main():
             done1[0] += 1
             if done1[0] % 10 == 0 or done1[0] == total1:
                 eta = _format_eta(pass1_start, done1[0], total1)
-                _progress(done1[0], total1, f"[Pass 1/3] Narrator tone: {done1[0]}/{total1}{eta}...")
+                _progress(done1[0], total1, f"{_dots(done1[0], total1)} [Pass 1/3] Narrator tone: {done1[0]}/{total1}{eta}...")
             if done1[0] % 10 == 0:
                 _atomic_write(paragraphs_path, paragraphs_doc)
 
@@ -343,11 +357,13 @@ def main():
 
         mood = ""
         try:
-            mood = call_sentiment(client, model_name, system_prompt, user_msg, max_tokens)
+            mood, raw = call_sentiment(client, model_name, system_prompt, user_msg, max_tokens)
             if not mood:
-                _log(f"ERROR {para_id}: model did not return a narrator mood")
+                raw_tail = raw[-1024:] if len(raw) > 1024 else raw
+                _log(f"Begin model did not return a narrator mood: {para_id} : Extract Temperament\n{narration_text}\n{raw_tail}\nEnd model did not return a narrator mood: {para_id} : Extract Temperament")
         except Exception as e:
-            _log(f"ERROR {para_id}: API call failed — {e}")
+            raw_tail = str(e)[-1024:]
+            _log(f"Begin API call failed: {para_id} : Extract Temperament\n{narration_text}\n{raw_tail}\nEnd API call failed: {para_id} : Extract Temperament")
 
         with lock2:
             if mood:
@@ -362,7 +378,7 @@ def main():
             done2[0] += 1
             if done2[0] % 10 == 0 or done2[0] == total2:
                 eta = _format_eta(pass2_start, done2[0], total2)
-                _progress(done2[0], total2, f"[Pass 2/3] Narrator tone (dialogue): {done2[0]}/{total2}{eta}...")
+                _progress(done2[0], total2, f"{_dots(done2[0], total2)} [Pass 2/3] Narrator tone (dialogue): {done2[0]}/{total2}{eta}...")
             if done2[0] % 10 == 0:
                 _atomic_write(paragraphs_path, paragraphs_doc)
 
@@ -411,7 +427,7 @@ def main():
                 done3[0] += 1
                 if done3[0] % 10 == 0 or done3[0] == total3:
                     eta = _format_eta(pass3_start, done3[0], total3)
-                    _progress(done3[0], total3, f"[Pass 3/3] Dialogue mood: {done3[0]}/{total3}{eta}...")
+                    _progress(done3[0], total3, f"{_dots(done3[0], total3)} [Pass 3/3] Dialogue mood: {done3[0]}/{total3}{eta}...")
                 if done3[0] % 10 == 0:
                     _atomic_write(paragraphs_path, paragraphs_doc)
             return
@@ -441,11 +457,15 @@ def main():
 
             mood = ""
             try:
-                mood = call_sentiment(client, model_name, system_prompt, user_msg, max_tokens)
+                mood, raw = call_sentiment(client, model_name, system_prompt, user_msg, max_tokens)
                 if not mood:
-                    _log(f"ERROR {para_id} q{qi}: model did not return a dialogue mood")
+                    raw_tail = raw[-1024:] if len(raw) > 1024 else raw
+                    job = f"{para_id} q{qi}"
+                    _log(f"Begin model did not return a dialogue mood: {job} : Extract Temperament\n{inner}\n{raw_tail}\nEnd model did not return a dialogue mood: {job} : Extract Temperament")
             except Exception as e:
-                _log(f"ERROR {para_id} q{qi}: API call failed — {e}")
+                raw_tail = str(e)[-1024:]
+                job = f"{para_id} q{qi}"
+                _log(f"Begin API call failed: {job} : Extract Temperament\n{inner}\n{raw_tail}\nEnd API call failed: {job} : Extract Temperament")
 
             moods.append(mood)
             mood_errors.append(not bool(mood))

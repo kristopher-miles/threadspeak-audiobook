@@ -10,7 +10,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import List, Optional, Dict, Union
 import re
 import time
@@ -402,6 +402,15 @@ class LLMConfig(BaseModel):
     base_url: str
     api_key: str
     model_name: str
+    llm_workers: int = 1  # concurrent LLM requests
+
+    @field_validator("base_url")
+    @classmethod
+    def normalize_base_url(cls, v: str) -> str:
+        url = v.rstrip("/")
+        if not url.endswith("/v1"):
+            url = url + "/v1"
+        return url
 
 class TTSConfig(BaseModel):
     mode: str = "local"  # "local" or "external"
@@ -2775,8 +2784,11 @@ def run_script_sanity_task(run_id: str, stop_check=None):
         attribution_user_prompt = prompts_config.get("attribution_user_prompt")
         if attribution_system_prompt and attribution_user_prompt:
             ensure_active()
+            _base_url = llm_config.get("base_url", "http://localhost:11434/v1").rstrip("/")
+            if not _base_url.endswith("/v1"):
+                _base_url += "/v1"
             client = OpenAI(
-                base_url=llm_config.get("base_url", "http://localhost:11434/v1"),
+                base_url=_base_url,
                 api_key=llm_config.get("api_key", "local"),
                 timeout=float(llm_config.get("timeout", 600)),
             )

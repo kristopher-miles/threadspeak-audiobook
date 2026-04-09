@@ -259,8 +259,11 @@ def suggest_voice_description_sync(speaker: str):
     prompt_payload = project_manager.build_voice_suggestion_prompt(speaker, prompt_template)
     llm_config = config.get("llm", {})
 
+    _base_url = llm_config.get("base_url", "http://localhost:11434/v1").rstrip("/")
+    if not _base_url.endswith("/v1"):
+        _base_url += "/v1"
     client = OpenAI(
-        base_url=llm_config.get("base_url", "http://localhost:11434/v1"),
+        base_url=_base_url,
         api_key=llm_config.get("api_key", "local"),
         timeout=float(llm_config.get("timeout", 600)),
     )

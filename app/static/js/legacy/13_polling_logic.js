@@ -148,7 +148,12 @@
                 loadChunks(false).catch(err => console.error('Failed to refresh chunks after repair', err));
             } else if (taskName === 'create_script') {
                 loadChunks(true).catch(err => console.error('Failed to refresh chunks after script creation', err));
-            } else if (taskName === 'new_mode_workflow') {
+            }
+            // Refresh step icons and button states after any pipeline step finishes
+            if (_stepIconMap && _stepIconMap[taskName]) {
+                loadPipelineStepIcons().catch(() => {});
+            }
+            if (taskName === 'new_mode_workflow') {
                 updateNewModeWorkflowButtons(status);
                 if (!status.paused && !status.last_error && status.completed_at) {
                     loadChunks(true).catch(err => console.error('Failed to refresh chunks after workflow', err));
@@ -237,11 +242,13 @@
         window.addEventListener('pageshow', () => {
             reconnectTaskLogs().catch(err => console.error('pageshow reconnect failed', err));
             refreshProcessingWorkflowStatus().catch(err => console.error('pageshow processing reconnect failed', err));
+            loadPipelineStepIcons().catch(err => console.error('pageshow icon load failed', err));
         });
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden) {
                 reconnectTaskLogs().catch(err => console.error('visibility reconnect failed', err));
                 refreshProcessingWorkflowStatus().catch(err => console.error('visibility processing reconnect failed', err));
+                loadPipelineStepIcons().catch(err => console.error('visibility icon load failed', err));
             }
         });
 

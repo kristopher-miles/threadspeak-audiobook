@@ -17,7 +17,13 @@
                 }
                 const legacyButtons = document.getElementById('legacy-only-buttons');
                 if (legacyButtons) legacyButtons.style.display = isLegacy ? 'flex' : 'none';
+                document.querySelectorAll('.nav-legacy-only').forEach(el => {
+                    el.style.display = isLegacy ? '' : 'none';
+                });
                 requestAnimationFrame(() => refreshPromptTextareaHeights());
+                if (window.updatePipelineTabLocks && typeof loadPipelineStepIcons === 'function') {
+                    loadPipelineStepIcons().catch(() => {});
+                }
             }
             toggle.addEventListener('change', () => {
                 if (generationModeLocked) {

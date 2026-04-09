@@ -11,6 +11,7 @@
                     ? ` (${res.chapter_count} chapter${res.chapter_count === 1 ? '' : 's'} detected)`
                     : '';
                 statusEl.innerHTML = `<span class="text-success"><i class="fas fa-check me-1"></i>Loaded: ${res.filename}${chapterSuffix}</span>`;
+                loadPipelineStepIcons().catch(() => {});
             } catch (e) {
                 statusEl.innerHTML = `<span class="text-danger"><i class="fas fa-times me-1"></i>Failed to load file: ${e.message}</span>`;
             }

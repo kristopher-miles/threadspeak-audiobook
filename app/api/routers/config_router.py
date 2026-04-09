@@ -128,7 +128,8 @@ async def get_config():
         "llm": {
             "base_url": "http://localhost:11434/v1",
             "api_key": "local",
-            "model_name": "richardyoung/qwen3-14b-abliterated:Q8_0"
+            "model_name": "richardyoung/qwen3-14b-abliterated:Q8_0",
+            "llm_workers": 1
         },
         "tts": {
             "mode": "local",

@@ -228,6 +228,84 @@ async def get_script_info():
         return {"entry_count": 0}
 
 
+@router.get("/api/pipeline_step_status")
+async def get_pipeline_step_status():
+    """Return file-based completion status for the 4 new-mode pipeline steps."""
+    paragraphs_path = os.path.join(ROOT_DIR, "paragraphs.json")
+    script_path = os.path.join(ROOT_DIR, "annotated_script.json")
+
+    # Check if an input file is loaded
+    has_input_file = False
+    state_path = os.path.join(ROOT_DIR, "state.json")
+    if os.path.exists(state_path):
+        try:
+            with open(state_path, "r", encoding="utf-8") as f:
+                state_data = json.load(f)
+            input_file = state_data.get("input_file_path", "")
+            has_input_file = bool(input_file and os.path.exists(input_file))
+        except Exception:
+            pass
+
+    result = {
+        "has_input_file": has_input_file,
+        "process_paragraphs": "not_started",
+        "assign_dialogue": "not_started",
+        "extract_temperament": "not_started",
+        "create_script": "not_started",
+    }
+
+    if not os.path.exists(paragraphs_path):
+        return result
+
+    try:
+        with open(paragraphs_path, "r", encoding="utf-8") as f:
+            pdata = json.load(f)
+        paragraphs = pdata.get("paragraphs", [])
+    except Exception:
+        return result
+
+    if not paragraphs:
+        return result
+
+    result["process_paragraphs"] = "complete"
+
+    # Assign Dialogue: check first/last paragraph that has dialogue
+    dialogue_paras = [p for p in paragraphs if p.get("has_dialogue")]
+    if dialogue_paras:
+        if "speakers" in dialogue_paras[-1]:
+            result["assign_dialogue"] = "complete"
+        elif "speakers" in dialogue_paras[0]:
+            result["assign_dialogue"] = "incomplete"
+    else:
+        # No dialogue paragraphs — trivially complete
+        result["assign_dialogue"] = "complete"
+
+    if result["assign_dialogue"] != "complete":
+        return result
+
+    # Extract Temperament: check first/last paragraph for 'tone'
+    if "tone" in paragraphs[-1]:
+        result["extract_temperament"] = "complete"
+    elif "tone" in paragraphs[0]:
+        result["extract_temperament"] = "incomplete"
+
+    if result["extract_temperament"] != "complete":
+        return result
+
+    # Create Script: annotated_script.json must exist with entries
+    if os.path.exists(script_path):
+        try:
+            with open(script_path, "r", encoding="utf-8") as f:
+                sdata = json.load(f)
+            entries = sdata.get("entries", []) if isinstance(sdata, dict) else sdata
+            if isinstance(entries, list) and len(entries) > 0:
+                result["create_script"] = "complete"
+        except Exception:
+            pass
+
+    return result
+
+
 @router.post("/api/reset_new_mode")
 async def reset_new_mode():
     """Clear the script, chunks, and voice config so Create Script can start fresh."""

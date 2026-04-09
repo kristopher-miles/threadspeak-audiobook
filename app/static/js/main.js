@@ -5,6 +5,7 @@ const TAB_FRAGMENTS = [
   '/static/fragments/script.html',
   '/static/fragments/voices.html',
   '/static/fragments/dictionary.html',
+  '/static/fragments/saved-scripts.html',
   '/static/fragments/designer.html',
   '/static/fragments/training.html',
   '/static/fragments/dataset-builder.html',

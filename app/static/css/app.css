@@ -283,7 +283,24 @@
         .nav-link.nav-pipeline { color: rgba(125, 227, 161, 0.7); }
         .nav-link.nav-pipeline:hover { color: #7de3a1; }
         .nav-link.nav-pipeline.active { color: #fff; background-color: #198754; border-radius: 4px; }
+        /* Locked pipeline tabs (script not yet created) */
+        .nav-link.nav-locked { color: rgba(100, 116, 139, 0.45) !important; cursor: not-allowed !important; pointer-events: none !important; }
         /* Advanced tabs - blue */
         .nav-link.nav-advanced { color: rgba(130, 177, 255, 0.7); }
         .nav-link.nav-advanced:hover { color: #82b1ff; }
         .nav-link.nav-advanced.active { color: #fff; background-color: #0d6efd; border-radius: 4px; }
+        /* Step status icon spinner */
+        @keyframes step-icon-spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        .step-spinner {
+            display: inline-block;
+            width: 0.85em;
+            height: 0.85em;
+            border: 0.15em solid currentColor;
+            border-top-color: transparent;
+            border-radius: 50%;
+            vertical-align: middle;
+            animation: step-icon-spin 0.75s linear infinite;
+        }

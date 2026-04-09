@@ -53,20 +53,24 @@
                     <!-- New Mode controls (shown when Legacy Mode is OFF) -->
                     <div id="new-mode-controls" style="display:none;">
                         <div class="d-grid gap-2 mb-3">
-                            <button class="btn btn-outline-primary btn-lg" id="btn-process-paragraphs-v2">
-                                <i class="fas fa-paragraph me-2"></i>1. Process Paragraphs
+                            <button class="btn btn-outline-primary btn-lg d-flex justify-content-between align-items-center" id="btn-process-paragraphs-v2" disabled>
+                                <span><i class="fas fa-paragraph me-2"></i>1. Process Paragraphs</span>
+                                <span class="step-status-icon ms-2" id="icon-process-paragraphs" style="min-width:1.25em;text-align:center;"><i class="fa-regular fa-circle text-secondary"></i></span>
                             </button>
                             <small class="text-muted">Splits the source document into individual paragraphs and prepares them for dialogue analysis.</small>
-                            <button class="btn btn-outline-secondary btn-lg" id="btn-assign-dialogue-v2">
-                                <i class="fas fa-comments me-2"></i>2. Assign Dialogue
+                            <button class="btn btn-outline-secondary btn-lg d-flex justify-content-between align-items-center" id="btn-assign-dialogue-v2" disabled>
+                                <span><i class="fas fa-comments me-2"></i>2. Assign Dialogue</span>
+                                <span class="step-status-icon ms-2" id="icon-assign-dialogue" style="min-width:1.25em;text-align:center;"><i class="fa-regular fa-circle text-secondary"></i></span>
                             </button>
                             <small class="text-muted">Analyzes each paragraph to identify speakers and annotate dialogue lines with voice assignments.</small>
-                            <button class="btn btn-outline-secondary btn-lg" id="btn-extract-temperament-v2">
-                                <i class="fas fa-theater-masks me-2"></i>3. Extract Temperament
+                            <button class="btn btn-outline-secondary btn-lg d-flex justify-content-between align-items-center" id="btn-extract-temperament-v2" disabled>
+                                <span><i class="fas fa-theater-masks me-2"></i>3. Extract Temperament</span>
+                                <span class="step-status-icon ms-2" id="icon-extract-temperament" style="min-width:1.25em;text-align:center;"><i class="fa-regular fa-circle text-secondary"></i></span>
                             </button>
                             <small class="text-muted">Analyzes narration paragraphs to identify emotional mood and delivery style for each one.</small>
-                            <button class="btn btn-outline-secondary btn-lg" id="btn-create-script-v2">
-                                <i class="fas fa-file-lines me-2"></i>4. Create Script
+                            <button class="btn btn-outline-secondary btn-lg d-flex justify-content-between align-items-center" id="btn-create-script-v2" disabled>
+                                <span><i class="fas fa-file-lines me-2"></i>4. Create Script</span>
+                                <span class="step-status-icon ms-2" id="icon-create-script" style="min-width:1.25em;text-align:center;"><i class="fa-regular fa-circle text-secondary"></i></span>
                             </button>
                             <small class="text-muted">Builds the audiobook script from processed paragraphs, assigning speakers, moods, and splitting into lines.</small>
                         </div>
@@ -86,26 +90,6 @@
                                 <label class="form-check-label" for="generate-audio-toggle-v2">Generate Audio</label>
                             </div>
                         </div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="card">
-                <div class="card-header">
-                    <h5 class="m-0">Saved Scripts</h5>
-                </div>
-                <div class="card-body">
-                    <div class="d-flex flex-wrap gap-2 mb-3">
-                        <button class="btn btn-outline-secondary btn-sm" onclick="downloadProjectArchive()"><i class="fas fa-file-zipper me-1"></i>Save Project ZIP</button>
-                        <button class="btn btn-outline-secondary btn-sm" onclick="triggerProjectArchiveLoad()"><i class="fas fa-folder-open me-1"></i>Load Project ZIP</button>
-                    </div>
-                    <div class="input-group mb-3">
-                        <input type="text" class="form-control" id="save-script-name" placeholder="Script name (e.g. The Great Gatsby)">
-                        <button class="btn btn-outline-primary" onclick="saveScript()"><i class="fas fa-save me-1"></i>Save Current</button>
-                    </div>
-                    <input type="file" id="project-archive-input" accept=".zip" style="display:none;" onchange="handleProjectArchiveLoad(this)">
-                    <div id="saved-scripts-list">
-                        <p class="text-muted mb-0">No saved scripts yet.</p>
                     </div>
                 </div>
             </div>

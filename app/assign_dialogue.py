@@ -158,15 +158,16 @@ def extract_dialogue_lines(text: str) -> list[str]:
     return QUOTE_RE.findall(text)
 
 
-def _call_identify_dialogue(client, model_name: str, system_prompt: str, user_msg: str, max_tokens: int) -> str:
+def _call_identify_dialogue(client, model_name: str, system_prompt: str, user_msg: str, max_tokens: int) -> tuple:
     """
-    Stream a single identify_dialogue tool call and return the speaker string.
+    Stream a single identify_dialogue tool call and return (speaker, raw_response).
     Exits as soon as the first complete tool call JSON is received so local
     models cannot loop and re-emit the same call repeatedly.
-    Returns normalized speaker name, or empty string on failure.
+    Returns (normalized speaker name, raw_response), or ("", raw_response) on failure.
     """
     tool_call_args = ""
     reasoning_content = ""
+    text_content = ""
 
     stream = client.chat.completions.create(
         model=model_name,
@@ -189,6 +190,8 @@ def _call_identify_dialogue(client, model_name: str, system_prompt: str, user_ms
         rc = getattr(delta, "reasoning_content", None)
         if rc:
             reasoning_content += rc
+        if delta.content:
+            text_content += delta.content
         if delta.tool_calls:
             frag = delta.tool_calls[0].function.arguments
             if frag:
@@ -198,7 +201,7 @@ def _call_identify_dialogue(client, model_name: str, system_prompt: str, user_ms
             try:
                 args = json.loads(tool_call_args)
                 stream.close()
-                return _normalize_speaker_name(args.get("speaker"))
+                return (_normalize_speaker_name(args.get("speaker")), tool_call_args)
             except json.JSONDecodeError:
                 pass
 
@@ -206,7 +209,7 @@ def _call_identify_dialogue(client, model_name: str, system_prompt: str, user_ms
     if tool_call_args:
         try:
             args = json.loads(tool_call_args)
-            return _normalize_speaker_name(args.get("speaker"))
+            return (_normalize_speaker_name(args.get("speaker")), tool_call_args)
         except json.JSONDecodeError:
             pass
 
@@ -218,9 +221,9 @@ def _call_identify_dialogue(client, model_name: str, system_prompt: str, user_ms
             re.DOTALL | re.IGNORECASE,
         )
         if m:
-            return _normalize_speaker_name(m.group(1))
+            return (_normalize_speaker_name(m.group(1)), reasoning_content)
 
-    return ""
+    return ("", tool_call_args or reasoning_content or text_content)
 
 
 def main():
@@ -266,7 +269,9 @@ def main():
     gen_cfg = config.get("generation") or {}
     prompts = config.get("prompts") or {}
 
-    base_url   = llm_cfg.get("base_url", "http://localhost:1234/v1")
+    base_url   = llm_cfg.get("base_url", "http://localhost:1234/v1").rstrip("/")
+    if not base_url.endswith("/v1"):
+        base_url += "/v1"
     api_key    = llm_cfg.get("api_key", "local")
     model_name = llm_cfg.get("model_name", "local-model")
     chunk_size = int(gen_cfg.get("chunk_size") or 3000)
@@ -275,8 +280,7 @@ def main():
 
     system_prompt = (prompts.get("dialogue_identification_system_prompt") or "").strip() or DEFAULT_SYSTEM_PROMPT
 
-    tts_cfg = config.get("tts") or {}
-    workers = max(1, int(tts_cfg.get("parallel_workers", 1) or 1))
+    workers = max(1, int(llm_cfg.get("llm_workers", 1) or 1))
 
     _log(f"Model: {model_name}  |  Context budget: {context_budget} chars  |  Max tokens: {max_tokens}  |  Workers: {workers}")
 
@@ -335,11 +339,15 @@ def main():
                 speaker = ""
                 for attempt in range(1, retry_max + 1):
                     try:
-                        speaker = _call_identify_dialogue(client, model_name, system_prompt, user_msg, max_tokens)
+                        speaker, raw = _call_identify_dialogue(client, model_name, system_prompt, user_msg, max_tokens)
                         if not speaker:
-                            _log(f"RETRY {para_id} q{qi} attempt {attempt}/{retry_max}: model returned no speaker")
+                            raw_tail = raw[-1024:] if len(raw) > 1024 else raw
+                            job = f"{para_id} q{qi}"
+                            _log(f"Begin model returned no speaker: {job} : Assign Dialogue\n{quote_text}\n{raw_tail}\nEnd model returned no speaker: {job} : Assign Dialogue")
                     except Exception as e:
-                        _log(f"RETRY {para_id} q{qi} attempt {attempt}/{retry_max}: API error — {e}")
+                        raw_tail = str(e)[-1024:]
+                        job = f"{para_id} q{qi}"
+                        _log(f"Begin API call failed: {job} : Assign Dialogue\n{quote_text}\n{raw_tail}\nEnd API call failed: {job} : Assign Dialogue")
                     if speaker:
                         break
 
@@ -441,7 +449,7 @@ def main():
 
         speakers = []
         quote_errors = []
-        for quote_text in quotes:
+        for qi, quote_text in enumerate(quotes):
             user_msg = (
                 f"PASSAGE CONTEXT:\n{context_text}\n\n"
                 f"KNOWN CHARACTERS SO FAR: {char_list}\n\n"
@@ -453,12 +461,15 @@ def main():
             )
             speaker = ""
             try:
-                speaker = _call_identify_dialogue(client, model_name, system_prompt, user_msg, max_tokens)
+                speaker, raw = _call_identify_dialogue(client, model_name, system_prompt, user_msg, max_tokens)
                 if not speaker:
-                    _log(f"ERROR {para_id} quote '{quote_text[:40]}': model returned no speaker")
-                    _log(f"--- REQUEST THAT FAILED (system) ---\n{system_prompt}\n--- REQUEST THAT FAILED (user) ---\n{user_msg}\n--- END REQUEST ---")
+                    raw_tail = raw[-1024:] if len(raw) > 1024 else raw
+                    job = f"{para_id} q{qi}"
+                    _log(f"Begin model returned no speaker: {job} : Assign Dialogue\n{quote_text}\n{raw_tail}\nEnd model returned no speaker: {job} : Assign Dialogue")
             except Exception as e:
-                _log(f"ERROR {para_id} quote '{quote_text[:40]}': API call failed — {e}")
+                raw_tail = str(e)[-1024:]
+                job = f"{para_id} q{qi}"
+                _log(f"Begin API call failed: {job} : Assign Dialogue\n{quote_text}\n{raw_tail}\nEnd API call failed: {job} : Assign Dialogue")
             speakers.append(speaker)
             quote_errors.append(not bool(speaker))
 
@@ -502,13 +513,21 @@ def _format_eta(start_time: float, done: int, total: int) -> str:
     remaining_seconds = (elapsed / done) * (total - done)
     if remaining_seconds < 60:
         return f" (~{int(remaining_seconds)}s remaining)"
-    return f" (~{int(remaining_seconds // 60)}m {int(remaining_seconds % 60)}s remaining)"
+    minutes = int(remaining_seconds // 60)
+    if minutes >= 60:
+        return f" (~{minutes // 60}h {minutes % 60}m remaining)"
+    return f" (~{minutes}m {int(remaining_seconds % 60)}s remaining)"
+
+
+def _dots(done: int, total: int) -> str:
+    filled = min(10, int(done / total * 10)) if total > 0 else 0
+    return "[" + "•" * filled + "·" * (10 - filled) + "]"
 
 
 def _maybe_progress(done: int, total: int, start_time: float):
     if done % 10 == 0 or done == total:
         eta = _format_eta(start_time, done, total)
-        _progress(done, total, f"Assigned {done}/{total} dialogue paragraphs...{eta}")
+        _progress(done, total, f"{_dots(done, total)} Assigned {done}/{total} dialogue paragraphs...{eta}")
 
 
 def _atomic_write(path: str, data: dict):

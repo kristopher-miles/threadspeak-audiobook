@@ -108,6 +108,7 @@
                 document.getElementById('llm-url').value = config.llm.base_url;
                 document.getElementById('llm-key').value = config.llm.api_key;
                 document.getElementById('llm-model').value = config.llm.model_name;
+                document.getElementById('llm-workers').value = config.llm.llm_workers ?? 1;
                 document.getElementById('tts-mode').value = config.tts.mode || 'external';
                 document.getElementById('tts-url').value = config.tts.url || 'http://127.0.0.1:7860';
                 document.getElementById('tts-language').value = config.tts.language || 'English';
@@ -378,7 +379,8 @@
                 llm: {
                     base_url: document.getElementById('llm-url').value,
                     api_key: document.getElementById('llm-key').value,
-                    model_name: document.getElementById('llm-model').value
+                    model_name: document.getElementById('llm-model').value,
+                    llm_workers: parseInt(document.getElementById('llm-workers').value) || 1
                 },
                 tts: {
                     mode: document.getElementById('tts-mode').value,

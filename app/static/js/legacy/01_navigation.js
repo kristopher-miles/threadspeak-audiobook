@@ -1,7 +1,23 @@
         // --- Navigation ---
+
+        const SCRIPT_GATED_TABS = ['voices', 'editor', 'proofread', 'audio'];
+
+        window.updatePipelineTabLocks = function(isLegacy, scriptReady) {
+            SCRIPT_GATED_TABS.forEach(tab => {
+                const link = document.querySelector(`.nav-link[data-tab="${tab}"]`);
+                if (!link) return;
+                if (isLegacy || scriptReady) {
+                    link.classList.remove('nav-locked');
+                } else {
+                    link.classList.add('nav-locked');
+                }
+            });
+        };
+
         document.querySelectorAll('.nav-link').forEach(link => {
             link.addEventListener('click', async (e) => {
                 const target = e.currentTarget;
+                if (target.classList.contains('nav-locked')) return;
                 const currentTab = document.querySelector('.nav-link.active')?.dataset.tab || null;
                 const nextTab = target.dataset.tab;
 
@@ -42,6 +58,8 @@
                     loadVoices();
                 } else if (nextTab === 'dictionary') {
                     loadDictionary();
+                } else if (nextTab === 'saved-scripts') {
+                    loadSavedScripts();
                 } else if (nextTab === 'designer') {
                     loadDesignedVoices();
                 } else if (nextTab === 'training') {

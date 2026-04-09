@@ -1,0 +1,21 @@
+        <div id="saved-scripts-tab" class="tab-content" style="display:none;">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="m-0">Saved Scripts</h5>
+                </div>
+                <div class="card-body">
+                    <div class="d-flex flex-wrap gap-2 mb-3">
+                        <button class="btn btn-outline-secondary btn-sm" onclick="downloadProjectArchive()"><i class="fas fa-file-zipper me-1"></i>Save Project ZIP</button>
+                        <button class="btn btn-outline-secondary btn-sm" onclick="triggerProjectArchiveLoad()"><i class="fas fa-folder-open me-1"></i>Load Project ZIP</button>
+                    </div>
+                    <div class="input-group mb-3">
+                        <input type="text" class="form-control" id="save-script-name" placeholder="Script name (e.g. The Great Gatsby)">
+                        <button class="btn btn-outline-primary" onclick="saveScript()"><i class="fas fa-save me-1"></i>Save Current</button>
+                    </div>
+                    <input type="file" id="project-archive-input" accept=".zip" style="display:none;" onchange="handleProjectArchiveLoad(this)">
+                    <div id="saved-scripts-list">
+                        <p class="text-muted mb-0">No saved scripts yet.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
