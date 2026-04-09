@@ -407,6 +407,56 @@ async def save_config(config: AppConfig):
     return {"status": "saved"}
 
 
+@router.post("/api/config/setup")
+async def save_setup_config(update: SetupConfigUpdate):
+    existing_config = {}
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                existing_config = json.load(f)
+        except (json.JSONDecodeError, ValueError):
+            existing_config = {}
+
+    engine_reset = False
+
+    if update.llm is not None:
+        existing_config["llm"] = {
+            **(existing_config.get("llm") or {}),
+            **update.llm.model_dump(),
+        }
+
+    if update.tts is not None:
+        new_tts = update.tts.model_dump()
+        old_tts = existing_config.get("tts") or {}
+        tts_changed = any(new_tts.get(k) != old_tts.get(k) for k in new_tts)
+        existing_config["tts"] = {**old_tts, **new_tts}
+        if tts_changed:
+            project_manager.engine = None
+            engine_reset = True
+
+    if update.prompts is not None:
+        prompts = update.prompts.model_dump()
+        existing_prompts = existing_config.get("prompts") or {}
+        existing_config["prompts"] = _sync_prompt_files(prompts, existing_prompts)
+
+    if update.generation is not None:
+        existing_config["generation"] = {
+            **(existing_config.get("generation") or {}),
+            **update.generation.model_dump(),
+        }
+
+    if update.proofread is not None:
+        existing_config["proofread"] = {
+            **(existing_config.get("proofread") or {}),
+            **update.proofread,
+        }
+
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(existing_config, f, indent=2, ensure_ascii=False)
+
+    return {"status": "saved", "engine_reset": engine_reset}
+
+
 @router.post("/api/config/export")
 async def save_export_config(export: ExportConfig):
     payload = export.model_dump()

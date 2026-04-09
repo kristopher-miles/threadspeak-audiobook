@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from fastapi import BackgroundTasks
 
 MODULE_PATH = os.path.join(os.path.dirname(__file__), "app.py")
-SPEC = importlib.util.spec_from_file_location("alexandria_app_module_workflow_entrypoints", MODULE_PATH)
+SPEC = importlib.util.spec_from_file_location("threadspeak_app_module_workflow_entrypoints", MODULE_PATH)
 app_module = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(app_module)

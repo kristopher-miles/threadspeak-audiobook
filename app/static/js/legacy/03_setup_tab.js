@@ -112,6 +112,7 @@
         wireExportConfigAutoSave();
 
         async function loadConfig() {
+            _setupAutoSaveEnabled = false;
             document.getElementById('chunk-size').value = 3000;
             document.getElementById('max-tokens').value = 4096;
 
@@ -326,10 +327,12 @@
             } catch (e) {
                 console.error("Failed to load config", e);
             }
+            _setupAutoSaveEnabled = true;
         }
 
         // Reset prompts and generation settings to factory defaults
         window.resetPrompts = async () => {
+            _setupAutoSaveEnabled = false;
             try {
                 const defaults = await API.get('/api/factory_default_prompts');
                 document.getElementById('system-prompt').value = defaults.system_prompt;
@@ -372,6 +375,11 @@
             document.getElementById('auto-regenerate-bad-clip-attempts').value = 3;
             document.getElementById('proofread-threshold').value = 0.7;
             refreshPromptTextareaHeights();
+            _setupAutoSaveEnabled = true;
+            _setupDirtySections.add('prompts');
+            _setupDirtySections.add('generation');
+            _setupDirtySections.add('proofread');
+            _flushSetupConfig();
         };
 
         // Toggle chevron on collapse
@@ -383,88 +391,194 @@
             document.getElementById('prompt-chevron').classList.replace('fa-chevron-down', 'fa-chevron-right');
         });
 
-        document.getElementById('config-form').addEventListener('submit', async (e) => {
-            e.preventDefault();
+        // --- Setup Config Auto-Save ---
 
-            let chunkSize = parseInt(document.getElementById('chunk-size').value) || 3000;
+        function collectLLMConfig() {
+            return {
+                base_url: document.getElementById('llm-url').value,
+                api_key: document.getElementById('llm-key').value,
+                model_name: document.getElementById('llm-model').value,
+                llm_workers: parseInt(document.getElementById('llm-workers').value) || 1
+            };
+        }
 
-            // Validate parallel workers
+        function collectTTSConfig() {
             let parallelWorkers = parseInt(document.getElementById('parallel-workers').value) || 2;
             parallelWorkers = Math.max(1, parallelWorkers);
-            document.getElementById('parallel-workers').value = parallelWorkers;
-
             const rawRetryAttempts = parseInt(document.getElementById('auto-regenerate-bad-clip-attempts').value, 10);
             const retryAttempts = Number.isInteger(rawRetryAttempts) && rawRetryAttempts > 0 ? rawRetryAttempts : 0;
-            document.getElementById('auto-regenerate-bad-clip-attempts').value = retryAttempts > 0 ? retryAttempts : 0;
-
-            const config = {
-                llm: {
-                    base_url: document.getElementById('llm-url').value,
-                    api_key: document.getElementById('llm-key').value,
-                    model_name: document.getElementById('llm-model').value,
-                    llm_workers: parseInt(document.getElementById('llm-workers').value) || 1
-                },
-                tts: {
-                    mode: document.getElementById('tts-mode').value,
-                    local_backend: 'auto',
-                    url: document.getElementById('tts-url').value,
-                    device: 'auto',
-                    language: document.getElementById('tts-language').value,
-                    parallel_workers: parallelWorkers,
-                    batch_seed: document.getElementById('batch-seed').value ? parseInt(document.getElementById('batch-seed').value) : null,
-                    compile_codec: document.getElementById('compile-codec').checked,
-                    batch_group_by_type: document.getElementById('batch-group-by-type').checked,
-                    sub_batch_enabled: document.getElementById('sub-batch-enabled').checked,
-                    auto_regenerate_bad_clips: document.getElementById('auto-regenerate-bad-clips').checked,
-                    auto_regenerate_bad_clip_attempts: retryAttempts,
-                    sub_batch_min_size: parseInt(document.getElementById('sub-batch-min-size').value) || 4,
-                    sub_batch_ratio: parseFloat(document.getElementById('sub-batch-ratio').value) || 5,
-                    sub_batch_max_chars: parseInt(document.getElementById('sub-batch-max-chars').value) || 3000,
-                    sub_batch_max_items: parseInt(document.getElementById('sub-batch-max-items').value) || 0,
-                    script_max_length: parseInt(document.getElementById('script-max-length').value) || 100
-                },
-                prompts: {
-                    system_prompt: document.getElementById('system-prompt').value,
-                    user_prompt: document.getElementById('user-prompt').value,
-                    review_system_prompt: document.getElementById('review-system-prompt').value,
-                    review_user_prompt: document.getElementById('review-user-prompt').value,
-                    attribution_system_prompt: document.getElementById('attribution-system-prompt').value,
-                    attribution_user_prompt: document.getElementById('attribution-user-prompt').value,
-                    voice_prompt: document.getElementById('voice-prompt').value,
-                    dialogue_identification_system_prompt: document.getElementById('dialogue-identification-system-prompt').value,
-                    temperament_extraction_system_prompt: document.getElementById('temperament-extraction-system-prompt').value
-                },
-                generation: {
-                    chunk_size: chunkSize,
-                    max_tokens: parseInt(document.getElementById('max-tokens').value) || 4096,
-                    temperature: parseFloat(document.getElementById('temperature').value),
-                    top_p: parseFloat(document.getElementById('top-p').value),
-                    top_k: parseInt(document.getElementById('top-k').value),
-                    min_p: parseFloat(document.getElementById('min-p').value),
-                    presence_penalty: parseFloat(document.getElementById('presence-penalty').value),
-                    banned_tokens: document.getElementById('banned-tokens').value
-                        ? document.getElementById('banned-tokens').value.split(',').map(t => t.trim()).filter(t => t)
-                        : [],
-                    merge_narrators: document.getElementById('merge-narrators').checked,
-                    orphaned_text_to_narrator_on_repair: document.getElementById('orphaned-text-to-narrator-on-repair').checked,
-                    legacy_mode: document.getElementById('legacy-mode-toggle').checked
-                },
-                proofread: {
-                    certainty_threshold: parseFloat(document.getElementById('proofread-threshold').value) || 0.7
-                },
-                export: {
-                    ...collectExportConfigFromUI()
-                },
-                ui: {
-                    dark_mode: document.getElementById('dark-mode-toggle').checked
-                }
+            return {
+                mode: document.getElementById('tts-mode').value,
+                local_backend: 'auto',
+                url: document.getElementById('tts-url').value,
+                device: 'auto',
+                language: document.getElementById('tts-language').value,
+                parallel_workers: parallelWorkers,
+                batch_seed: document.getElementById('batch-seed').value ? parseInt(document.getElementById('batch-seed').value) : null,
+                compile_codec: document.getElementById('compile-codec').checked,
+                batch_group_by_type: document.getElementById('batch-group-by-type').checked,
+                sub_batch_enabled: document.getElementById('sub-batch-enabled').checked,
+                auto_regenerate_bad_clips: document.getElementById('auto-regenerate-bad-clips').checked,
+                auto_regenerate_bad_clip_attempts: retryAttempts,
+                sub_batch_min_size: parseInt(document.getElementById('sub-batch-min-size').value) || 4,
+                sub_batch_ratio: parseFloat(document.getElementById('sub-batch-ratio').value) || 5,
+                sub_batch_max_chars: parseInt(document.getElementById('sub-batch-max-chars').value) || 3000,
+                sub_batch_max_items: parseInt(document.getElementById('sub-batch-max-items').value) || 0,
+                script_max_length: parseInt(document.getElementById('script-max-length').value) || 100
             };
-            try {
-                await API.post('/api/config', config);
-                showToast('Configuration Saved!', 'success');
-            } catch (e) {
-                showToast('Error saving config: ' + e.message, 'error');
+        }
+
+        function collectPromptsConfig() {
+            return {
+                system_prompt: document.getElementById('system-prompt').value,
+                user_prompt: document.getElementById('user-prompt').value,
+                review_system_prompt: document.getElementById('review-system-prompt').value,
+                review_user_prompt: document.getElementById('review-user-prompt').value,
+                attribution_system_prompt: document.getElementById('attribution-system-prompt').value,
+                attribution_user_prompt: document.getElementById('attribution-user-prompt').value,
+                voice_prompt: document.getElementById('voice-prompt').value,
+                dialogue_identification_system_prompt: document.getElementById('dialogue-identification-system-prompt').value,
+                temperament_extraction_system_prompt: document.getElementById('temperament-extraction-system-prompt').value
+            };
+        }
+
+        function collectGenerationConfig() {
+            return {
+                chunk_size: parseInt(document.getElementById('chunk-size').value) || 3000,
+                max_tokens: parseInt(document.getElementById('max-tokens').value) || 4096,
+                temperature: parseFloat(document.getElementById('temperature').value),
+                top_p: parseFloat(document.getElementById('top-p').value),
+                top_k: parseInt(document.getElementById('top-k').value),
+                min_p: parseFloat(document.getElementById('min-p').value),
+                presence_penalty: parseFloat(document.getElementById('presence-penalty').value),
+                banned_tokens: document.getElementById('banned-tokens').value
+                    ? document.getElementById('banned-tokens').value.split(',').map(t => t.trim()).filter(t => t)
+                    : [],
+                merge_narrators: document.getElementById('merge-narrators').checked,
+                orphaned_text_to_narrator_on_repair: document.getElementById('orphaned-text-to-narrator-on-repair').checked,
+                legacy_mode: document.getElementById('legacy-mode-toggle').checked
+            };
+        }
+
+        function collectProofreadConfig() {
+            return {
+                certainty_threshold: parseFloat(document.getElementById('proofread-threshold').value) || 0.7
+            };
+        }
+
+        const _setupSectionCollectors = {
+            llm: collectLLMConfig,
+            tts: collectTTSConfig,
+            prompts: collectPromptsConfig,
+            generation: collectGenerationConfig,
+            proofread: collectProofreadConfig
+        };
+
+        let _setupAutoSaveEnabled = false;
+        let _setupSaveTimer = null;
+        const _setupDirtySections = new Set();
+        let _setupSaveIndicatorTimer = null;
+
+        function _showSetupSaveIndicator() {
+            const el = document.getElementById('setup-save-indicator');
+            if (!el) return;
+            el.style.display = '';
+            if (_setupSaveIndicatorTimer) clearTimeout(_setupSaveIndicatorTimer);
+            _setupSaveIndicatorTimer = setTimeout(() => { el.style.display = 'none'; }, 2000);
+        }
+
+        async function _flushSetupConfig() {
+            if (_setupSaveTimer) { clearTimeout(_setupSaveTimer); _setupSaveTimer = null; }
+            if (_setupDirtySections.size === 0) return;
+            const payload = {};
+            for (const section of _setupDirtySections) {
+                payload[section] = _setupSectionCollectors[section]();
             }
+            _setupDirtySections.clear();
+            try {
+                await API.post('/api/config/setup', payload);
+                _showSetupSaveIndicator();
+            } catch (e) {
+                showToast('Failed to save settings: ' + (e?.message || e), 'error');
+            }
+        }
+        window.flushSetupConfig = _flushSetupConfig;
+
+        function _scheduleSetupSave(section, delayMs) {
+            if (!_setupAutoSaveEnabled) return;
+            _setupDirtySections.add(section);
+            if (_setupSaveTimer) clearTimeout(_setupSaveTimer);
+            _setupSaveTimer = setTimeout(() => { _setupSaveTimer = null; _flushSetupConfig(); }, delayMs);
+        }
+
+        function wireSetupConfigAutoSave() {
+            const fieldSectionMap = {
+                // LLM
+                'llm-url': 'llm', 'llm-key': 'llm', 'llm-model': 'llm', 'llm-workers': 'llm',
+                // TTS
+                'tts-mode': 'tts', 'tts-url': 'tts', 'tts-language': 'tts',
+                'parallel-workers': 'tts', 'batch-seed': 'tts',
+                'compile-codec': 'tts', 'batch-group-by-type': 'tts',
+                'sub-batch-enabled': 'tts', 'sub-batch-min-size': 'tts',
+                'sub-batch-ratio': 'tts', 'sub-batch-max-chars': 'tts',
+                'sub-batch-max-items': 'tts', 'auto-regenerate-bad-clips': 'tts',
+                'auto-regenerate-bad-clip-attempts': 'tts', 'script-max-length': 'tts',
+                // Generation
+                'chunk-size': 'generation', 'max-tokens': 'generation',
+                'temperature': 'generation', 'top-p': 'generation', 'top-k': 'generation',
+                'min-p': 'generation', 'presence-penalty': 'generation',
+                'banned-tokens': 'generation', 'merge-narrators': 'generation',
+                'orphaned-text-to-narrator-on-repair': 'generation',
+                // Prompts
+                'system-prompt': 'prompts', 'user-prompt': 'prompts',
+                'review-system-prompt': 'prompts', 'review-user-prompt': 'prompts',
+                'attribution-system-prompt': 'prompts', 'attribution-user-prompt': 'prompts',
+                'voice-prompt': 'prompts',
+                'dialogue-identification-system-prompt': 'prompts',
+                'temperament-extraction-system-prompt': 'prompts',
+                // Proofread
+                'proofread-threshold': 'proofread'
+            };
+
+            for (const [id, section] of Object.entries(fieldSectionMap)) {
+                const el = document.getElementById(id);
+                if (!el || el.dataset.setupAutosaveBound === '1') continue;
+                el.dataset.setupAutosaveBound = '1';
+                const isTextarea = el.tagName === 'TEXTAREA';
+                const isCheckbox = el.type === 'checkbox';
+                const isSelect = el.tagName === 'SELECT';
+                if (isCheckbox || isSelect) {
+                    el.addEventListener('change', () => _scheduleSetupSave(section, 0));
+                } else if (isTextarea) {
+                    el.addEventListener('input', () => _scheduleSetupSave(section, 1500));
+                    el.addEventListener('blur', () => _scheduleSetupSave(section, 0));
+                } else {
+                    el.addEventListener('input', () => _scheduleSetupSave(section, 500));
+                    el.addEventListener('change', () => _scheduleSetupSave(section, 0));
+                    el.addEventListener('blur', () => _scheduleSetupSave(section, 0));
+                }
+            }
+        }
+        wireSetupConfigAutoSave();
+
+        // Prevent form submission (Enter key in text fields)
+        document.getElementById('config-form').addEventListener('submit', (e) => {
+            e.preventDefault();
         });
 
-        document.getElementById('btn-reset-project').addEventListener('click', window.resetProject);
+        // Best-effort save on page unload
+        window.addEventListener('beforeunload', () => {
+            if (_setupDirtySections.size === 0) return;
+            const payload = {};
+            for (const section of _setupDirtySections) {
+                payload[section] = _setupSectionCollectors[section]();
+            }
+            _setupDirtySections.clear();
+            const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+            navigator.sendBeacon('/api/config/setup', blob);
+        });
+
+        const resetProjectButton = document.getElementById('btn-reset-project');
+        if (resetProjectButton) {
+            resetProjectButton.addEventListener('click', window.resetProject);
+        }

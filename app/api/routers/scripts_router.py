@@ -38,7 +38,7 @@ async def export_project_archive(background_tasks: BackgroundTasks):
     entries = _project_archive_entries()
     manifest = _build_project_archive_manifest(entries)
 
-    handle = tempfile.NamedTemporaryFile(prefix="alexandria_project_", suffix=".zip", delete=False)
+    handle = tempfile.NamedTemporaryFile(prefix="threadspeak_project_", suffix=".zip", delete=False)
     temp_zip_path = handle.name
     handle.close()
 
@@ -55,7 +55,7 @@ async def export_project_archive(background_tasks: BackgroundTasks):
             os.remove(temp_zip_path)
         raise
 
-    archive_name = f"alexandria_project_{time.strftime('%Y%m%d_%H%M%S')}.zip"
+    archive_name = f"threadspeak_project_{time.strftime('%Y%m%d_%H%M%S')}.zip"
     background_tasks.add_task(lambda: os.path.exists(temp_zip_path) and os.remove(temp_zip_path))
     return FileResponse(temp_zip_path, filename=archive_name, media_type="application/zip")
 
@@ -71,7 +71,7 @@ async def load_project_archive(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Project archive must be a .zip file.")
 
     content = await file.read()
-    temp_root = tempfile.mkdtemp(prefix="alexandria_project_import_")
+    temp_root = tempfile.mkdtemp(prefix="threadspeak_project_import_")
     zip_path = os.path.join(temp_root, "project.zip")
     extract_root = os.path.join(temp_root, "extracted")
     os.makedirs(extract_root, exist_ok=True)
@@ -89,8 +89,8 @@ async def load_project_archive(file: UploadFile = File(...)):
                 manifest = json.loads(zf.read(PROJECT_ARCHIVE_MANIFEST_NAME).decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as e:
                 raise HTTPException(status_code=400, detail=f"Archive manifest is invalid: {e}")
-            if manifest.get("kind") != "alexandria_project_archive":
-                raise HTTPException(status_code=400, detail="Archive is not a valid Alexandria project archive.")
+            if manifest.get("kind") != "threadspeak_project_archive":
+                raise HTTPException(status_code=400, detail="Archive is not a valid Threadspeak project archive.")
 
             for info in zf.infolist():
                 if info.is_dir() or info.filename == PROJECT_ARCHIVE_MANIFEST_NAME:

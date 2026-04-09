@@ -312,7 +312,7 @@
         let dsbCurrentProject = '';
 
         // Clean up legacy localStorage
-        localStorage.removeItem('alexandria-dsb-form');
+        localStorage.removeItem('threadspeak-dsb-form');
 
         async function dsbLoadProjects(selectName) {
             try {

@@ -5,7 +5,7 @@ import os
 import shutil
 import time
 
-logger = logging.getLogger("AlexandriaUI")
+logger = logging.getLogger("ThreadspeakUI")
 
 BUILTIN_LORA_HF_REPO = "Finrandojin/Alexandria"
 

@@ -17,7 +17,7 @@
         const handledTaskCompletions = new Set();
         const taskCompletionStorage = (() => {
             try {
-                const probeKey = '__alexandria_task_completion_probe__';
+                const probeKey = '__threadspeak_task_completion_probe__';
                 sessionStorage.setItem(probeKey, '1');
                 sessionStorage.removeItem(probeKey);
                 return sessionStorage;
@@ -27,7 +27,7 @@
         })();
 
         function buildTaskCompletionKey(kind, taskName, action) {
-            return `alexandria:${kind}:${taskName}:${action}`;
+            return `threadspeak:${kind}:${taskName}:${action}`;
         }
 
         function markTaskActionRequested(taskName, action) {
@@ -270,16 +270,16 @@
                         month: 'short', day: 'numeric', year: 'numeric'
                     });
                     const voiceBadge = s.has_voice_config
-                        ? '<span class="badge bg-info ms-2" title="Includes voice configuration">voices</span>'
+                        ? '<span class="badge bg-info me-2" title="Includes voice configuration">Voices</span>'
                         : '';
                     return `
-                        <div class="d-flex align-items-center justify-content-between py-2 border-bottom">
-                            <div>
-                                <strong>${s.name}</strong>${voiceBadge}
-                                <small class="text-muted ms-2">${date}</small>
+                        <div class="d-flex align-items-center py-2 border-bottom">
+                            <div class="d-flex align-items-center flex-grow-1 overflow-hidden">
+                                ${voiceBadge}<strong class="text-truncate">${s.name}</strong>
                             </div>
-                            <div>
-                                <button class="btn btn-sm btn-outline-success me-1" onclick="loadScript('${s.name}')"><i class="fas fa-upload me-1"></i>Load</button>
+                            <div class="d-flex align-items-center gap-2 ms-3 flex-shrink-0">
+                                <small class="text-muted">${date}</small>
+                                <button class="btn btn-sm btn-outline-success" onclick="loadScript('${s.name}')"><i class="fas fa-upload me-1"></i>Load</button>
                                 <button class="btn btn-sm btn-outline-danger" onclick="deleteScript('${s.name}')"><i class="fas fa-trash"></i></button>
                             </div>
                         </div>`;
@@ -330,7 +330,7 @@
                 const blob = await response.blob();
                 const disposition = response.headers.get('Content-Disposition') || '';
                 const match = disposition.match(/filename="?([^"]+)"?/i);
-                const filename = match ? match[1] : 'alexandria_project.zip';
+                const filename = match ? match[1] : 'threadspeak_project.zip';
                 const url = URL.createObjectURL(blob);
                 const link = document.createElement('a');
                 link.href = url;

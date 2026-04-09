@@ -66,7 +66,7 @@
             }
         }
 
-        const THEME_STORAGE_KEY = 'alexandria-theme';
+        const THEME_STORAGE_KEY = 'threadspeak-theme';
         let generationModeLocked = false;
 
         function applyTheme(theme) {

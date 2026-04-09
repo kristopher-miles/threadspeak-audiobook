@@ -482,6 +482,13 @@ class AppConfig(BaseModel):
     export: Optional[ExportConfig] = None
     ui: Optional[UIConfig] = None
 
+class SetupConfigUpdate(BaseModel):
+    llm: Optional[LLMConfig] = None
+    tts: Optional[TTSConfig] = None
+    prompts: Optional[PromptConfig] = None
+    generation: Optional[GenerationConfig] = None
+    proofread: Optional[dict] = None
+
 class PreferencesUpdate(BaseModel):
     legacy_mode: Optional[bool] = None
     dark_mode: Optional[bool] = None
@@ -1685,7 +1692,7 @@ def _project_archive_entries():
 
 def _build_project_archive_manifest(entries):
     return {
-        "kind": "alexandria_project_archive",
+        "kind": "threadspeak_project_archive",
         "version": PROJECT_ARCHIVE_VERSION,
         "created_at": time.time(),
         "entries": [relative_path for relative_path, _ in entries],

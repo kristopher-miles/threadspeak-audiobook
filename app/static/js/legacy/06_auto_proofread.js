@@ -1,5 +1,5 @@
         // --- Auto Proofread toggle ---
-        const AUTO_PROOFREAD_KEY = 'alexandria-auto-proofread';
+        const AUTO_PROOFREAD_KEY = 'threadspeak-auto-proofread';
         const savedAutoProofread = localStorage.getItem(AUTO_PROOFREAD_KEY);
         let autoProofreadEnabled = savedAutoProofread === null ? false : savedAutoProofread === 'true';
         let clipsAtLastAutoProofread = 0;

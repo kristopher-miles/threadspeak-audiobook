@@ -31,6 +31,11 @@
                         console.error('Failed to flush export settings before tab switch:', err);
                     });
                 }
+                if (currentTab === 'setup' && nextTab !== 'setup' && window.flushSetupConfig) {
+                    await window.flushSetupConfig().catch(err => {
+                        console.error('Failed to flush setup settings before tab switch:', err);
+                    });
+                }
 
                 // Remove active class from all links
                 document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));

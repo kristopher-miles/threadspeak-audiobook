@@ -37,7 +37,7 @@ def _normalize_http_url(raw_url):
 
 def _discover_base_url():
     # Explicit test override wins.
-    for key in ("ALEXANDRIA_TEST_URL", "BASE_URL"):
+    for key in ("THREADSPEAK_TEST_URL", "BASE_URL"):
         configured = _normalize_http_url(os.getenv(key))
         if configured:
             return configured
@@ -60,7 +60,7 @@ def _discover_base_url():
 
 
 BASE_URL = _discover_base_url()
-FULL_MODE = (os.getenv("ALEXANDRIA_TEST_FULL", "").strip().lower() in {"1", "true", "yes", "on"})
+FULL_MODE = (os.getenv("THREADSPEAK_TEST_FULL", "").strip().lower() in {"1", "true", "yes", "on"})
 TEST_PREFIX = "_test_"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(APP_DIR)
@@ -84,7 +84,7 @@ def _find_free_port():
 def _start_isolated_test_server():
     global BASE_URL, REPO_DIR, STATE_PATH, UPLOADS_PATH, ACTIVE_APP_DIR, _SERVER_PROC, _SERVER_TEMP_ROOT
 
-    _SERVER_TEMP_ROOT = tempfile.mkdtemp(prefix="alexandria_api_test_")
+    _SERVER_TEMP_ROOT = tempfile.mkdtemp(prefix="threadspeak_api_test_")
     temp_app_dir = os.path.join(_SERVER_TEMP_ROOT, "app")
     shutil.copytree(
         APP_DIR,
@@ -169,7 +169,7 @@ def _stop_isolated_test_server():
 if pytest is not None:
     @pytest.fixture(scope="module", autouse=True)
     def _isolated_api_server():
-        use_external = (os.getenv("ALEXANDRIA_TEST_USE_EXTERNAL_SERVER", "").strip().lower() in {"1", "true", "yes", "on"})
+        use_external = (os.getenv("THREADSPEAK_TEST_USE_EXTERNAL_SERVER", "").strip().lower() in {"1", "true", "yes", "on"})
         if not use_external:
             _start_isolated_test_server()
         try:
@@ -1525,7 +1525,7 @@ if pytest is not None:
 def main():
     global BASE_URL, FULL_MODE
 
-    parser = argparse.ArgumentParser(description="Alexandria API test suite")
+    parser = argparse.ArgumentParser(description="Threadspeak API test suite")
     parser.add_argument("--url", default=BASE_URL,
                         help=f"Server URL (default: {BASE_URL})")
     parser.add_argument("--full", action="store_true",

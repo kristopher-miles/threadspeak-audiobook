@@ -1,3 +1,5 @@
+> This project originated as a fork of [Alexandria Audiobook Generator](https://github.com/Finrandojin/alexandria-audiobook) by Finrandojin. The original code was released under the MIT License. See [`LICENSE-ORIGINAL`](LICENSE-ORIGINAL) for details.
+
 <img width="475" height="467" alt="Alexandria Logo" src="https://github.com/user-attachments/assets/fa2c36d3-a5f3-49ab-9dfe-30933359dfbd" />
 
 # Alexandria Audiobook Generator

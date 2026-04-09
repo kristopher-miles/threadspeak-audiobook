@@ -13,7 +13,7 @@
         let latestProofreadStatus = null;
         let renderPrepComplete = false;
         let _queueStatusToastShown = false;
-        const NARRATOR_SELECTION_KEY = 'alexandria-narrator-selection';
+        const NARRATOR_SELECTION_KEY = 'threadspeak-narrator-selection';
 
         // Check if any audio is currently playing
         function isAudioPlaying() {
