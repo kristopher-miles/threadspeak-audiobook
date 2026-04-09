@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Automated API test script for Alexandria audiobook generator.
+"""Automated API test script.
 
 Usage:
     python test_api.py                    # Quick tests only
@@ -1535,7 +1535,7 @@ def main():
     BASE_URL = _normalize_http_url(args.url)
     FULL_MODE = args.full
 
-    print(f"Alexandria API Tests")
+    print(f"Threadspeak API Tests")
     print(f"Server: {BASE_URL}")
     print(f"Mode:   {'FULL (includes TTS/LLM tests)' if FULL_MODE else 'QUICK (no TTS/LLM)'}")
 

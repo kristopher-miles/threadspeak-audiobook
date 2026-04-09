@@ -1,7 +1,0 @@
-{
-  "requested_at": 1775709203.2871602,
-  "reason": "User requested cancellation via /api/cancel_audio",
-  "job_id": 1,
-  "corr_id": "audio-00001-a572ac98",
-  "run_token": "5664be2b114c4ad0b25d39487d277160"
-}

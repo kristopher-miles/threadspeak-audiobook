@@ -2,9 +2,9 @@ const fs = require('fs')
 const path = require('path')
 
 module.exports = {
-  version: "5.0",
-  title: "Alexandria",
-  description: "A tool that takes a text document containing a book or a novel, ingests it with an LLM to produce an annotated script, and then uses a TTS API to generate the voice lines, finally stitching them together into an audiobook in MP3 format.",
+  version: "5.1",
+  title: "Threadspeak",
+  description: "Import your book, process it via LLM, then convert it into an audiobook read by full cast.",
   icon: "icon.png",
   menu: async (kernel, info) => {
     // Check running states

@@ -2,7 +2,7 @@
 """
 train_lora.py - Standalone LoRA fine-tuning script for Qwen3-TTS Base model.
 
-Runs as a subprocess with structured stdout for log capture by Alexandria.
+Runs as a subprocess with structured stdout for log capture.
 Prints [DATA], [TRAIN], [EPOCH], [DONE], [ERROR] prefixed lines for progress tracking.
 
 Targets the talker's attention layers with LoRA via PEFT. Training uses teacher forcing:

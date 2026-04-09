@@ -1,4 +1,5 @@
         :root {
+            --sidebar-width: 130px;
             --app-bg: #f4f6fb;
             --app-text: #18212f;
             --app-muted: #5f6b7a;
@@ -42,8 +43,71 @@
             background-color: var(--app-bg);
             color: var(--app-text);
             transition: background-color 0.2s ease, color 0.2s ease;
+            margin-left: var(--sidebar-width);
+            overflow-x: hidden;
         }
-        .container-wide { max-width: 85%; margin-left: auto; margin-right: auto; padding-left: 12px; padding-right: 12px; }
+        #app-sidebar {
+            position: fixed;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: var(--sidebar-width);
+            background-color: #212529;
+            z-index: 1030;
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+        .sidebar-brand {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 0.9rem 0.5rem 0.75rem;
+            color: #fff;
+            font-size: 0.8rem;
+            font-weight: 600;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            gap: 0.3rem;
+            text-decoration: none;
+        }
+        .sidebar-brand i { font-size: 1.1rem; }
+        .sidebar-nav {
+            list-style: none;
+            padding: 0.5rem 0;
+            margin: 0;
+            flex: 1;
+        }
+        .sidebar-nav .nav-link {
+            display: block;
+            padding: 0.4rem 0.75rem;
+            font-size: 1rem;
+            font-weight: 600;
+            margin: 2px 4px;
+            border-radius: 4px;
+            transition: background-color 0.15s ease;
+        }
+        .sidebar-nav .nav-link:hover:not(.active) {
+            background-color: rgba(255, 255, 255, 0.08);
+        }
+        .sidebar-divider {
+            height: 1px;
+            background-color: rgba(255, 255, 255, 0.1);
+            margin: 0.35rem 0;
+        }
+        .sidebar-footer {
+            padding: 0.75rem;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .sidebar-footer .form-check-label {
+            color: rgba(255, 255, 255, 0.75) !important;
+            font-size: 0.82rem;
+        }
+        .sidebar-footer .form-check-input {
+            background-color: rgba(255, 255, 255, 0.15);
+            border-color: rgba(255, 255, 255, 0.3);
+        }
+        .container-wide { max-width: 85%; margin-left: auto; margin-right: auto; padding-left: 12px; padding-right: 12px; padding-top: 1rem; }
         .tab-content > .card:last-child { margin-bottom: 0; }
         #voices-tab {
             padding-bottom: 0 !important;
@@ -65,7 +129,7 @@
             margin-bottom: 0 !important;
         }
         #editor-tab .table-responsive {
-            height: calc(100vh - 390px);
+            height: calc(100vh - 310px);
             min-height: 250px;
             overflow-y: auto;
         }

@@ -4,11 +4,15 @@
             const wrapper = document.getElementById('legacy-mode-toggle-wrapper');
             const legacyControls = document.getElementById('legacy-mode-controls');
             const newControls = document.getElementById('new-mode-controls');
+            const legacyAdvanced = document.getElementById('legacy-mode-advanced');
+            const newAdvanced = document.getElementById('new-mode-advanced');
             const setupLegacyPromptFields = document.getElementById('setup-legacy-prompt-fields');
             const setupNonLegacyPromptFields = document.getElementById('setup-nonlegacy-prompt-fields');
             function applyLegacyMode(isLegacy) {
                 legacyControls.style.display = isLegacy ? '' : 'none';
                 newControls.style.display = isLegacy ? 'none' : '';
+                if (legacyAdvanced) legacyAdvanced.style.display = isLegacy ? '' : 'none';
+                if (newAdvanced) newAdvanced.style.display = isLegacy ? 'none' : '';
                 if (setupLegacyPromptFields) {
                     setupLegacyPromptFields.style.display = isLegacy ? '' : 'none';
                 }

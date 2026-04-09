@@ -1,5 +1,17 @@
         // --- Setup Tab ---
 
+        window.resetProject = async () => {
+            const confirmed = await showConfirm('Reset the current project? This will delete the loaded source, generated script, detected characters, chunk audio, final audiobook files, and sanity/repair state. Global settings and prompt configuration will be kept.');
+            if (!confirmed) return;
+            try {
+                await API.post('/api/reset_project', {});
+                showToast('Project reset. Reloading...', 'success', 1500);
+                setTimeout(() => window.location.reload(), 500);
+            } catch (e) {
+                showToast('Failed to reset project: ' + e.message, 'error');
+            }
+        };
+
         function toggleTTSMode() {
             const mode = document.getElementById('tts-mode').value;
             document.getElementById('tts-url-group').style.display = mode === 'external' ? '' : 'none';
@@ -298,9 +310,19 @@
                 if (config.current_file) {
                     document.getElementById('upload-status').innerHTML =
                         `<span class="text-success"><i class="fas fa-check me-1"></i>Loaded: ${config.current_file}</span>`;
+                    document.getElementById('file-upload-section').style.display = 'none';
+                    document.getElementById('script-help-text').style.display = '';
                 }
                 renderPrepComplete = !!config.render_prep_complete;
                 refreshPromptTextareaHeights();
+
+                // Default to Settings tab if LLM is not configured
+                if (!config.llm?.base_url || !config.llm?.model_name) {
+                    document.querySelectorAll('.tab-content').forEach(t => t.style.display = 'none');
+                    document.getElementById('setup-tab').style.display = '';
+                    document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
+                    document.querySelector('.nav-link[data-tab="setup"]').classList.add('active');
+                }
             } catch (e) {
                 console.error("Failed to load config", e);
             }
@@ -445,15 +467,4 @@
             }
         });
 
-        document.getElementById('btn-reset-project').addEventListener('click', async () => {
-            const confirmed = await showConfirm('Reset the current project? This will delete the loaded source, generated script, detected characters, chunk audio, final audiobook files, and sanity/repair state. Global settings and prompt configuration will be kept.');
-            if (!confirmed) return;
-
-            try {
-                await API.post('/api/reset_project', {});
-                showToast('Project reset. Reloading...', 'success', 1500);
-                setTimeout(() => window.location.reload(), 500);
-            } catch (e) {
-                showToast('Failed to reset project: ' + e.message, 'error');
-            }
-        });
+        document.getElementById('btn-reset-project').addEventListener('click', window.resetProject);

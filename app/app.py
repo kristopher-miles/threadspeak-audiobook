@@ -115,7 +115,7 @@ if __name__ == "__main__":
             pass
 
     print(
-        "[Alexandria] startup bind settings: "
+        "[Threadspeak] startup bind settings: "
         f"PINOKIO_SHARE_LOCAL={os.getenv('PINOKIO_SHARE_LOCAL')!r}, "
         f"PINOKIO_SHARE_LOCAL_PORT={os.getenv('PINOKIO_SHARE_LOCAL_PORT')!r}, "
         f"host={host}, port={port}",

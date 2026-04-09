@@ -45,9 +45,9 @@ from script_repair import RepairSupersededError, repair_invalid_chunks
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("AlexandriaUI")
+logger = logging.getLogger("ThreadspeakUI")
 
-app = FastAPI(title="Alexandria Audiobook")
+app = FastAPI(title="Threadspeak Audiobook")
 
 # Paths
 # shared.py lives in app/api, but runtime paths must stay compatible with the

@@ -1,4 +1,4 @@
-# Qwen3-TTS LoRA Training Guide for Alexandria
+# Qwen3-TTS LoRA Training Guide
 
 ## Quick Reference
 
@@ -42,7 +42,7 @@
 
 ### Using the Dataset Builder (recommended)
 
-1. Go to the **Dataset** tab in Alexandria
+1. Go to the **Dataset** tab after toggling legacy mode.
 2. Enter a voice description and add rows (emotion + text pairs)
 3. Generate samples — each row produces a WAV via VoiceDesign
 4. Pick a clear, representative line as the **reference sample** (used as `ref.wav` for speaker embedding during training)
@@ -85,7 +85,7 @@ lora_datasets/{name}/
 | Initial audio glitch | Clone prompt alignment artifact | Minor — usually not present in full audiobook generation |
 | ref.wav mismatch | ref_text.txt doesn't match ref.wav content | Ensure ref_text.txt contains the exact transcript of ref.wav |
 
-## Tested Configurations (Alexandria)
+## Tested Configurations
 
 | Adapter | Samples | Epochs | LR | Alpha | Loss | Result |
 |---------|---------|--------|----|-------|------|--------|
