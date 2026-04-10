@@ -1,8 +1,11 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Troubleshooting Wiki
-    url: https://github.com/Finrandojin/alexandria-audiobook/wiki/Troubleshooting
-    about: Check here first — most common issues are already documented.
-  - name: README (First Launch Guide)
-    url: https://github.com/Finrandojin/alexandria-audiobook#first-launch--what-to-expect
-    about: First-time setup, model downloads, VRAM requirements, and common pitfalls.
+  - name: Threadspeak Troubleshooting
+    url: https://github.com/kristopher-miles/threadspeak-audiobook/blob/main/wiki/Troubleshooting.md
+    about: Check common fixes and diagnostics first.
+  - name: Threadspeak First Launch Guide
+    url: https://github.com/kristopher-miles/threadspeak-audiobook/blob/main/wiki/First-Launch.md
+    about: Setup requirements, first-run behavior, and common startup pitfalls.
+  - name: Threadspeak Prompt Customization
+    url: https://github.com/kristopher-miles/threadspeak-audiobook/blob/main/wiki/Prompt-Customization.md
+    about: Prompt keys, file sync behavior, and reset/default semantics.

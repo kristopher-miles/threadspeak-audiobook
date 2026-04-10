@@ -7,6 +7,12 @@ This wiki contains detailed technical documentation that is intentionally kept o
 - [API Reference](API-Reference)
 - [Automation Examples](Automation-Examples)
 - [Project Structure](Project-Structure)
+- [First Launch](First-Launch)
+- [Performance and ROCm](Performance-and-ROCm)
+- [Script Format](Script-Format)
+- [Output Formats](Output-Formats)
+- [Model Recommendations](Model-Recommendations)
+- [Prompt Customization](Prompt-Customization)
 - [Troubleshooting](Troubleshooting)
 
 ## Source of truth

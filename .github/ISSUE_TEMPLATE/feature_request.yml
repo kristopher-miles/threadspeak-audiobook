@@ -1,33 +1,72 @@
 name: Feature Request
-description: Suggest a new feature or improvement
+description: Suggest an improvement to Threadspeak
 title: "[Feature]: "
 labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for your suggestion! Please check existing [issues](https://github.com/Finrandojin/alexandria-audiobook/issues) to avoid duplicates.
+        Thanks for the suggestion. Please check existing [issues](https://github.com/kristopher-miles/threadspeak-audiobook/issues) first.
 
-  - type: textarea
-    id: description
+  - type: dropdown
+    id: area
     attributes:
-      label: What would you like to see?
-      description: A clear description of the feature or improvement.
+      label: Feature area
+      options:
+        - Script Ingestion / Chaptering
+        - Dialogue Attribution
+        - Temperament Extraction
+        - Voices / Voice Design / Clone
+        - Editor / Rendering
+        - Proofread
+        - Export
+        - Save/Load/Resume
+        - API
+        - Docs
+        - Other
     validations:
       required: true
 
   - type: textarea
-    id: use_case
+    id: proposal
     attributes:
-      label: Use case
-      description: Why is this useful? What problem does it solve?
+      label: What should change?
+      description: Describe the feature clearly.
     validations:
       required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Explain current pain points or limits.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Proposed user workflow
+      description: Step-by-step behavior from user perspective.
+      placeholder: |
+        1. User does X
+        2. System responds with Y
+        3. User can then do Z
+    validations:
+      required: false
 
   - type: textarea
     id: alternatives
     attributes:
       label: Alternatives considered
-      description: Have you tried any workarounds or alternative approaches?
+      description: Workarounds or other approaches you tried.
+    validations:
+      required: false
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and constraints
+      description: Performance, compatibility, or UX constraints that matter.
     validations:
       required: false
