@@ -68,8 +68,8 @@ Transform a source script into a production-ready audiobook with an end-to-end p
 | **NVIDIA** | Linux | Full support | Driver 550+ (CUDA 12.8) | Flash attention + triton included |
 | **AMD** | Linux | Full support | ROCm 6.3 | ROCm optimizations applied automatically |
 | **AMD** | Windows | CPU only | N/A | GPU acceleration is not supported — the app runs in CPU mode. For GPU acceleration with AMD, use Linux |
-| **Apple Silicon** | macOS | CPU only | N/A | MPS acceleration is not currently supported. Functional but slow |
-| **Intel** | macOS | CPU only | N/A | Functional in CPU mode, but slow |
+| **Apple Silicon** | macOS | Full Support | N/A | Auto-detects Apple Silicon and grabs MPS versions of Qwen3 files. No Flash attention. |
+| **Intel** | macOS | CPU only | N/A | Fuctional, barely. |
 
 > **Note:** No external TTS server is required. Threadspeak includes a built-in Qwen3-TTS engine that loads models directly. Model weights are downloaded automatically on first use (~3.5 GB per model variant).
 
