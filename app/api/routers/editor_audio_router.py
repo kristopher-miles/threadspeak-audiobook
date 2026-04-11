@@ -54,6 +54,15 @@ async def get_chunks_view(chapter: Optional[str] = None):
     return chunks
 
 
+@router.get("/api/chunks/{index}")
+async def get_chunk(index: str):
+    chunks = project_manager.load_chunks()
+    resolved_index = project_manager.resolve_chunk_index(index, chunks)
+    if resolved_index is None or not (0 <= resolved_index < len(chunks)):
+        raise HTTPException(status_code=404, detail="Invalid chunk id")
+    return chunks[resolved_index]
+
+
 @router.post("/api/chunks/sync_from_script_if_stale")
 async def sync_chunks_from_script_if_stale():
     # Never rewrite chunks while audio generation is active; doing so can clear

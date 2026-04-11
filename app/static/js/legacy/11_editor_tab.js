@@ -13,6 +13,9 @@
         let latestProofreadStatus = null;
         let renderPrepComplete = false;
         let _queueStatusToastShown = false;
+        const activeChunkStatusPolls = new Map();
+        const singleChunkPollIntervalMs = 1000;
+        const singleChunkPollTimeoutMs = 180000;
         const NARRATOR_SELECTION_KEY = 'threadspeak-narrator-selection';
 
         // Check if any audio is currently playing
@@ -71,6 +74,123 @@
             const normalizedPath = rawPath.startsWith('/') ? rawPath : `/${rawPath}`;
             const fingerprint = getChunkAudioFingerprint(chunk) || fallbackToken || Date.now().toString();
             return `${normalizedPath}?t=${encodeURIComponent(String(fingerprint))}`;
+        }
+
+        function updateCachedChunk(updatedChunk) {
+            if (!updatedChunk) return '';
+            const chunkRef = getChunkRef(updatedChunk);
+            const index = cachedChunks.findIndex(chunk => getChunkRef(chunk) === chunkRef);
+            if (index >= 0) {
+                cachedChunks[index] = updatedChunk;
+            } else if (Array.isArray(cachedChunks) && cachedChunks.length > 0) {
+                cachedChunks.push(updatedChunk);
+            } else {
+                cachedChunks = [updatedChunk];
+            }
+            return chunkRef;
+        }
+
+        function applyTrackedChunkUpdate(updatedChunk) {
+            const chunkRef = updateCachedChunk(updatedChunk);
+            if (!chunkRef) {
+                return { chunkRef: '', editorUpdated: false, proofreadUpdated: false };
+            }
+            const editorUpdated = updateChunkRow(updatedChunk);
+            const proofreadUpdated = updateProofreadRow(updatedChunk);
+            renderEditorProgressBar(cachedChunks, latestAudioState);
+            return { chunkRef, editorUpdated, proofreadUpdated };
+        }
+
+        function markChunkGeneratingLocally(chunkRef) {
+            const normalizedRef = String(chunkRef || '');
+            if (!normalizedRef) return null;
+            const current = (cachedChunks || []).find(chunk => getChunkRef(chunk) === normalizedRef);
+            if (!current) return null;
+            const updatedChunk = {
+                ...current,
+                status: 'generating',
+            };
+            applyTrackedChunkUpdate(updatedChunk);
+            return updatedChunk;
+        }
+
+        function stopTrackedChunkStatusPolling(chunkRef) {
+            const normalizedRef = String(chunkRef || '');
+            const existing = activeChunkStatusPolls.get(normalizedRef);
+            if (!existing) return;
+            existing.cancelled = true;
+            if (existing.timer) {
+                clearTimeout(existing.timer);
+            }
+            activeChunkStatusPolls.delete(normalizedRef);
+        }
+
+        async function pollTrackedChunkStatus(chunkRef) {
+            const normalizedRef = String(chunkRef || '');
+            const pollState = activeChunkStatusPolls.get(normalizedRef);
+            if (!pollState || pollState.cancelled) return;
+
+            try {
+                const updatedChunk = await API.get(`/api/chunks/${encodeURIComponent(normalizedRef)}`);
+                if (pollState.cancelled) return;
+
+                pollState.attempts += 1;
+                const updateOutcome = applyTrackedChunkUpdate(updatedChunk);
+                const reachedTerminalState = updatedChunk?.status !== 'generating';
+                const hasVisibleRow = updateOutcome.editorUpdated || updateOutcome.proofreadUpdated;
+                const timedOut = (Date.now() - pollState.startedAt) >= singleChunkPollTimeoutMs;
+
+                if (reachedTerminalState || timedOut || !hasVisibleRow) {
+                    stopTrackedChunkStatusPolling(normalizedRef);
+                    return;
+                }
+
+                pollState.timer = setTimeout(() => {
+                    pollTrackedChunkStatus(normalizedRef).catch((error) => {
+                        console.warn(`Single-chunk status poll failed for ${normalizedRef}`, error);
+                        stopTrackedChunkStatusPolling(normalizedRef);
+                    });
+                }, singleChunkPollIntervalMs);
+            } catch (e) {
+                console.warn(`Failed to fetch chunk status for ${normalizedRef}`, e);
+                stopTrackedChunkStatusPolling(normalizedRef);
+            }
+        }
+
+        function startTrackedChunkStatusPolling(chunkRef, options = {}) {
+            const normalizedRef = String(chunkRef || '');
+            if (!normalizedRef || activeChunkStatusPolls.has(normalizedRef)) return;
+
+            const pollState = {
+                attempts: 0,
+                startedAt: Date.now(),
+                timer: null,
+                cancelled: false,
+            };
+            activeChunkStatusPolls.set(normalizedRef, pollState);
+
+            const initialDelay = Number.isFinite(Number(options.initialDelayMs))
+                ? Math.max(0, Number(options.initialDelayMs))
+                : 0;
+            pollState.timer = setTimeout(() => {
+                pollTrackedChunkStatus(normalizedRef).catch((error) => {
+                    console.warn(`Single-chunk status poll failed for ${normalizedRef}`, error);
+                    stopTrackedChunkStatusPolling(normalizedRef);
+                });
+            }, initialDelay);
+        }
+
+        function syncTrackedChunkPollers(visibleChunks) {
+            (visibleChunks || []).forEach(chunk => {
+                const chunkRef = getChunkRef(chunk);
+                if (chunk.status === 'generating') {
+                    if (!activeChunkStatusPolls.has(chunkRef)) {
+                        startTrackedChunkStatusPolling(chunkRef, { initialDelayMs: singleChunkPollIntervalMs });
+                    }
+                } else {
+                    stopTrackedChunkStatusPolling(chunkRef);
+                }
+            });
         }
 
         function buildEditorChapterOptions(chunks) {
@@ -893,9 +1013,9 @@
         window.regenerateProofreadChunk = async (chunkRef) => {
             try {
                 await API.post(`/api/chunks/${encodeURIComponent(chunkRef)}/regenerate`, {});
+                markChunkGeneratingLocally(chunkRef);
+                startTrackedChunkStatusPolling(chunkRef);
                 showToast('Regeneration started for the selected clip.', 'success', 3000);
-                await loadChunks(false);
-                ensureAudioQueuePolling();
             } catch (e) {
                 showToast('Failed to regenerate clip: ' + e.message, 'error');
             }
@@ -1505,6 +1625,7 @@
                     visibleChunks.forEach(chunk => updateChunkRow(chunk));
                     cachedChunks = mergedChunks;
                     cachedVisibleChunkIds = visibleChunks.map(chunk => getChunkRef(chunk));
+                    syncTrackedChunkPollers(visibleChunks);
 
                     return;
                 }
@@ -1534,6 +1655,7 @@
 
                 cachedChunks = mergedChunks;
                 cachedVisibleChunkIds = visibleChunks.map(chunk => getChunkRef(chunk));
+                syncTrackedChunkPollers(visibleChunks);
 
             } catch (e) {
                 console.error("Error loading chunks:", e);
@@ -2299,9 +2421,8 @@
                 }
 
                 await API.post(`/api/chunks/${id}/generate`, {});
-
-                // Start polling with incremental updates (no full redraw)
-                setTimeout(() => loadChunks(false), 1000);
+                markChunkGeneratingLocally(id);
+                startTrackedChunkStatusPolling(id);
             } catch (e) {
                 showToast("Failed to start generation: " + e.message, 'error');
                 loadChunks(true); // Revert UI with full redraw

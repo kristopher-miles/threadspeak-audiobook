@@ -811,6 +811,24 @@ def test_get_chunks_view():
                 raise TestFailure(f"Chapter-scoped view returned chunks outside {chapter!r}")
 
 
+def test_get_single_chunk():
+    if not shared.get("has_chunks"):
+        skip_test("no chunks available")
+
+    r = get("/api/chunks/0")
+    assert_status(r, 200)
+    data = r.json()
+    if not isinstance(data, dict):
+        raise TestFailure(f"Expected object, got {type(data).__name__}")
+    if str(data.get("id")) != "0":
+        raise TestFailure(f"Expected chunk 0, got {data.get('id')!r}")
+
+
+def test_get_single_chunk_404():
+    r = get("/api/chunks/99999")
+    assert_status(r, 404)
+
+
 def test_update_chunk():
     if not shared.get("has_chunks"):
         skip_test("no chunks available")
