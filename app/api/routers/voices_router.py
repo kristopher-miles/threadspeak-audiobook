@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from fastapi import APIRouter
 from .. import shared as _shared
 
@@ -239,18 +240,30 @@ async def save_voice_config_with_invalidation(request: VoiceConfigSaveRequest):
     return result
 
 
+def _load_runtime_config() -> Dict[str, dict]:
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return {}
+
+
+def _llm_worker_count(config: Dict[str, dict] | None = None) -> int:
+    llm_config = (config or {}).get("llm", {})
+    try:
+        return max(1, int(llm_config.get("llm_workers", 1) or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
 def suggest_voice_description_sync(speaker: str):
     speaker = (speaker or "").strip()
     if not speaker:
         raise ValueError("Speaker is required")
 
-    config = {}
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                config = json.load(f)
-        except (json.JSONDecodeError, ValueError):
-            config = {}
+    config = _load_runtime_config()
     prompts = config.get("prompts", {})
     prompt_template = (prompts.get("voice_prompt") or "").strip()
     if not prompt_template:
@@ -288,8 +301,88 @@ def suggest_voice_description_sync(speaker: str):
     }
 
 
+def suggest_voice_descriptions_batch_sync(speakers: List[str], guard_fn=None, relay_fn=None):
+    ordered_speakers = []
+    seen = set()
+    for raw_speaker in speakers or []:
+        speaker = (raw_speaker or "").strip()
+        if not speaker or speaker in seen:
+            continue
+        seen.add(speaker)
+        ordered_speakers.append(speaker)
+
+    if not ordered_speakers:
+        return {"status": "ok", "workers": 0, "results": [], "failures": []}
+
+    if guard_fn:
+        guard_fn()
+
+    config = _load_runtime_config()
+    workers = min(_llm_worker_count(config), len(ordered_speakers))
+    if relay_fn:
+        relay_fn(
+            f"Suggesting voice descriptions for {len(ordered_speakers)} speaker(s) with {workers} parallel LLM worker(s)..."
+        )
+
+    results_by_speaker = {}
+    failures_by_speaker = {}
+    future_map = {}
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        for speaker in ordered_speakers:
+            if guard_fn:
+                guard_fn()
+            future = executor.submit(suggest_voice_description_sync, speaker)
+            future_map[future] = speaker
+
+        completed = 0
+        for future in as_completed(future_map):
+            if guard_fn:
+                guard_fn()
+            speaker = future_map[future]
+            completed += 1
+            try:
+                result = future.result()
+                if not isinstance(result, dict):
+                    raise ValueError("Suggestion response must be a dictionary")
+                result = dict(result)
+                result.setdefault("speaker", speaker)
+                results_by_speaker[speaker] = result
+                if relay_fn:
+                    relay_fn(f"[{completed}/{len(ordered_speakers)}] Suggested voice description for {speaker}.")
+            except WorkflowPauseRequested:
+                raise
+            except Exception as e:
+                failures_by_speaker[speaker] = str(e)
+                if relay_fn:
+                    relay_fn(f"[{completed}/{len(ordered_speakers)}] Failed to suggest voice for {speaker}: {e}")
+
+    ordered_results = [results_by_speaker[speaker] for speaker in ordered_speakers if speaker in results_by_speaker]
+    ordered_failures = [
+        {"speaker": speaker, "error": failures_by_speaker[speaker]}
+        for speaker in ordered_speakers
+        if speaker in failures_by_speaker
+    ]
+    return {
+        "status": "ok",
+        "workers": workers,
+        "results": ordered_results,
+        "failures": ordered_failures,
+    }
+
+
+def _unload_bulk_voice_generation_state():
+    unloaded = False
+    try:
+        unloaded = bool(project_manager.unload_tts_engine())
+    except Exception:
+        unloaded = False
+    return unloaded
+
+
 def run_voice_processing_task(run_id: str, stop_check=None, relay_fn=None):
     success = False
+    attempted_bulk_generation = False
 
     def ensure_active():
         if stop_check and stop_check():
@@ -382,23 +475,46 @@ def run_voice_processing_task(run_id: str, stop_check=None, relay_fn=None):
             log("Task voices completed successfully.")
             return True
 
+        attempted_bulk_generation = True
         failures = []
         created_count = 0
+        speakers_with_suggestion_failures = set()
+        to_suggest = []
+        for speaker in eligible:
+            voice_data = updated_config.setdefault(speaker, {})
+            if not (voice_data.get("description") or "").strip():
+                to_suggest.append(speaker)
+
+        if to_suggest:
+            suggestion_batch = suggest_voice_descriptions_batch_sync(
+                to_suggest,
+                guard_fn=ensure_active,
+                relay_fn=log,
+            )
+            if suggestion_batch["results"]:
+                for suggestion in suggestion_batch["results"]:
+                    speaker = suggestion["speaker"]
+                    updated_config.setdefault(speaker, {})["description"] = suggestion["voice"].strip()
+                with open(VOICE_CONFIG_PATH, "w", encoding="utf-8") as f:
+                    json.dump(updated_config, f, indent=2, ensure_ascii=False)
+            for failure in suggestion_batch["failures"]:
+                speaker = failure["speaker"]
+                speakers_with_suggestion_failures.add(speaker)
+                failures.append((speaker, f"suggestion failed: {failure['error']}"))
+
         for index, speaker in enumerate(eligible, start=1):
             ensure_active()
             voice_data = updated_config.setdefault(speaker, {})
             description = (voice_data.get("description") or "").strip()
             sample_text = (voice_data.get("ref_text") or "").strip() or project_manager.suggest_design_sample_text(speaker, chunks)
 
-            try:
-                if not description:
-                    log(f"[{index}/{len(eligible)}] Suggesting voice description for {speaker}...")
-                    suggestion = suggest_voice_description_sync(speaker)
-                    description = suggestion["voice"].strip()
-                    voice_data["description"] = description
-                    with open(VOICE_CONFIG_PATH, "w", encoding="utf-8") as f:
-                        json.dump(updated_config, f, indent=2, ensure_ascii=False)
+            if not description:
+                if speaker not in speakers_with_suggestion_failures:
+                    failures.append((speaker, "missing description"))
+                log(f"[{index}/{len(eligible)}] Failed to create voice for {speaker}: missing description")
+                continue
 
+            try:
                 if not sample_text:
                     raise ValueError(f"No sample text available for '{speaker}'")
 
@@ -451,6 +567,16 @@ def run_voice_processing_task(run_id: str, stop_check=None, relay_fn=None):
         if _task_is_current("voices", run_id):
             _append_task_log("voices", run_id, f"Error: {str(e)}")
     finally:
+        if attempted_bulk_generation:
+            unloaded = _unload_bulk_voice_generation_state()
+            if _task_is_current("voices", run_id):
+                _append_task_log(
+                    "voices",
+                    run_id,
+                    "Unloaded bulk voice generation model state."
+                    if unloaded
+                    else "Bulk voice generation model state already unloaded.",
+                )
         _finish_task_run("voices", run_id)
     return success
 
@@ -470,6 +596,15 @@ async def suggest_voice_description(request: VoiceDescriptionSuggestRequest):
     except Exception as e:
         logger.error(f"Voice description suggestion failed for {speaker}: {e}")
         raise HTTPException(status_code=500, detail=f"Voice suggestion request failed: {e}")
+
+
+@router.post("/api/voices/suggest_descriptions_bulk")
+async def suggest_voice_descriptions_bulk(request: VoiceDescriptionSuggestBatchRequest):
+    try:
+        return await asyncio.to_thread(suggest_voice_descriptions_batch_sync, request.speakers)
+    except Exception as e:
+        logger.error(f"Bulk voice description suggestion failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Voice suggestion batch request failed: {e}")
 
 
 @router.post("/api/voices/design_generate")
@@ -501,6 +636,14 @@ async def generate_voice_design_clone(request: VoiceDesignGenerateRequest):
         "ref_audio": result["ref_audio"],
         "ref_text": result["ref_text"],
         "generated_ref_text": result["generated_ref_text"],
+    }
+
+
+@router.post("/api/voices/unload_bulk_generation")
+async def unload_bulk_voice_generation():
+    return {
+        "status": "unloaded",
+        "unloaded": _unload_bulk_voice_generation_state(),
     }
 
 

@@ -759,6 +759,33 @@
             }
         };
 
+        async function suggestVoiceDescriptionsBulk(speakers, bulkBtn) {
+            if (!Array.isArray(speakers) || speakers.length === 0) {
+                return { results: [], failures: [] };
+            }
+
+            const result = await API.post('/api/voices/suggest_descriptions_bulk', { speakers });
+            const results = Array.isArray(result?.results) ? result.results : [];
+            const failures = Array.isArray(result?.failures) ? result.failures : [];
+
+            results.forEach((item, index) => {
+                const speaker = item?.speaker;
+                const voiceCard = getVoiceCardByName(speaker);
+                const descriptionInput = voiceCard?.querySelector('.design-description');
+                if (!descriptionInput) return;
+                if (bulkBtn) {
+                    bulkBtn.textContent = `Suggesting ${index + 1}/${results.length}...`;
+                }
+                descriptionInput.value = item?.voice || '';
+            });
+
+            if (results.length > 0) {
+                await saveVoicesNow();
+            }
+
+            return { results, failures };
+        }
+
         window.playVoiceDesignClone = (btn) => {
             const card = btn.closest('.card-body');
             const refAudio = card.querySelector('.design-ref-audio')?.value;
@@ -824,7 +851,9 @@
                     window.setNavTaskSpinner('voices');
                 }
                 let generatedCount = 0;
-                const failedSpeakers = [];
+                const failedSpeakers = new Map();
+                const generationQueue = [];
+
                 for (let i = 0; i < eligibleSpeakers.length; i += 1) {
                     const speaker = eligibleSpeakers[i];
                     const voiceCard = getVoiceCardByName(speaker);
@@ -844,12 +873,30 @@
                         continue;
                     }
 
-                    try {
-                        if (!descriptionInput?.value.trim() && suggestButton) {
-                            bulkBtn.textContent = `Suggesting ${i + 1}/${eligibleSpeakers.length}...`;
-                            await window.suggestVoiceDescription(suggestButton);
-                        }
+                    generationQueue.push({ speaker, voiceCard, card, descriptionInput, sampleInput, generateButton });
+                }
 
+                const suggestionQueue = generationQueue.filter(item => !item.descriptionInput?.value.trim());
+                if (suggestionQueue.length > 0) {
+                    bulkBtn.textContent = `Suggesting 0/${suggestionQueue.length}...`;
+                    try {
+                        const batchResult = await suggestVoiceDescriptionsBulk(
+                            suggestionQueue.map(item => item.speaker),
+                            bulkBtn,
+                        );
+                        batchResult.failures.forEach(({ speaker, error }) => {
+                            failedSpeakers.set(speaker, `${speaker} (${error || 'suggestion failed'})`);
+                        });
+                    } catch (e) {
+                        suggestionQueue.forEach(({ speaker }) => {
+                            failedSpeakers.set(speaker, `${speaker} (${e.message || 'suggestion failed'})`);
+                        });
+                    }
+                }
+
+                for (let i = 0; i < generationQueue.length; i += 1) {
+                    const { speaker, voiceCard, card, descriptionInput, sampleInput, generateButton } = generationQueue[i];
+                    try {
                         if (sampleInput && !sampleInput.value.trim()) {
                             sampleInput.value = voiceCard.dataset.suggestedSample || '';
                             if (sampleInput.value.trim()) {
@@ -858,32 +905,40 @@
                         }
 
                         if (!descriptionInput?.value.trim() || !generateButton) {
-                            failedSpeakers.push(`${speaker} (missing description)`);
+                            if (!failedSpeakers.has(speaker)) {
+                                failedSpeakers.set(speaker, `${speaker} (missing description)`);
+                            }
                             continue;
                         }
 
-                        bulkBtn.textContent = `Generating ${i + 1}/${eligibleSpeakers.length}...`;
+                        bulkBtn.textContent = `Generating ${i + 1}/${generationQueue.length}...`;
                         await window.generateVoiceDesignClone(generateButton);
                         const nowHasAudio = Boolean((card.querySelector('.design-ref-audio')?.value || '').trim());
                         if (nowHasAudio) {
                             generatedCount += 1;
                         } else {
-                            failedSpeakers.push(`${speaker} (generation failed)`);
+                            failedSpeakers.set(speaker, `${speaker} (generation failed)`);
                         }
                     } catch (e) {
-                        failedSpeakers.push(`${speaker} (${e.message || 'unknown error'})`);
+                        failedSpeakers.set(speaker, `${speaker} (${e.message || 'unknown error'})`);
                     }
                 }
-                if (generatedCount === 0 && failedSpeakers.length === 0) {
+                const failureList = Array.from(failedSpeakers.values());
+                if (generatedCount === 0 && failureList.length === 0) {
                     showToast('No outstanding voices needed generation.', 'info');
-                } else if (failedSpeakers.length > 0) {
-                    const summary = failedSpeakers.slice(0, 4).join(', ');
-                    const suffix = failedSpeakers.length > 4 ? `, and ${failedSpeakers.length - 4} more` : '';
+                } else if (failureList.length > 0) {
+                    const summary = failureList.slice(0, 4).join(', ');
+                    const suffix = failureList.length > 4 ? `, and ${failureList.length - 4} more` : '';
                     showToast(`Created ${generatedCount} voice${generatedCount === 1 ? '' : 's'}; failed: ${summary}${suffix}.`, 'warning');
                 } else {
                     showToast(`Created ${generatedCount} outstanding voice${generatedCount === 1 ? '' : 's'}.`, 'success');
                 }
             } finally {
+                try {
+                    await API.post('/api/voices/unload_bulk_generation', {});
+                } catch (e) {
+                    console.warn('Failed to unload bulk voice generation state', e);
+                }
                 _bulkVoiceGenerationActive = false;
                 bulkBtn.disabled = false;
                 bulkBtn.textContent = originalText;

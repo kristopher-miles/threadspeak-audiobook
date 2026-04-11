@@ -11,6 +11,7 @@ module.exports = {
     let running = {
       install: info.running("install.js"),
       start: info.running("start.js"),
+      test: info.running("test.js"),
       reset: info.running("reset.js"),
       update: info.running("update.js")
     }
@@ -51,6 +52,15 @@ module.exports = {
       }
     }
 
+    if (running.test) {
+      return [{
+        default: true,
+        icon: "fa-solid fa-flask-vial",
+        text: "Running Tests",
+        href: "test.js"
+      }]
+    }
+
     if (running.reset) {
       return [{
         default: true,
@@ -85,6 +95,10 @@ module.exports = {
       icon: "fa-solid fa-power-off",
       text: "Start",
       href: "start.js"
+    }, {
+      icon: "fa-solid fa-flask-vial",
+      text: "Run Tests",
+      href: "test.js"
     }, {
       icon: "fa-solid fa-folder-open",
       text: "Open Voicelines",

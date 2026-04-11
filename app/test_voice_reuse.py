@@ -1,10 +1,13 @@
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 import asyncio
 
 import app as app_module
+from api.routers import voice_designer_router as voice_designer_router
 
 
 class SavedVoiceReuseTests(unittest.TestCase):
@@ -18,7 +21,7 @@ class SavedVoiceReuseTests(unittest.TestCase):
             "Sadie",
         )
 
-    def test_finds_case_insensitive_reusable_clone_voice_by_speaker(self):
+    def test_voice_processing_auto_populates_same_project_reusable_voice(self):
         with tempfile.TemporaryDirectory() as temp_root:
             clone_dir = os.path.join(temp_root, "clone_voices")
             designed_dir = os.path.join(temp_root, "designed_voices")
@@ -36,6 +39,7 @@ class SavedVoiceReuseTests(unittest.TestCase):
                             "id": "series_twilight",
                             "name": "Book One.Twilight Sparkle",
                             "speaker": "Twilight Sparkle",
+                            "script_title": "Book One",
                             "filename": clone_filename,
                             "sample_text": "Friendship is magic.",
                         }
@@ -48,23 +52,177 @@ class SavedVoiceReuseTests(unittest.TestCase):
             with open(os.path.join(designed_dir, "manifest.json"), "w", encoding="utf-8") as f:
                 json.dump([], f)
 
+            script_path = os.path.join(temp_root, "annotated_script.json")
+            voice_config_path = os.path.join(temp_root, "voice_config.json")
+            with open(script_path, "w", encoding="utf-8") as f:
+                json.dump({"entries": [{"speaker": "Twilight Sparkle", "text": "Hello."}]}, f, indent=2, ensure_ascii=False)
+            with open(voice_config_path, "w", encoding="utf-8") as f:
+                json.dump({}, f, indent=2, ensure_ascii=False)
+
             original_root = app_module.ROOT_DIR
+            original_script_path = app_module.SCRIPT_PATH
+            original_voice_config_path = app_module.VOICE_CONFIG_PATH
             original_clone_manifest = app_module.CLONE_VOICES_MANIFEST
             original_designed_manifest = app_module.DESIGNED_VOICES_MANIFEST
+            original_get_voices = app_module.awaitable_get_voices_sync
+            original_task_current = app_module._task_is_current
+            original_append_log = app_module._append_task_log
+            original_finish = app_module._finish_task_run
+            original_pm = app_module.project_manager
             try:
                 app_module.ROOT_DIR = temp_root
+                app_module.SCRIPT_PATH = script_path
+                app_module.VOICE_CONFIG_PATH = voice_config_path
                 app_module.CLONE_VOICES_MANIFEST = os.path.join(clone_dir, "manifest.json")
                 app_module.DESIGNED_VOICES_MANIFEST = os.path.join(designed_dir, "manifest.json")
+                app_module.awaitable_get_voices_sync = lambda: [
+                    {"name": "twilight sparkle", "suggested_sample_text": "Friendship is magic."}
+                ]
+                app_module._task_is_current = lambda task_name, run_id: True
+                logs = []
+                materialized = []
+                app_module._append_task_log = lambda task_name, run_id, message: logs.append(message)
+                app_module._finish_task_run = lambda task_name, run_id: None
 
-                match = app_module._find_saved_voice_option_for_speaker("twilight sparkle")
-                self.assertIsNotNone(match)
-                self.assertEqual(match["type"], "clone")
-                self.assertEqual(match["ref_audio"], f"clone_voices/{clone_filename}")
-                self.assertEqual(match["ref_text"], "Friendship is magic.")
+                class FakeProjectManager:
+                    def _normalize_speaker_name(self, value):
+                        return (value or "").strip().lower()
+
+                    def _current_script_title(self):
+                        return "Book One"
+
+                    def load_chunks(self):
+                        return []
+
+                    def unload_tts_engine(self):
+                        return False
+
+                app_module.project_manager = FakeProjectManager()
+                success = app_module.run_voice_processing_task("run-1")
+                self.assertTrue(success)
+                with open(voice_config_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                self.assertEqual(cfg["twilight sparkle"]["type"], "clone")
+                self.assertEqual(cfg["twilight sparkle"]["ref_audio"], f"clone_voices/{clone_filename}")
+                self.assertEqual(cfg["twilight sparkle"]["ref_text"], "Friendship is magic.")
+                self.assertTrue(any("Auto-populated twilight sparkle" in message for message in logs))
             finally:
                 app_module.ROOT_DIR = original_root
+                app_module.SCRIPT_PATH = original_script_path
+                app_module.VOICE_CONFIG_PATH = original_voice_config_path
                 app_module.CLONE_VOICES_MANIFEST = original_clone_manifest
                 app_module.DESIGNED_VOICES_MANIFEST = original_designed_manifest
+                app_module.awaitable_get_voices_sync = original_get_voices
+                app_module._task_is_current = original_task_current
+                app_module._append_task_log = original_append_log
+                app_module._finish_task_run = original_finish
+                app_module.project_manager = original_pm
+
+    def test_voice_processing_does_not_auto_populate_voice_from_other_project(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            clone_dir = os.path.join(temp_root, "clone_voices")
+            designed_dir = os.path.join(temp_root, "designed_voices")
+            os.makedirs(clone_dir, exist_ok=True)
+            os.makedirs(designed_dir, exist_ok=True)
+
+            clone_filename = "series_twilight.wav"
+            with open(os.path.join(clone_dir, clone_filename), "wb") as f:
+                f.write(b"wav")
+
+            with open(os.path.join(clone_dir, "manifest.json"), "w", encoding="utf-8") as f:
+                json.dump(
+                    [
+                        {
+                            "id": "series_twilight",
+                            "name": "Book Two.Twilight Sparkle",
+                            "speaker": "Twilight Sparkle",
+                            "script_title": "Book Two",
+                            "filename": clone_filename,
+                            "sample_text": "Friendship is magic.",
+                        }
+                    ],
+                    f,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+
+            with open(os.path.join(designed_dir, "manifest.json"), "w", encoding="utf-8") as f:
+                json.dump([], f)
+
+            script_path = os.path.join(temp_root, "annotated_script.json")
+            voice_config_path = os.path.join(temp_root, "voice_config.json")
+            with open(script_path, "w", encoding="utf-8") as f:
+                json.dump({"entries": [{"speaker": "Twilight Sparkle", "text": "Hello."}]}, f, indent=2, ensure_ascii=False)
+            with open(voice_config_path, "w", encoding="utf-8") as f:
+                json.dump({}, f, indent=2, ensure_ascii=False)
+
+            original_root = app_module.ROOT_DIR
+            original_script_path = app_module.SCRIPT_PATH
+            original_voice_config_path = app_module.VOICE_CONFIG_PATH
+            original_clone_manifest = app_module.CLONE_VOICES_MANIFEST
+            original_designed_manifest = app_module.DESIGNED_VOICES_MANIFEST
+            original_get_voices = app_module.awaitable_get_voices_sync
+            original_task_current = app_module._task_is_current
+            original_append_log = app_module._append_task_log
+            original_finish = app_module._finish_task_run
+            original_pm = app_module.project_manager
+            original_suggest = app_module.suggest_voice_description_sync
+            try:
+                app_module.ROOT_DIR = temp_root
+                app_module.SCRIPT_PATH = script_path
+                app_module.VOICE_CONFIG_PATH = voice_config_path
+                app_module.CLONE_VOICES_MANIFEST = os.path.join(clone_dir, "manifest.json")
+                app_module.DESIGNED_VOICES_MANIFEST = os.path.join(designed_dir, "manifest.json")
+                app_module.awaitable_get_voices_sync = lambda: [
+                    {"name": "twilight sparkle", "suggested_sample_text": "Friendship is magic."}
+                ]
+                app_module._task_is_current = lambda task_name, run_id: True
+                logs = []
+                materialized = []
+                app_module._append_task_log = lambda task_name, run_id, message: logs.append(message)
+                app_module._finish_task_run = lambda task_name, run_id: None
+
+                class FakeProjectManager:
+                    def _normalize_speaker_name(self, value):
+                        return (value or "").strip().lower()
+
+                    def _current_script_title(self):
+                        return "Book One"
+
+                    def load_chunks(self):
+                        return []
+
+                    def suggest_design_sample_text(self, speaker, chunks):
+                        return "Friendship is magic."
+
+                    def materialize_design_voice(self, speaker, description, sample_text, force, voice_config):
+                        materialized.append((speaker, description, sample_text))
+                        updated = json.loads(json.dumps(voice_config))
+                        updated[speaker]["ref_audio"] = "clone_voices/generated.wav"
+                        return {"voice_config": updated}
+
+                    def unload_tts_engine(self):
+                        return False
+
+                app_module.project_manager = FakeProjectManager()
+                app_module.suggest_voice_description_sync = lambda speaker: {"voice": "Warm, bright voice"}
+
+                success = app_module.run_voice_processing_task("run-1")
+                self.assertTrue(success)
+                self.assertEqual(materialized, [("twilight sparkle", "Warm, bright voice", "Friendship is magic.")])
+                self.assertFalse(any("Auto-populated twilight sparkle" in message for message in logs))
+            finally:
+                app_module.ROOT_DIR = original_root
+                app_module.SCRIPT_PATH = original_script_path
+                app_module.VOICE_CONFIG_PATH = original_voice_config_path
+                app_module.CLONE_VOICES_MANIFEST = original_clone_manifest
+                app_module.DESIGNED_VOICES_MANIFEST = original_designed_manifest
+                app_module.awaitable_get_voices_sync = original_get_voices
+                app_module._task_is_current = original_task_current
+                app_module._append_task_log = original_append_log
+                app_module._finish_task_run = original_finish
+                app_module.project_manager = original_pm
+                app_module.suggest_voice_description_sync = original_suggest
 
     def test_does_not_reuse_saved_voice_for_narrator(self):
         with tempfile.TemporaryDirectory() as temp_root:
@@ -142,6 +300,9 @@ class SavedVoiceReuseTests(unittest.TestCase):
                 class FakeProjectManager:
                     def _normalize_speaker_name(self, value):
                         return (value or "").strip().lower()
+
+                    def _current_script_title(self):
+                        return "Project"
 
                     def load_chunks(self):
                         return []
@@ -237,6 +398,169 @@ class SavedVoiceReuseTests(unittest.TestCase):
                 app_module.CONFIG_PATH = original_config_path
                 app_module.project_manager = original_pm
                 app_module.OpenAI = original_openai
+
+    def test_run_voice_processing_task_suggests_all_before_generation_and_unloads(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            script_path = os.path.join(temp_root, "annotated_script.json")
+            voice_config_path = os.path.join(temp_root, "voice_config.json")
+            config_path = os.path.join(temp_root, "config.json")
+            with open(script_path, "w", encoding="utf-8") as f:
+                json.dump({"entries": [{"speaker": "CAT", "text": "meow"}]}, f, indent=2, ensure_ascii=False)
+            with open(voice_config_path, "w", encoding="utf-8") as f:
+                json.dump({"CAT": {"type": "design"}, "DOG": {"type": "design"}}, f, indent=2, ensure_ascii=False)
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump({"llm": {"llm_workers": 2}}, f, indent=2, ensure_ascii=False)
+
+            events = []
+            logs = []
+            state = {
+                "active": 0,
+                "max_active": 0,
+                "completed_suggestions": 0,
+            }
+            lock = threading.Lock()
+
+            original_root = app_module.ROOT_DIR
+            original_script_path = app_module.SCRIPT_PATH
+            original_voice_config_path = app_module.VOICE_CONFIG_PATH
+            original_config_path = app_module.CONFIG_PATH
+            original_get_voices = app_module.awaitable_get_voices_sync
+            original_task_current = app_module._task_is_current
+            original_append_log = app_module._append_task_log
+            original_finish = app_module._finish_task_run
+            original_pm = app_module.project_manager
+            original_suggest = app_module.suggest_voice_description_sync
+            try:
+                app_module.ROOT_DIR = temp_root
+                app_module.SCRIPT_PATH = script_path
+                app_module.VOICE_CONFIG_PATH = voice_config_path
+                app_module.CONFIG_PATH = config_path
+                app_module.awaitable_get_voices_sync = lambda: [
+                    {"name": "CAT", "suggested_sample_text": "cat text"},
+                    {"name": "DOG", "suggested_sample_text": "dog text"},
+                ]
+                app_module._task_is_current = lambda task_name, run_id: True
+                app_module._append_task_log = lambda task_name, run_id, message: logs.append(message)
+                app_module._finish_task_run = lambda task_name, run_id: None
+
+                def fake_suggest(speaker):
+                    with lock:
+                        state["active"] += 1
+                        state["max_active"] = max(state["max_active"], state["active"])
+                    events.append(("suggest-start", speaker))
+                    time.sleep(0.05)
+                    with lock:
+                        state["active"] -= 1
+                        state["completed_suggestions"] += 1
+                    events.append(("suggest-done", speaker))
+                    return {"voice": f"{speaker} description"}
+
+                class FakeProjectManager:
+                    def _normalize_speaker_name(self, value):
+                        return (value or "").strip().lower()
+
+                    def _current_script_title(self):
+                        return "Project"
+
+                    def load_chunks(self):
+                        return []
+
+                    def suggest_design_sample_text(self, speaker, chunks):
+                        return f"{speaker.lower()} sample"
+
+                    def materialize_design_voice(self, speaker, description, sample_text, force, voice_config):
+                        with lock:
+                            suggestion_count = state["completed_suggestions"]
+                        events.append(("generate-start", speaker, suggestion_count))
+                        events.append(("generate", speaker, description, sample_text))
+                        updated = json.loads(json.dumps(voice_config))
+                        updated[speaker]["ref_audio"] = f"clone_voices/{speaker.lower()}.wav"
+                        return {"voice_config": updated}
+
+                    def unload_tts_engine(self):
+                        events.append(("unload",))
+                        return True
+
+                app_module.suggest_voice_description_sync = fake_suggest
+                app_module.project_manager = FakeProjectManager()
+
+                success = app_module.run_voice_processing_task("run-1")
+                self.assertTrue(success)
+                self.assertGreaterEqual(state["max_active"], 2)
+                first_generate_index = next(i for i, event in enumerate(events) if event[0] == "generate")
+                last_suggest_done_index = max(i for i, event in enumerate(events) if event[0] == "suggest-done")
+                self.assertGreater(first_generate_index, last_suggest_done_index)
+                generate_start_events = [event for event in events if event[0] == "generate-start"]
+                self.assertEqual(generate_start_events, [("generate-start", "CAT", 2), ("generate-start", "DOG", 2)])
+                generate_events = [event for event in events if event[0] == "generate"]
+                self.assertEqual(
+                    generate_events,
+                    [
+                        ("generate", "CAT", "CAT description", "cat text"),
+                        ("generate", "DOG", "DOG description", "dog text"),
+                    ],
+                )
+                self.assertEqual(events[-1], ("unload",))
+                self.assertTrue(any("Unloaded bulk voice generation model state." in message for message in logs))
+            finally:
+                app_module.ROOT_DIR = original_root
+                app_module.SCRIPT_PATH = original_script_path
+                app_module.VOICE_CONFIG_PATH = original_voice_config_path
+                app_module.CONFIG_PATH = original_config_path
+                app_module.awaitable_get_voices_sync = original_get_voices
+                app_module._task_is_current = original_task_current
+                app_module._append_task_log = original_append_log
+                app_module._finish_task_run = original_finish
+                app_module.project_manager = original_pm
+                app_module.suggest_voice_description_sync = original_suggest
+
+    def test_bulk_voice_description_suggestions_respect_llm_workers(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            config_path = os.path.join(temp_root, "config.json")
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump({"llm": {"llm_workers": 2}}, f, indent=2, ensure_ascii=False)
+
+            state = {"active": 0, "max_active": 0}
+            lock = threading.Lock()
+
+            original_config_path = app_module.CONFIG_PATH
+            original_suggest = app_module.suggest_voice_description_sync
+            try:
+                app_module.CONFIG_PATH = config_path
+
+                def fake_suggest(speaker):
+                    with lock:
+                        state["active"] += 1
+                        state["max_active"] = max(state["max_active"], state["active"])
+                    time.sleep(0.05)
+                    with lock:
+                        state["active"] -= 1
+                    return {"speaker": speaker, "voice": f"{speaker} voice"}
+
+                app_module.suggest_voice_description_sync = fake_suggest
+
+                result = app_module.suggest_voice_descriptions_batch_sync(["CAT", "DOG", "MOUSE"])
+                self.assertEqual([item["speaker"] for item in result["results"]], ["CAT", "DOG", "MOUSE"])
+                self.assertEqual(result["workers"], 2)
+                self.assertEqual(result["failures"], [])
+                self.assertGreaterEqual(state["max_active"], 2)
+            finally:
+                app_module.CONFIG_PATH = original_config_path
+                app_module.suggest_voice_description_sync = original_suggest
+
+    def test_unload_bulk_voice_generation_endpoint_resets_engine(self):
+        original_pm = app_module.project_manager
+        try:
+            class FakeProjectManager:
+                def unload_tts_engine(self):
+                    return True
+
+            app_module.project_manager = FakeProjectManager()
+            result = asyncio.run(app_module.unload_bulk_voice_generation())
+            self.assertEqual(result["status"], "unloaded")
+            self.assertTrue(result["unloaded"])
+        finally:
+            app_module.project_manager = original_pm
 
     def test_get_voices_deduplicates_case_variants(self):
         with tempfile.TemporaryDirectory() as temp_root:

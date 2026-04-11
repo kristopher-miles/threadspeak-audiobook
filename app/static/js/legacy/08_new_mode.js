@@ -112,6 +112,11 @@
         function updateNewModeWorkflowButtons(status) {
             const startBtn = document.getElementById('btn-process-script-v2');
             const pauseBtn = document.getElementById('btn-pause-processing-v2');
+            const completedStages = Array.isArray(status?.completed_stages) ? status.completed_stages : [];
+            if (window.updatePipelineTabLocks) {
+                const isLegacy = !!document.getElementById('legacy-mode-toggle')?.checked;
+                window.updatePipelineTabLocks(isLegacy, completedStages.includes('create_script'));
+            }
             if (!startBtn || !pauseBtn) return;
             const running = !!status?.running;
             const paused = !!status?.paused;
@@ -127,7 +132,6 @@
             pauseBtn.style.display = activeRun ? '' : 'none';
 
             // Update step icons based on workflow stage progress
-            const completedStages = Array.isArray(status?.completed_stages) ? status.completed_stages : [];
             const currentStage = status?.current_stage || null;
             for (const [stage, iconId] of Object.entries(_stepIconMap)) {
                 if (completedStages.includes(stage)) {
@@ -174,4 +178,3 @@
             }
             loadPipelineStepIcons().catch(err => console.warn('Icon load failed', err));
         })();
-

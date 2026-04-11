@@ -36,6 +36,7 @@ TASK_PROGRESS_PREFIX = "__TASK_PROGRESS__:"
 
 # Matches straight (") or curly (\u201c / \u201d) double-quotes enclosing ≥2 chars.
 QUOTE_RE = re.compile(r'["\u201c][^"\u201d]{2,}["\u201d]', re.DOTALL)
+WORD_RE = re.compile(r"\b\w+\b", re.UNICODE)
 
 IDENTIFY_SENTIMENT_TOOL = {
     "type": "function",
@@ -96,39 +97,39 @@ def _dots(done: int, total: int) -> str:
     return "[" + "•" * filled + "·" * (10 - filled) + "]"
 
 
-def build_context_window(paragraphs: list, target_idx: int, budget: int) -> str:
+def count_words(text: str) -> int:
+    return len(WORD_RE.findall(text or ""))
+
+
+def build_temperament_context(paragraphs: list, target_idx: int, budget: int, minimum_words: int) -> str:
     """
-    Centre paragraphs[target_idx] in a block of at most `budget` characters.
-    Fills left and right sides alternately from adjacent paragraphs until the
-    budget is exhausted or there are no more paragraphs to add.
+    Build a backward-only context block for temperament extraction.
+
+    The target paragraph is always the final paragraph in the returned block.
+    If the target paragraph already meets the minimum word target, use it alone.
+    Otherwise prepend earlier paragraphs until the minimum word target is met or
+    another paragraph would exceed the character budget.
     """
     target_text = paragraphs[target_idx]["text"]
-    left_parts: list[str] = []
-    right_parts: list[str] = []
-    used = len(target_text)
-    left = target_idx - 1
-    right = target_idx + 1
+    parts = [target_text]
+    used_chars = len(target_text)
+    used_words = count_words(target_text)
 
-    while used < budget:
-        added = False
-        if left >= 0:
-            t = paragraphs[left]["text"]
-            if used + len(t) <= budget:
-                left_parts.insert(0, t)
-                used += len(t)
-                left -= 1
-                added = True
-        if right < len(paragraphs):
-            t = paragraphs[right]["text"]
-            if used + len(t) <= budget:
-                right_parts.append(t)
-                used += len(t)
-                right += 1
-                added = True
-        if not added:
+    if used_words >= minimum_words:
+        return target_text
+
+    for idx in range(target_idx - 1, -1, -1):
+        previous_text = paragraphs[idx]["text"]
+        separator_chars = 2 if parts else 0
+        if used_chars + separator_chars + len(previous_text) > budget:
+            break
+        parts.insert(0, previous_text)
+        used_chars += separator_chars + len(previous_text)
+        used_words += count_words(previous_text)
+        if used_words >= minimum_words:
             break
 
-    return "\n\n".join(left_parts + [target_text] + right_parts)
+    return "\n\n".join(parts)
 
 
 def strip_dialogue(text: str) -> str:
@@ -246,12 +247,16 @@ def main():
     chunk_size = int(gen_cfg.get("chunk_size") or 3000)
     context_budget = int(chunk_size * 0.8)
     max_tokens = int(gen_cfg.get("max_tokens") or 2048)
+    temperament_words = int(gen_cfg.get("temperament_words") or 150)
 
     system_prompt = (prompts.get("temperament_extraction_system_prompt") or "").strip() or DEFAULT_SYSTEM_PROMPT
 
     workers = max(1, int(llm_cfg.get("llm_workers", 1) or 1))
 
-    _log(f"Model: {model_name}  |  Context budget: {context_budget} chars  |  Max tokens: {max_tokens}  |  Workers: {workers}")
+    _log(
+        f"Model: {model_name}  |  Context budget: {context_budget} chars  |  "
+        f"Temperament words: {temperament_words}  |  Max tokens: {max_tokens}  |  Workers: {workers}"
+    )
 
     client = OpenAI(base_url=base_url, api_key=api_key, timeout=600)
 
@@ -284,7 +289,7 @@ def main():
     def process_pass1(idx_para):
         idx, para = idx_para
         para_id = para["id"]
-        context_text = build_context_window(paragraphs, idx, context_budget)
+        context_text = build_temperament_context(paragraphs, idx, context_budget, temperament_words)
 
         user_msg = (
             f"PASSAGE CONTEXT:\n{context_text}\n\n"
@@ -349,7 +354,7 @@ def main():
     def process_pass2(idx_para):
         idx, para = idx_para
         para_id = para["id"]
-        context_text = build_context_window(paragraphs, idx, context_budget)
+        context_text = build_temperament_context(paragraphs, idx, context_budget, temperament_words)
         narration_text = strip_dialogue(para["text"])
 
         user_msg = (
@@ -416,7 +421,7 @@ def main():
         idx, para = idx_para
         para_id = para["id"]
         speakers_list = para.get("speakers") or []
-        context_text = build_context_window(paragraphs, idx, context_budget)
+        context_text = build_temperament_context(paragraphs, idx, context_budget, temperament_words)
         quotes = QUOTE_RE.findall(para["text"])  # full match strings including outer quotes
 
         if not quotes:

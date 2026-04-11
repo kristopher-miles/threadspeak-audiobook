@@ -43,11 +43,15 @@
                         <div class="collapse" id="promptSettings">
                             <h6 class="mb-3">Generation Settings</h6>
                             <div class="row mb-3">
-                                <div class="col-md-6">
+                                <div class="col-md-4">
                                     <label class="form-label" title="Size of text chunks sent to LLM (characters). Smaller = more precise, larger = more context.">Chunk Size (characters)</label>
                                     <input type="number" class="form-control" id="chunk-size" value="3000" min="500" title="Size of text chunks sent to LLM (characters). Smaller = more precise, larger = more context.">
                                 </div>
-                                <div class="col-md-6">
+                                <div class="col-md-4">
+                                    <label class="form-label" title="Minimum word target for Extract Temperament context before earlier paragraphs are backfilled.">Temperament Words</label>
+                                    <input type="number" class="form-control" id="temperament-words" value="150" min="1" title="Minimum word target for Extract Temperament context before earlier paragraphs are backfilled.">
+                                </div>
+                                <div class="col-md-4">
                                     <label class="form-label" title="Maximum tokens for LLM response. Increase if output is being truncated.">Max Tokens (response)</label>
                                     <input type="number" class="form-control" id="max-tokens" value="4096" min="256" title="Maximum tokens for LLM response. Increase if output is being truncated.">
                                 </div>

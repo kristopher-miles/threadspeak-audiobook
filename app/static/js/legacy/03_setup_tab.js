@@ -336,6 +336,9 @@
                     if (config.generation.chunk_size) {
                         document.getElementById('chunk-size').value = config.generation.chunk_size;
                     }
+                    if (config.generation.temperament_words != null) {
+                        document.getElementById('temperament-words').value = config.generation.temperament_words;
+                    }
                     if (config.generation.max_tokens) {
                         document.getElementById('max-tokens').value = config.generation.max_tokens;
                     }
@@ -560,6 +563,7 @@
         function collectGenerationConfig() {
             return {
                 chunk_size: parseInt(document.getElementById('chunk-size').value) || 3000,
+                temperament_words: parseInt(document.getElementById('temperament-words').value) || 150,
                 max_tokens: parseInt(document.getElementById('max-tokens').value) || 4096,
                 temperature: parseFloat(document.getElementById('temperature').value),
                 top_p: parseFloat(document.getElementById('top-p').value),

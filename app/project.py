@@ -2154,6 +2154,21 @@ class ProjectManager:
             print(f"Failed to initialize TTS engine: {e}")
             return None
 
+    def unload_tts_engine(self):
+        engine = self.engine
+        self.engine = None
+        if not engine:
+            return False
+
+        try:
+            clear_cache = getattr(engine, "_clear_gpu_cache", None)
+            if callable(clear_cache):
+                clear_cache()
+        except Exception:
+            pass
+
+        return True
+
     def _load_asr_settings(self):
         config = self._load_app_config()
         settings = dict(config.get("asr", {}) or {})

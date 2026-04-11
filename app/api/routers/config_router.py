@@ -273,6 +273,7 @@ async def get_config():
         },
         "generation": {
             "legacy_mode": False,
+            "temperament_words": 150,
         },
         "export": {
             "silence_between_speakers_ms": 500,

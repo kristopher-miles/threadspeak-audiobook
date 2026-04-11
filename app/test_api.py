@@ -612,6 +612,56 @@ def test_get_config_persists_missing_voice_prompt_default():
             f.write(original_raw)
 
 
+def test_get_config_persists_missing_temperament_words_default():
+    config_path = os.path.join(ACTIVE_APP_DIR, "config.json")
+    with open(config_path, "r", encoding="utf-8") as f:
+        original_raw = f.read()
+
+    modified = json.loads(original_raw)
+    generation = modified.setdefault("generation", {})
+    generation.pop("temperament_words", None)
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(modified, f, indent=2, ensure_ascii=False)
+
+    try:
+        r = get("/api/config")
+        assert_status(r, 200)
+        data = r.json()
+        if data.get("generation", {}).get("temperament_words") != 150:
+            raise TestFailure("GET /api/config did not return generation.temperament_words=150")
+
+        with open(config_path, "r", encoding="utf-8") as f:
+            persisted = json.load(f)
+        if persisted.get("generation", {}).get("temperament_words") != 150:
+            raise TestFailure("GET /api/config did not persist backfilled generation.temperament_words")
+    finally:
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write(original_raw)
+
+
+def test_save_setup_config_roundtrip_temperament_words():
+    r = get("/api/config")
+    assert_status(r, 200)
+    original = r.json()
+
+    payload = {
+        "generation": {
+            "temperament_words": 222,
+        }
+    }
+    r = post("/api/config/setup", json=payload)
+    assert_status(r, 200)
+
+    try:
+        r = get("/api/config")
+        assert_status(r, 200)
+        readback = r.json()
+        if readback.get("generation", {}).get("temperament_words") != 222:
+            raise TestFailure("POST /api/config/setup did not persist generation.temperament_words")
+    finally:
+        post("/api/config", json=original)
+
+
 # ── Section 3: Upload ───────────────────────────────────────
 
 def test_upload_file():

@@ -83,6 +83,8 @@ Transform a source script into a production-ready audiobook with an end-to-end p
 3. Click **Install** to set up dependencies
 4. Click **Start** to launch the web interface
 
+Pinokio installs both runtime and test dependencies into `app/env`. Use the Pinokio `Run Tests` action, or run `app/env/bin/python -m pytest -q` from the repo root to execute the test suite against the app-managed environment.
+
 ## First Launch
 
 See [First Launch](wiki/First-Launch.md).

@@ -29,6 +29,7 @@ def _find_saved_voice_option_for_speaker(speaker: str):
     normalized_speaker = _normalize_saved_voice_name(speaker)
     if not normalized_speaker or normalized_speaker == _normalize_saved_voice_name("NARRATOR"):
         return None
+    current_script_title = _normalize_saved_voice_name(project_manager._current_script_title() or "Project")
 
     def _build_rel_audio(directory_name: str, entry: dict) -> str:
         filename = (entry.get("filename") or "").strip()
@@ -47,6 +48,9 @@ def _find_saved_voice_option_for_speaker(speaker: str):
         rel_audio = _build_rel_audio("clone_voices", entry)
         if not rel_audio or not os.path.exists(os.path.join(ROOT_DIR, rel_audio)):
             continue
+        entry_script_title = _normalize_saved_voice_name(entry.get("script_title", ""))
+        if not entry_script_title or entry_script_title != current_script_title:
+            continue
         score = _match_score(entry, ("speaker", "name"))
         if score is None:
             continue
@@ -63,6 +67,9 @@ def _find_saved_voice_option_for_speaker(speaker: str):
     for entry in _load_manifest(DESIGNED_VOICES_MANIFEST):
         rel_audio = _build_rel_audio("designed_voices", entry)
         if not rel_audio or not os.path.exists(os.path.join(ROOT_DIR, rel_audio)):
+            continue
+        entry_script_title = _normalize_saved_voice_name(entry.get("script_title", ""))
+        if not entry_script_title or entry_script_title != current_script_title:
             continue
         score = _match_score(entry, ("speaker", "name"))
         if score is None:
@@ -160,6 +167,7 @@ async def voice_design_save(request: VoiceDesignSaveRequest):
         "description": request.description,
         "sample_text": request.sample_text,
         "filename": dest_filename,
+        "script_title": project_manager._current_script_title(),
     })
     _save_manifest(DESIGNED_VOICES_MANIFEST, manifest)
 
