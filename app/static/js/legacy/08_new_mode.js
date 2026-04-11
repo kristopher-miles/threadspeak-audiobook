@@ -113,9 +113,15 @@
             const startBtn = document.getElementById('btn-process-script-v2');
             const pauseBtn = document.getElementById('btn-pause-processing-v2');
             const completedStages = Array.isArray(status?.completed_stages) ? status.completed_stages : [];
+            const scriptCreated = completedStages.includes('create_script');
             if (window.updatePipelineTabLocks) {
                 const isLegacy = !!document.getElementById('legacy-mode-toggle')?.checked;
-                window.updatePipelineTabLocks(isLegacy, completedStages.includes('create_script'));
+                window.updatePipelineTabLocks(isLegacy, scriptCreated);
+            }
+            if (scriptCreated) {
+                window.primeVoicesForScriptWorkflow?.();
+            } else {
+                window.resetVoiceAliasWorkflowPrime?.();
             }
             if (!startBtn || !pauseBtn) return;
             const running = !!status?.running;

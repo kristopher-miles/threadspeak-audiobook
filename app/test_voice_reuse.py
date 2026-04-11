@@ -514,6 +514,86 @@ class SavedVoiceReuseTests(unittest.TestCase):
                 app_module.project_manager = original_pm
                 app_module.suggest_voice_description_sync = original_suggest
 
+    def test_run_voice_processing_task_respects_inferred_aliases_from_voice_payload(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            script_path = os.path.join(temp_root, "annotated_script.json")
+            voice_config_path = os.path.join(temp_root, "voice_config.json")
+            with open(script_path, "w", encoding="utf-8") as f:
+                json.dump({"entries": []}, f)
+            with open(voice_config_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "Novo": {"type": "design", "alias": ""},
+                        "Queen Novo": {"type": "design", "alias": "", "description": "queen desc", "ref_text": "queen sample"},
+                    },
+                    f,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+
+            calls = []
+            logs = []
+
+            original_root = app_module.ROOT_DIR
+            original_script_path = app_module.SCRIPT_PATH
+            original_voice_config_path = app_module.VOICE_CONFIG_PATH
+            original_get_voices = app_module.awaitable_get_voices_sync
+            original_task_current = app_module._task_is_current
+            original_append_log = app_module._append_task_log
+            original_finish = app_module._finish_task_run
+            original_pm = app_module.project_manager
+            try:
+                app_module.ROOT_DIR = temp_root
+                app_module.SCRIPT_PATH = script_path
+                app_module.VOICE_CONFIG_PATH = voice_config_path
+                app_module.awaitable_get_voices_sync = lambda: [
+                    {"name": "Queen Novo", "config": {"alias": ""}, "suggested_sample_text": "queen sample"},
+                    {"name": "Novo", "config": {"alias": "Queen Novo"}, "suggested_sample_text": "novo sample"},
+                ]
+                app_module._task_is_current = lambda task_name, run_id: True
+                app_module._append_task_log = lambda task_name, run_id, message: logs.append(message)
+                app_module._finish_task_run = lambda task_name, run_id: None
+
+                class FakeProjectManager:
+                    def _normalize_speaker_name(self, value):
+                        return (value or "").strip().lower()
+
+                    def _current_script_title(self):
+                        return "Project"
+
+                    def load_chunks(self):
+                        return []
+
+                    def suggest_design_sample_text(self, speaker, chunks):
+                        return f"{speaker.lower()} sample"
+
+                    def materialize_design_voice(self, speaker, description, sample_text, force, voice_config):
+                        calls.append(speaker)
+                        updated = json.loads(json.dumps(voice_config))
+                        updated[speaker]["ref_audio"] = f"clone_voices/{speaker.lower().replace(' ', '_')}.wav"
+                        return {"voice_config": updated}
+
+                    def unload_tts_engine(self):
+                        return False
+
+                app_module.project_manager = FakeProjectManager()
+                success = app_module.run_voice_processing_task("run-1")
+                self.assertTrue(success)
+                self.assertEqual(calls, ["Queen Novo"])
+                self.assertTrue(any("Skipping Novo: aliased to Queen Novo." in message for message in logs))
+                with open(voice_config_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                self.assertEqual(cfg["Novo"]["alias"], "Queen Novo")
+            finally:
+                app_module.ROOT_DIR = original_root
+                app_module.SCRIPT_PATH = original_script_path
+                app_module.VOICE_CONFIG_PATH = original_voice_config_path
+                app_module.awaitable_get_voices_sync = original_get_voices
+                app_module._task_is_current = original_task_current
+                app_module._append_task_log = original_append_log
+                app_module._finish_task_run = original_finish
+                app_module.project_manager = original_pm
+
     def test_bulk_voice_description_suggestions_respect_llm_workers(self):
         with tempfile.TemporaryDirectory() as temp_root:
             config_path = os.path.join(temp_root, "config.json")
@@ -603,6 +683,134 @@ class SavedVoiceReuseTests(unittest.TestCase):
                 app_module.SCRIPT_PATH = original_script_path
                 app_module.VOICE_CONFIG_PATH = original_voice_config_path
                 app_module.VOICES_PATH = original_voices_path
+
+    def test_get_voices_infers_contained_name_alias_from_line_counts(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            script_path = os.path.join(temp_root, "annotated_script.json")
+            voice_config_path = os.path.join(temp_root, "voice_config.json")
+            voices_path = os.path.join(temp_root, "voices.json")
+            with open(script_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "entries": ([{"speaker": "Queen Novo", "text": "A"}] * 22)
+                        + ([{"speaker": "Novo", "text": "B"}] * 13),
+                        "dictionary": [],
+                    },
+                    f,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            with open(voice_config_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "Novo": {"type": "design", "alias": ""},
+                        "Queen Novo": {"type": "design", "alias": ""},
+                    },
+                    f,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+
+            original_root = app_module.ROOT_DIR
+            original_script_path = app_module.SCRIPT_PATH
+            original_voice_config_path = app_module.VOICE_CONFIG_PATH
+            original_voices_path = app_module.VOICES_PATH
+            original_pm = app_module.project_manager
+            try:
+                app_module.ROOT_DIR = temp_root
+                app_module.SCRIPT_PATH = script_path
+                app_module.VOICE_CONFIG_PATH = voice_config_path
+                app_module.VOICES_PATH = voices_path
+
+                class FakeProjectManager:
+                    def _normalize_speaker_name(self, value):
+                        return (value or "").strip().lower()
+
+                    def get_narrator_threshold(self):
+                        return 10
+
+                    def load_chunks(self):
+                        return []
+
+                    def suggest_design_sample_text(self, speaker, chunks):
+                        return ""
+
+                app_module.project_manager = FakeProjectManager()
+
+                voices = asyncio.run(app_module.get_voices())
+                voices_by_name = {voice["name"]: voice for voice in voices}
+                self.assertEqual(voices_by_name["Novo"]["config"].get("alias"), "Queen Novo")
+                self.assertEqual(voices_by_name["Queen Novo"]["config"].get("alias", ""), "")
+            finally:
+                app_module.ROOT_DIR = original_root
+                app_module.SCRIPT_PATH = original_script_path
+                app_module.VOICE_CONFIG_PATH = original_voice_config_path
+                app_module.VOICES_PATH = original_voices_path
+                app_module.project_manager = original_pm
+
+    def test_get_voices_does_not_alias_word_fragments(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            script_path = os.path.join(temp_root, "annotated_script.json")
+            voice_config_path = os.path.join(temp_root, "voice_config.json")
+            voices_path = os.path.join(temp_root, "voices.json")
+            with open(script_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "entries": ([{"speaker": "The Captain", "text": "A"}] * 10)
+                        + ([{"speaker": "He", "text": "B"}] * 3),
+                        "dictionary": [],
+                    },
+                    f,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            with open(voice_config_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "He": {"type": "design", "alias": ""},
+                        "The Captain": {"type": "design", "alias": ""},
+                    },
+                    f,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+
+            original_root = app_module.ROOT_DIR
+            original_script_path = app_module.SCRIPT_PATH
+            original_voice_config_path = app_module.VOICE_CONFIG_PATH
+            original_voices_path = app_module.VOICES_PATH
+            original_pm = app_module.project_manager
+            try:
+                app_module.ROOT_DIR = temp_root
+                app_module.SCRIPT_PATH = script_path
+                app_module.VOICE_CONFIG_PATH = voice_config_path
+                app_module.VOICES_PATH = voices_path
+
+                class FakeProjectManager:
+                    def _normalize_speaker_name(self, value):
+                        return (value or "").strip().lower()
+
+                    def get_narrator_threshold(self):
+                        return 10
+
+                    def load_chunks(self):
+                        return []
+
+                    def suggest_design_sample_text(self, speaker, chunks):
+                        return ""
+
+                app_module.project_manager = FakeProjectManager()
+
+                voices = asyncio.run(app_module.get_voices())
+                voices_by_name = {voice["name"]: voice for voice in voices}
+                self.assertEqual(voices_by_name["He"]["config"].get("alias", ""), "")
+                self.assertEqual(voices_by_name["The Captain"]["config"].get("alias", ""), "")
+            finally:
+                app_module.ROOT_DIR = original_root
+                app_module.SCRIPT_PATH = original_script_path
+                app_module.VOICE_CONFIG_PATH = original_voice_config_path
+                app_module.VOICES_PATH = original_voices_path
+                app_module.project_manager = original_pm
 
     def test_clear_uploaded_voices_clears_only_current_script_assets_and_text(self):
         with tempfile.TemporaryDirectory() as temp_root:

@@ -8,6 +8,24 @@
         let _voiceSettingsSaveTimer = null;
         let _voicesListResizeBound = false;
         let _bulkVoiceGenerationActive = false;
+        let _voiceSaveRetryTimer = null;
+        let _voicePageUnloading = false;
+        let _voiceAliasesPrimedForScript = false;
+
+        function isVoiceSaveNetworkError(error) {
+            const message = String(error?.message || '').toLowerCase();
+            return message.includes('failed to fetch')
+                || message.includes('networkerror')
+                || message.includes('load failed')
+                || message.includes('network request failed');
+        }
+
+        function scheduleVoiceSaveRetry(options = {}) {
+            clearTimeout(_voiceSaveRetryTimer);
+            _voiceSaveRetryTimer = setTimeout(() => {
+                saveVoicesNow(options).catch(() => {});
+            }, 1500);
+        }
 
         function layoutVoicesListContainer() {
             const list = document.getElementById('voices-list');
@@ -76,16 +94,48 @@
             }, 500);
         }
 
+        function getVoiceAliasWeight(voiceLike) {
+            const lineCount = Number(voiceLike?.line_count ?? voiceLike?.lineCount ?? 0);
+            if (Number.isFinite(lineCount) && lineCount > 0) return lineCount;
+            const paragraphCount = Number(voiceLike?.paragraph_count ?? voiceLike?.paragraphCount ?? 0);
+            if (Number.isFinite(paragraphCount) && paragraphCount > 0) return paragraphCount;
+            return 0;
+        }
+
+        function nameTokens(value) {
+            return normalizeVoiceName(value).split(' ').filter(Boolean);
+        }
+
+        function containsNameTokens(containerName, candidateName) {
+            const containerTokens = nameTokens(containerName);
+            const candidateTokens = nameTokens(candidateName);
+            if (!candidateTokens.length || candidateTokens.length > containerTokens.length) {
+                return false;
+            }
+            for (let i = 0; i <= containerTokens.length - candidateTokens.length; i += 1) {
+                const windowTokens = containerTokens.slice(i, i + candidateTokens.length);
+                if (windowTokens.every((token, index) => token === candidateTokens[index])) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        function buildVoiceAliasCandidatesFromCards(cards) {
+            return cards.map(card => ({
+                name: card.dataset.voice,
+                lineCount: Number(card.dataset.lineCount || 0),
+                paragraphCount: Number(card.dataset.paragraphCount || 0),
+            }));
+        }
+
         // Suggest aliases for names where one is a substring of another.
-        // The name with fewer paragraphs gets aliased to the one with more.
+        // The name with fewer lines gets aliased to the one with more.
+        // Falls back to paragraph count when line counts are unavailable.
         // Only fills empty AKA inputs — never overwrites a user-set alias.
         function suggestVoiceAliases(voices) {
-            // paragraph_count is 0 for legacy projects (no paragraphs.json) — skip silently
-            const hasCounts = voices.some(v => (v.paragraph_count || 0) > 0);
+            const hasCounts = voices.some(v => getVoiceAliasWeight(v) > 0);
             if (!hasCounts) return false;
-
-            // Build a lookup: normalizedName -> voice object
-            const byName = new Map(voices.map(v => [normalizeVoiceName(v.name), v]));
 
             let anySet = false;
             const processed = new Set(); // avoid processing the same pair twice
@@ -101,15 +151,15 @@
                     if (processed.has(pairKey)) continue;
                     processed.add(pairKey);
 
-                    // Check if one name fully appears within the other
-                    const aInB = normB.includes(normA);
-                    const bInA = normA.includes(normB);
+                    // Check if one full name appears as whole tokens within the other
+                    const aInB = containsNameTokens(other.name, voice.name);
+                    const bInA = containsNameTokens(voice.name, other.name);
                     if (!aInB && !bInA) continue;
 
                     // The shorter/contained name is the candidate to alias;
-                    // the one with more paragraphs is the target.
-                    const countA = voice.paragraph_count || 0;
-                    const countB = other.paragraph_count || 0;
+                    // the one with more lines is the target.
+                    const countA = getVoiceAliasWeight(voice);
+                    const countB = getVoiceAliasWeight(other);
 
                     let aliasName, targetName;
                     if (countA <= countB) {
@@ -133,6 +183,17 @@
 
             if (anySet) {
                 updateVoiceAliasStates();
+            }
+            return anySet;
+        }
+
+        async function refreshAutomaticVoiceAliases(options = {}) {
+            const { save = true } = options;
+            const cards = Array.from(document.querySelectorAll('.voice-card'));
+            if (cards.length === 0) return false;
+            const anySet = suggestVoiceAliases(buildVoiceAliasCandidatesFromCards(cards));
+            if (anySet && save) {
+                await saveVoicesNow({ promptConfirmation: false, retryOnNetworkFailure: true });
             }
             return anySet;
         }
@@ -208,7 +269,7 @@
             const narratesChecked = isNarratorCard || config.narrates === true;
 
             return `
-                <div class="card voice-card mb-3" data-voice="${safeName}" data-line-count="${lineCount}" data-suggested-sample="${escapeHtml(voice.suggested_sample_text || '')}">
+                <div class="card voice-card mb-3" data-voice="${safeName}" data-line-count="${lineCount}" data-paragraph-count="${Number(voice.paragraph_count || 0)}" data-suggested-sample="${escapeHtml(voice.suggested_sample_text || '')}">
                     <div class="card-body">
                         <div class="row">
                             <div class="col-md-3">
@@ -435,7 +496,7 @@
             // If any voice has no saved config, or aliases were auto-suggested, save immediately
             if (suggestedAliases || filledMissingDesignSample || voices.some(v => !v.config || Object.keys(v.config).length === 0)) {
                 clearTimeout(_voiceSaveTimer);
-                saveVoicesNow({ promptConfirmation: false }).catch(() => {});
+                saveVoicesNow({ promptConfirmation: false, retryOnNetworkFailure: true }).catch(() => {});
             }
         }
 
@@ -513,7 +574,7 @@
         let _voiceSaveInFlight = null;
 
         async function saveVoicesNow(options = {}) {
-            const { promptConfirmation = true } = options;
+            const { promptConfirmation = true, retryOnNetworkFailure = false } = options;
             const cards = document.querySelectorAll('.voice-card');
             if (cards.length === 0) return;
             if (_voiceSaveInFlight) return _voiceSaveInFlight;
@@ -565,6 +626,13 @@
                     window._narratingVoicesCache = null; // force refresh on next editor use
                     return result;
                 } catch (e) {
+                    if (retryOnNetworkFailure && isVoiceSaveNetworkError(e)) {
+                        if (!document.hidden && !_voicePageUnloading) {
+                            statusEl.innerHTML = '<i class="fas fa-circle-notch fa-spin text-warning me-1"></i>waiting for reconnect';
+                        }
+                        scheduleVoiceSaveRetry({ promptConfirmation, retryOnNetworkFailure: true });
+                        return { status: 'retry_scheduled' };
+                    }
                     if (!String(e?.message || '').toLowerCase().includes('cancelled')) {
                         const detail = String(e?.message || '').trim();
                         statusEl.innerHTML = `<i class="fas fa-times text-danger me-1"></i>save failed${detail ? `: ${detail}` : ''}`;
@@ -581,7 +649,7 @@
         function debouncedSaveVoices() {
             clearTimeout(_voiceSaveTimer);
             _voiceSaveTimer = setTimeout(() => {
-                saveVoicesNow().catch(() => {});
+                saveVoicesNow({ retryOnNetworkFailure: true }).catch(() => {});
             }, 800);
         }
 
@@ -820,6 +888,8 @@
         window.generateOutstandingVoices = async () => {
             const bulkBtn = document.getElementById('generate-outstanding-voices-btn');
 
+            await refreshAutomaticVoiceAliases();
+
             // Convert any "Custom Voice" cards to "Voice Design" so they get voices generated
             Array.from(document.querySelectorAll('.voice-card'))
                 .filter(card => !card.classList.contains('alias-active') && !card.classList.contains('narrator-threshold-active'))
@@ -989,5 +1059,27 @@
             window.addEventListener('resize', () => {
                 layoutVoicesListContainer();
             });
+            window.addEventListener('beforeunload', () => {
+                _voicePageUnloading = true;
+                clearTimeout(_voiceSaveTimer);
+                clearTimeout(_voiceSaveRetryTimer);
+            });
+            window.addEventListener('pageshow', () => {
+                _voicePageUnloading = false;
+            });
             _voicesListResizeBound = true;
         }
+
+        window.refreshAutomaticVoiceAliases = refreshAutomaticVoiceAliases;
+        window.primeVoicesForScriptWorkflow = async () => {
+            if (_voiceAliasesPrimedForScript) return;
+            _voiceAliasesPrimedForScript = true;
+            try {
+                await loadVoices();
+            } catch (e) {
+                console.warn('Failed to prime voice aliases after script creation', e);
+            }
+        };
+        window.resetVoiceAliasWorkflowPrime = () => {
+            _voiceAliasesPrimedForScript = false;
+        };

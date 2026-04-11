@@ -61,6 +61,76 @@ def _find_config_key_case_insensitive(voice_config: Dict[str, dict], speaker: st
     return None
 
 
+def _voice_alias_weight(name: str, line_counts: Dict[str, int], para_counts_by_norm: Dict[str, int]) -> int:
+    line_count = int(line_counts.get(name, 0) or 0)
+    if line_count > 0:
+        return line_count
+    return int(para_counts_by_norm.get(_normalized_speaker(name), 0) or 0)
+
+
+def _name_tokens(name: str) -> List[str]:
+    return [token for token in _normalized_speaker(name).split() if token]
+
+
+def _contains_name_tokens(container_name: str, candidate_name: str) -> bool:
+    container_tokens = _name_tokens(container_name)
+    candidate_tokens = _name_tokens(candidate_name)
+    candidate_len = len(candidate_tokens)
+    if candidate_len == 0 or candidate_len > len(container_tokens):
+        return False
+    for index in range(len(container_tokens) - candidate_len + 1):
+        if container_tokens[index:index + candidate_len] == candidate_tokens:
+            return True
+    return False
+
+
+def _infer_contained_name_aliases(
+    voice_names: List[str],
+    voice_config: Dict[str, dict],
+    line_counts: Dict[str, int],
+    para_counts_by_norm: Dict[str, int],
+) -> Dict[str, str]:
+    suggested_aliases: Dict[str, str] = {}
+    processed = set()
+
+    for voice_name in voice_names:
+        norm_a = _normalized_speaker(voice_name)
+        if not norm_a or norm_a == _normalized_speaker("NARRATOR"):
+            continue
+        existing_a = voice_config.get(_find_config_key_case_insensitive(voice_config, voice_name) or voice_name, {})
+        if (existing_a.get("alias") or "").strip():
+            continue
+
+        for other_name in voice_names:
+            norm_b = _normalized_speaker(other_name)
+            if not norm_b or norm_a == norm_b or norm_b == _normalized_speaker("NARRATOR"):
+                continue
+
+            pair_key = tuple(sorted((norm_a, norm_b)))
+            if pair_key in processed:
+                continue
+            processed.add(pair_key)
+
+            if not _contains_name_tokens(other_name, voice_name) and not _contains_name_tokens(voice_name, other_name):
+                continue
+
+            existing_b = voice_config.get(_find_config_key_case_insensitive(voice_config, other_name) or other_name, {})
+            if (existing_b.get("alias") or "").strip():
+                continue
+
+            count_a = _voice_alias_weight(voice_name, line_counts, para_counts_by_norm)
+            count_b = _voice_alias_weight(other_name, line_counts, para_counts_by_norm)
+            if count_a <= 0 and count_b <= 0:
+                continue
+
+            alias_name, target_name = (
+                (voice_name, other_name) if count_a <= count_b else (other_name, voice_name)
+            )
+            suggested_aliases.setdefault(alias_name, target_name)
+
+    return suggested_aliases
+
+
 @router.get("/api/voices")
 async def get_voices():
     # Parse voices directly from the current script (no stale cache)
@@ -127,9 +197,14 @@ async def get_voices():
 
     result = []
     chunks = project_manager.load_chunks()
+    inferred_aliases = _infer_contained_name_aliases(voices_list, voice_config, line_counts, para_counts_by_norm)
     for voice_name in voices_list:
         config_key = _find_config_key_case_insensitive(voice_config, voice_name)
-        config = voice_config.get(config_key, {}) if config_key else {}
+        config = dict(voice_config.get(config_key, {}) if config_key else {})
+        if not (config.get("alias") or "").strip():
+            inferred_alias = inferred_aliases.get(voice_name)
+            if inferred_alias:
+                config["alias"] = inferred_alias
         sample_suggestion = project_manager.suggest_design_sample_text(voice_name, chunks)
         manual_alias = bool((config.get("alias") or "").strip())
         line_count = line_counts.get(voice_name, 0)
@@ -427,6 +502,10 @@ def run_voice_processing_task(run_id: str, stop_check=None, relay_fn=None):
             entry = updated_config.setdefault(speaker, {})
             if not entry.get("type"):
                 entry["type"] = "design"
+                changed = True
+            inferred_alias = ((voice.get("config") or {}).get("alias") or "").strip()
+            if inferred_alias and not (entry.get("alias") or "").strip():
+                entry["alias"] = inferred_alias
                 changed = True
             ref_audio = (entry.get("ref_audio") or "").strip()
             ref_audio_path = os.path.join(ROOT_DIR, ref_audio) if ref_audio else ""
