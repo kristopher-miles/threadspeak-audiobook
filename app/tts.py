@@ -1655,23 +1655,17 @@ class TTSEngine:
                         results["failed"].append((idx, "Batch returned None"))
                     continue
 
-                sb_audio_duration = 0.0
-                for i, (wav, idx) in enumerate(zip(wavs_list, sb_indices)):
-                    try:
-                        output_path = os.path.join(output_dir, f"temp_batch_{idx}.wav")
-                        audio = self._concat_audio(wav)
-                        self._save_wav(audio, sr, output_path)
-                        results["completed"].append(idx)
-                        duration = len(audio) / sr
-                        sb_audio_duration += duration
-                        print(f"    Chunk {idx} saved: {os.path.getsize(output_path)} bytes ({duration:.1f}s audio)")
-                    except Exception as e:
-                        print(f"    Error saving chunk {idx}: {e}")
-                        results["failed"].append((idx, str(e)))
+                    sb_audio_duration = self._persist_batch_audio_outputs(
+                        wavs_list,
+                        sr,
+                        output_dir,
+                        sb_indices,
+                        results,
+                    )
 
-                total_audio_duration += sb_audio_duration
-                sb_rtf = sb_audio_duration / gen_time if gen_time > 0 else 0
-                print(f"  Sub-batch {sb_idx+1} done: {gen_time:.1f}s -> {sb_audio_duration:.1f}s audio ({sb_rtf:.2f}x RT)")
+                    total_audio_duration += sb_audio_duration
+                    sb_rtf = sb_audio_duration / gen_time if gen_time > 0 else 0
+                    print(f"  Sub-batch {sb_idx+1} done: {gen_time:.1f}s -> {sb_audio_duration:.1f}s audio ({sb_rtf:.2f}x RT)")
 
             except Exception as e:
                 print(f"  Sub-batch {sb_idx+1} failed: {e}")
@@ -1774,18 +1768,13 @@ class TTSEngine:
                             results["failed"].append((idx, "Batch returned None"))
                         continue
 
-                    sb_audio_duration = 0.0
-                    for wav, idx in zip(wavs_list, sb_indices):
-                        try:
-                            output_path = os.path.join(output_dir, f"temp_batch_{idx}.wav")
-                            audio = self._concat_audio(wav)
-                            self._save_wav(audio, sr, output_path)
-                            results["completed"].append(idx)
-                            duration = len(audio) / sr
-                            sb_audio_duration += duration
-                        except Exception as e:
-                            print(f"    Error saving chunk {idx}: {e}")
-                            results["failed"].append((idx, str(e)))
+                    sb_audio_duration = self._persist_batch_audio_outputs(
+                        wavs_list,
+                        sr,
+                        output_dir,
+                        sb_indices,
+                        results,
+                    )
 
                     total_audio_duration += sb_audio_duration
                     sb_rtf = sb_audio_duration / gen_time if gen_time > 0 else 0
@@ -1957,18 +1946,13 @@ class TTSEngine:
                             results["failed"].append((idx, "Batch returned None"))
                         continue
 
-                    sb_audio_duration = 0.0
-                    for wav, idx in zip(wavs_list, sb_indices):
-                        try:
-                            output_path = os.path.join(output_dir, f"temp_batch_{idx}.wav")
-                            audio = self._concat_audio(wav)
-                            self._save_wav(audio, sr, output_path)
-                            results["completed"].append(idx)
-                            duration = len(audio) / sr
-                            sb_audio_duration += duration
-                        except Exception as e:
-                            print(f"    Error saving chunk {idx}: {e}")
-                            results["failed"].append((idx, str(e)))
+                    sb_audio_duration = self._persist_batch_audio_outputs(
+                        wavs_list,
+                        sr,
+                        output_dir,
+                        sb_indices,
+                        results,
+                    )
 
                     total_audio_duration += sb_audio_duration
                     sb_rtf = sb_audio_duration / gen_time if gen_time > 0 else 0
@@ -2216,3 +2200,29 @@ class TTSEngine:
         if audio_array.ndim > 1:
             audio_array = audio_array.flatten()
         sf.write(output_path, audio_array, sample_rate)
+
+    def _persist_batch_audio_outputs(self, wavs_list, sample_rate, output_dir, indices, results):
+        """Save batch outputs and fail any requested indices missing from the model response."""
+        saved_audio_duration = 0.0
+        returned = len(wavs_list or [])
+        expected = len(indices or [])
+
+        for wav, idx in zip(wavs_list or [], indices or []):
+            try:
+                output_path = os.path.join(output_dir, f"temp_batch_{idx}.wav")
+                audio = self._concat_audio(wav)
+                self._save_wav(audio, sample_rate, output_path)
+                results["completed"].append(idx)
+                duration = len(audio) / sample_rate
+                saved_audio_duration += duration
+                print(f"    Chunk {idx} saved: {os.path.getsize(output_path)} bytes ({duration:.1f}s audio)")
+            except Exception as e:
+                print(f"    Error saving chunk {idx}: {e}")
+                results["failed"].append((idx, str(e)))
+
+        if returned != expected:
+            print(f"  Warning: batch returned {returned} audio clip(s) for {expected} requested chunk(s)")
+            for idx in list(indices or [])[returned:]:
+                results["failed"].append((idx, f"Batch returned {returned}/{expected} audio clips"))
+
+        return saved_audio_duration

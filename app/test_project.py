@@ -465,52 +465,269 @@ class ChunkRuntimeOverlayTests(unittest.TestCase):
 
     def test_resolve_voice_speaker_applies_narrator_threshold(self):
         self.manager.set_narrator_threshold(10)
-        chunks = [
-            {"id": 0, "speaker": "NARRATOR", "text": "Narration line."},
-            {"id": 1, "speaker": "Bob", "text": "Hi."},
-            {"id": 2, "speaker": "Alice", "text": "Line 1"},
-            {"id": 3, "speaker": "Alice", "text": "Line 2"},
-            {"id": 4, "speaker": "Alice", "text": "Line 3"},
-            {"id": 5, "speaker": "Alice", "text": "Line 4"},
-            {"id": 6, "speaker": "Alice", "text": "Line 5"},
-            {"id": 7, "speaker": "Alice", "text": "Line 6"},
-            {"id": 8, "speaker": "Alice", "text": "Line 7"},
-            {"id": 9, "speaker": "Alice", "text": "Line 8"},
-            {"id": 10, "speaker": "Alice", "text": "Line 9"},
-            {"id": 11, "speaker": "Alice", "text": "Line 10"},
+        with open(os.path.join(self.root_dir, "annotated_script.json"), "w", encoding="utf-8") as f:
+            json.dump({
+                "entries": [
+                    {"speaker": "NARRATOR", "text": "Narration line."},
+                    {"speaker": "Bob", "text": "Hi."},
+                    {"speaker": "Alice", "text": "Line 1"},
+                    {"speaker": "Alice", "text": "Line 2"},
+                    {"speaker": "Alice", "text": "Line 3"},
+                    {"speaker": "Alice", "text": "Line 4"},
+                    {"speaker": "Alice", "text": "Line 5"},
+                    {"speaker": "Alice", "text": "Line 6"},
+                    {"speaker": "Alice", "text": "Line 7"},
+                    {"speaker": "Alice", "text": "Line 8"},
+                    {"speaker": "Alice", "text": "Line 9"},
+                    {"speaker": "Alice", "text": "Line 10"},
+                ],
+                "dictionary": [],
+            }, f)
+        voice_config = {
+            "NARRATOR": {},
+            "Bob": {},
+            "Alice": {},
+        }
+        self.manager.refresh_auto_narrator_aliases(voice_config=voice_config)
+
+        self.assertEqual(
+            self.manager.resolve_voice_speaker("Bob", voice_config),
+            "NARRATOR",
+        )
+        self.assertEqual(
+            self.manager.resolve_voice_speaker("Alice", voice_config),
+            "Alice",
+        )
+
+    def test_resolve_voice_speaker_manual_alias_overrides_narrator_threshold(self):
+        self.manager.set_narrator_threshold(10)
+        with open(os.path.join(self.root_dir, "annotated_script.json"), "w", encoding="utf-8") as f:
+            json.dump({
+                "entries": [
+                    {"speaker": "NARRATOR", "text": "Narration line."},
+                    {"speaker": "Bob", "text": "Hi."},
+                    {"speaker": "Alice", "text": "Hello there."},
+                ],
+                "dictionary": [],
+            }, f)
+        voice_config = {
+            "NARRATOR": {},
+            "Bob": {"alias": "Alice"},
+            "Alice": {},
+        }
+        self.manager.refresh_auto_narrator_aliases(voice_config=voice_config)
+
+        self.assertEqual(
+            self.manager.resolve_voice_speaker("Bob", voice_config),
+            "Alice",
+        )
+
+    def test_resolve_generation_speaker_routes_thresholded_lines_to_chapter_narrator_override(self):
+        self.manager.set_narrator_threshold(10)
+        self.manager.set_narrator_override("Chapter 1", "Alice")
+        chunk = {"id": 1, "speaker": "Bob", "text": "Hi.", "chapter": "Chapter 1"}
+        chapter_chunks = [
+            {"id": 0, "speaker": "NARRATOR", "text": "Narration line.", "chapter": "Chapter 1"},
+            chunk,
+            {"id": 2, "speaker": "Alice", "text": "Line 1", "chapter": "Chapter 1"},
+            {"id": 3, "speaker": "Alice", "text": "Line 2", "chapter": "Chapter 1"},
+            {"id": 4, "speaker": "Alice", "text": "Line 3", "chapter": "Chapter 1"},
+            {"id": 5, "speaker": "Alice", "text": "Line 4", "chapter": "Chapter 1"},
+            {"id": 6, "speaker": "Alice", "text": "Line 5", "chapter": "Chapter 1"},
+            {"id": 7, "speaker": "Alice", "text": "Line 6", "chapter": "Chapter 1"},
+            {"id": 8, "speaker": "Alice", "text": "Line 7", "chapter": "Chapter 1"},
+            {"id": 9, "speaker": "Alice", "text": "Line 8", "chapter": "Chapter 1"},
+            {"id": 10, "speaker": "Alice", "text": "Line 9", "chapter": "Chapter 1"},
+            {"id": 11, "speaker": "Alice", "text": "Line 10", "chapter": "Chapter 1"},
         ]
         voice_config = {
             "NARRATOR": {},
             "Bob": {},
             "Alice": {},
         }
-
-        self.assertEqual(
-            self.manager.resolve_voice_speaker("Bob", voice_config, chunks=chunks),
-            "NARRATOR",
-        )
-        self.assertEqual(
-            self.manager.resolve_voice_speaker("Alice", voice_config, chunks=chunks),
-            "Alice",
+        self.manager.refresh_auto_narrator_aliases(
+            voice_config=voice_config,
+            script_entries=chapter_chunks,
         )
 
-    def test_resolve_voice_speaker_manual_alias_overrides_narrator_threshold(self):
-        self.manager.set_narrator_threshold(10)
-        chunks = [
-            {"id": 0, "speaker": "NARRATOR", "text": "Narration line."},
-            {"id": 1, "speaker": "Bob", "text": "Hi."},
-            {"id": 2, "speaker": "Alice", "text": "Hello there."},
-        ]
+        resolved = self.manager._resolve_generation_speaker(
+            chunk,
+            voice_config,
+            narrator_overrides=self.manager.get_narrator_overrides(),
+            narrator_name="NARRATOR",
+        )
+
+        self.assertEqual(resolved, "Alice")
+
+    def test_resolve_generation_speaker_routes_alias_to_chapter_narrator_override(self):
+        self.manager.set_narrator_override("Chapter 1", "Alice")
+        chunk = {"id": 1, "speaker": "Bob", "text": "Hi.", "chapter": "Chapter 1"}
         voice_config = {
             "NARRATOR": {},
-            "Bob": {"alias": "Alice"},
+            "Bob": {"alias": "NARRATOR"},
             "Alice": {},
         }
 
-        self.assertEqual(
-            self.manager.resolve_voice_speaker("Bob", voice_config, chunks=chunks),
-            "Alice",
+        resolved = self.manager._resolve_generation_speaker(
+            chunk,
+            voice_config,
+            narrator_overrides=self.manager.get_narrator_overrides(),
+            narrator_name="NARRATOR",
         )
+
+        self.assertEqual(resolved, "Alice")
+
+    def test_generate_chunk_audio_uses_stored_auto_narrator_aliases(self):
+        self.manager.set_narrator_threshold(10)
+        self.manager.set_narrator_override("Chapter 1", "Alice")
+        with open(os.path.join(self.root_dir, "annotated_script.json"), "w", encoding="utf-8") as f:
+            json.dump({
+                "entries": [
+                    {"speaker": "NARRATOR", "text": "Narration line with enough words to validate correctly.", "chapter": "Chapter 1"},
+                    *[
+                        {
+                            "speaker": "Jordan",
+                            "text": f"Jordan line {index} has enough words for generation to validate correctly.",
+                            "chapter": "Chapter 1",
+                        }
+                        for index in range(1, 12)
+                    ],
+                ],
+                "dictionary": [],
+            }, f)
+        chunks = [
+            {
+                "id": 0,
+                "uid": "narrator-0",
+                "speaker": "NARRATOR",
+                "text": "Narration line with enough words to validate correctly.",
+                "chapter": "Chapter 1",
+                "instruct": "",
+                "status": "done",
+                "audio_path": "voicelines/narrator-0.wav",
+                "audio_validation": {"is_valid": True},
+            }
+        ]
+        for index in range(1, 12):
+            chunks.append({
+                "id": index,
+                "uid": f"jordan-{index}",
+                "speaker": "Jordan",
+                "text": f"Jordan line {index} has enough words for generation to validate correctly.",
+                "chapter": "Chapter 1",
+                "instruct": "",
+                "status": "pending" if index == 11 else "done",
+                "audio_path": None if index == 11 else f"voicelines/jordan-{index}.wav",
+                "audio_validation": None if index == 11 else {"is_valid": True},
+            })
+        self.manager.save_chunks(chunks)
+
+        class FakeEngine:
+            def __init__(self, root_dir):
+                self.root_dir = root_dir
+                self.speakers = []
+
+            def generate_voice(self, text, instruct, speaker, voice_config, temp_path):
+                self.speakers.append(speaker)
+                sample_rate = 24000
+                samples = np.zeros(int(sample_rate * 2.0), dtype=np.float32)
+                sf.write(temp_path, samples, sample_rate)
+                return True
+
+        fake_engine = FakeEngine(self.root_dir)
+        self.manager.get_engine = lambda: fake_engine
+        voice_config = {
+            "NARRATOR": {},
+            "Alice": {},
+            "Jordan": {},
+        }
+        self.manager._load_voice_config = lambda: voice_config
+        self.manager.refresh_auto_narrator_aliases(voice_config=voice_config)
+        self.manager.resolve_generation_targets = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("generate_chunk_audio should not recompute narrator thresholds from project targets")
+        )
+
+        success, _ = self.manager.generate_chunk_audio("jordan-11")
+
+        self.assertTrue(success)
+        self.assertEqual(fake_engine.speakers, ["Jordan"])
+
+    def test_generate_chunks_batch_uses_stored_auto_narrator_aliases(self):
+        self.manager.set_narrator_threshold(10)
+        self.manager.set_narrator_override("Chapter 1", "Alice")
+        with open(os.path.join(self.root_dir, "annotated_script.json"), "w", encoding="utf-8") as f:
+            json.dump({
+                "entries": [
+                    {"speaker": "NARRATOR", "text": "Narration line with enough words to validate correctly.", "chapter": "Chapter 1"},
+                    *[
+                        {
+                            "speaker": "Jordan",
+                            "text": f"Jordan line {index} has enough words for generation to validate correctly.",
+                            "chapter": "Chapter 1",
+                        }
+                        for index in range(1, 12)
+                    ],
+                ],
+                "dictionary": [],
+            }, f)
+        chunks = [
+            {
+                "id": 0,
+                "uid": "narrator-0",
+                "speaker": "NARRATOR",
+                "text": "Narration line with enough words to validate correctly.",
+                "chapter": "Chapter 1",
+                "instruct": "",
+                "status": "done",
+                "audio_path": "voicelines/narrator-0.wav",
+                "audio_validation": {"is_valid": True},
+            }
+        ]
+        for index in range(1, 12):
+            chunks.append({
+                "id": index,
+                "uid": f"jordan-{index}",
+                "speaker": "Jordan",
+                "text": f"Jordan line {index} has enough words for generation to validate correctly.",
+                "chapter": "Chapter 1",
+                "instruct": "",
+                "status": "pending" if index == 11 else "done",
+                "audio_path": None if index == 11 else f"voicelines/jordan-{index}.wav",
+                "audio_validation": None if index == 11 else {"is_valid": True},
+            })
+        self.manager.save_chunks(chunks)
+
+        class FakeBatchEngine:
+            def __init__(self, root_dir):
+                self.root_dir = root_dir
+                self.batch_speakers = []
+
+            def generate_batch(self, batch_chunks, voice_config, output_dir, batch_seed, cancel_check=None):
+                self.batch_speakers = [chunk["speaker"] for chunk in batch_chunks]
+                sample_rate = 24000
+                samples = np.zeros(int(sample_rate * 2.0), dtype=np.float32)
+                for chunk in batch_chunks:
+                    sf.write(os.path.join(output_dir, f"temp_batch_{chunk['index']}.wav"), samples, sample_rate)
+                return {"completed": [chunk["index"] for chunk in batch_chunks], "failed": []}
+
+        fake_engine = FakeBatchEngine(self.root_dir)
+        self.manager.get_engine = lambda: fake_engine
+        voice_config = {
+            "NARRATOR": {},
+            "Alice": {},
+            "Jordan": {},
+        }
+        self.manager._load_voice_config = lambda: voice_config
+        self.manager.refresh_auto_narrator_aliases(voice_config=voice_config)
+        self.manager.resolve_generation_targets = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("generate_chunks_batch should not recompute narrator thresholds from project targets")
+        )
+
+        results = self.manager.generate_chunks_batch(["jordan-11"], batch_group_by_type=True)
+
+        self.assertEqual(results["failed"], [])
+        self.assertEqual(results["completed"], ["jordan-11"])
+        self.assertEqual(fake_engine.batch_speakers, ["Jordan"])
 
     def test_recovers_interrupted_generating_chunk_with_valid_audio(self):
         self._write_wav("voicelines/recovered.wav", duration_seconds=3.0)
@@ -750,6 +967,7 @@ class ChunkBackupTests(unittest.TestCase):
         self.manager = ProjectManager(self.root_dir)
 
     def tearDown(self):
+        self.manager.shutdown_script_store(flush=True)
         self.temp_dir.cleanup()
 
     def _read_json(self, relative_path):
@@ -796,6 +1014,7 @@ class TranscriptionCacheTests(unittest.TestCase):
         self.manager = ProjectManager(self.root_dir)
 
     def tearDown(self):
+        self.manager.shutdown_script_store(flush=True)
         self.temp_dir.cleanup()
 
     def _write_wav(self, relative_path, duration_seconds):
@@ -1005,6 +1224,7 @@ class MergeAudioTests(unittest.TestCase):
         self.manager = ProjectManager(self.root_dir)
 
     def tearDown(self):
+        self.manager.shutdown_script_store(flush=True)
         self.temp_dir.cleanup()
 
     def _write_wav(self, relative_path, duration_seconds):
@@ -1674,6 +1894,7 @@ class DecomposeLongSegmentsTests(unittest.TestCase):
         self.manager = ProjectManager(self.root_dir)
 
     def tearDown(self):
+        self.manager.shutdown_script_store(flush=True)
         self.temp_dir.cleanup()
 
     def test_recursively_splits_unsynthesized_segments_until_within_limit(self):
@@ -1800,6 +2021,7 @@ class MergeOrphanSegmentsTests(unittest.TestCase):
         self.manager = ProjectManager(self.root_dir)
 
     def tearDown(self):
+        self.manager.shutdown_script_store(flush=True)
         self.temp_dir.cleanup()
 
     def _chapter_intro_chunks(self, chapter, start_id=0, speaker="Narrator"):
@@ -2088,6 +2310,7 @@ class StableAudioFilenameTests(unittest.TestCase):
         self.manager = ProjectManager(self.root_dir)
 
     def tearDown(self):
+        self.manager.shutdown_script_store(flush=True)
         self.temp_dir.cleanup()
 
     def _write_temp_wav(self, name, duration_seconds=1.5):
@@ -2184,6 +2407,7 @@ class InvalidateStaleAudioReferenceTests(unittest.TestCase):
         self.manager = ProjectManager(self.root_dir)
 
     def tearDown(self):
+        self.manager.shutdown_script_store(flush=True)
         self.temp_dir.cleanup()
 
     def test_invalidates_noncanonical_duplicate_legacy_audio_references(self):
@@ -2300,6 +2524,7 @@ class RepairLostAudioLinksTests(unittest.TestCase):
         self.manager = ProjectManager(self.root_dir)
 
     def tearDown(self):
+        self.manager.shutdown_script_store(flush=True)
         self.temp_dir.cleanup()
 
     def _write_wav(self, relative_path, duration_seconds):

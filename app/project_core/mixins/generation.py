@@ -50,6 +50,73 @@ from project_core.chunking import _coerce_bool, get_speaker, _is_structural_text
 
 class ProjectGenerationMixin:
         """Generate and persist chunk audio through TTS pipelines."""
+        def _load_generation_chunks(self, chunk_refs):
+            refs = [str(chunk_ref).strip() for chunk_ref in (chunk_refs or []) if str(chunk_ref).strip()]
+            if not refs:
+                return []
+            by_uid = {
+                str((chunk or {}).get("uid") or "").strip(): chunk
+                for chunk in self.get_chunks_by_uids(refs)
+                if str((chunk or {}).get("uid") or "").strip()
+            }
+            ordered = []
+            for chunk_ref in refs:
+                chunk = by_uid.get(chunk_ref)
+                if chunk is None:
+                    chunk = self.get_chunk_raw(chunk_ref)
+                if chunk is not None:
+                    ordered.append(chunk)
+            return ordered
+
+        def _speaker_line_counts_for_chunks(self, chunks):
+            counts = Counter()
+            for chunk in chunks or []:
+                text = (chunk.get("text") or "").strip()
+                if not text:
+                    continue
+                speaker_key = self._normalize_speaker_name(chunk.get("speaker"))
+                if speaker_key:
+                    counts[speaker_key] += 1
+            return counts
+
+        def _resolve_generation_speaker(
+            self,
+            chunk,
+            voice_config,
+            narrator_overrides=None,
+            narrator_name=None,
+        ):
+            chapter = (chunk.get("chapter") or "").strip()
+            effective_narrator = self._apply_narrator_override(
+                narrator_name or "NARRATOR",
+                chapter,
+                narrator_overrides or self.get_narrator_overrides(),
+            )
+            effective_speaker = self._apply_narrator_override(
+                chunk.get("speaker", ""),
+                chapter,
+                narrator_overrides or self.get_narrator_overrides(),
+            )
+            resolved = self.resolve_voice_speaker(
+                effective_speaker,
+                voice_config,
+                chunks=(),
+                narrator_name=effective_narrator,
+            )
+            resolved_key = self._normalize_speaker_name(resolved)
+            base_narrator_key = self._normalize_speaker_name(narrator_name or "NARRATOR")
+            literal_narrator_key = self._normalize_speaker_name("NARRATOR")
+            effective_narrator_key = self._normalize_speaker_name(effective_narrator)
+
+            if resolved_key in {base_narrator_key, literal_narrator_key} and effective_narrator_key != resolved_key:
+                return self.resolve_voice_speaker(
+                    effective_narrator,
+                    voice_config,
+                    chunks=(),
+                    narrator_name=effective_narrator,
+                )
+            return resolved
+
         def _get_auto_regen_retry_attempts(self):
             tts_settings = self._load_tts_settings()
             if not tts_settings.get("auto_regenerate_bad_clips", False):
@@ -151,56 +218,63 @@ class ProjectGenerationMixin:
             }
 
         def generate_chunk_audio(self, index, attempt=0, generation_token=None):
-            chunks = self.load_chunks()
-            if not (0 <= index < len(chunks)):
+            chunk = self.get_chunk_raw(index)
+            if chunk is None:
                 return False, "Invalid chunk index"
 
-            chunk = self._claim_chunk_generation(index, generation_token)
+            chunk = self._claim_chunk_generation(chunk.get("uid"), generation_token)
             if not chunk:
                 return False, "Invalid chunk index"
 
             try:
                 engine = self.get_engine()
                 if not engine:
-                    self._update_chunk_fields(index, status="error", audio_validation=None, auto_regen_count=attempt)
+                    self.patch_chunk_if(
+                        chunk.get("uid"),
+                        fields={"status": "error", "audio_validation": None, "auto_regen_count": attempt},
+                        clear_fields=["generation_token"],
+                        reason="generate_chunk_audio_engine_missing",
+                    )
                     return False, "TTS engine not initialized"
 
-                speaker = chunk["speaker"]
-                # Apply per-chapter narrator override: if this is a NARRATOR line and the chapter
-                # has a custom narrator voice selected, substitute that voice for generation.
-                speaker = self._apply_narrator_override(
-                    speaker, (chunk.get("chapter") or "").strip(), self.get_narrator_overrides()
-                )
                 voice_config = self._load_voice_config()
-                resolved_speaker = self.resolve_voice_speaker(speaker, voice_config, chunks=chunks)
+                narrator_name = self._resolve_narrator_name(voice_config, [chunk])
+                speaker = chunk["speaker"]
+                resolved_speaker = self._resolve_generation_speaker(
+                    chunk,
+                    voice_config,
+                    narrator_name=narrator_name,
+                )
                 voice_config = self.prepare_runtime_voice_config(voice_config, [resolved_speaker])
                 text = chunk["text"]
                 transformed_text, _ = apply_dictionary_to_text(text, self.load_dictionary_entries())
                 instruct = chunk.get("instruct", "")
                 auto_regen_retry_attempts = self._get_auto_regen_retry_attempts()
+                display_index = int(chunk.get("id") or 0)
+                chunk_uid = chunk.get("uid")
 
                 print(
-                    f"Generating chunk {index}: speaker={speaker}, resolved_speaker={resolved_speaker}, "
+                    f"Generating chunk {display_index}: speaker={speaker}, resolved_speaker={resolved_speaker}, "
                     f"instruct='{instruct}', text='{transformed_text[:50]}...'"
                 )
 
                 # Generate to temp file (unique per chunk for parallel processing)
-                temp_path = os.path.join(self.root_dir, f"temp_chunk_{index}.wav")
+                temp_path = os.path.join(self.root_dir, f"temp_chunk_{sanitize_filename(chunk_uid) or display_index}.wav")
 
                 success = engine.generate_voice(transformed_text, instruct, resolved_speaker, voice_config, temp_path)
 
-                if generation_token is not None and not self.chunk_has_generation_token(index, generation_token):
+                if generation_token is not None and not self.chunk_has_generation_token(chunk_uid, generation_token):
                     self._cleanup_temp_file(temp_path)
                     return False, "Generation abandoned"
 
                 if success:
                     fut = self._enqueue_postprocess(
-                        index=index,
+                        index=display_index,
                         speaker=speaker,
                         text=transformed_text,
                         temp_path=temp_path,
                         attempt=attempt,
-                        chunk_uid=chunk.get("uid"),
+                        chunk_uid=chunk_uid,
                         generation_token=generation_token,
                     )
                     # Block this TTS thread until saveback completes; other TTS
@@ -216,15 +290,15 @@ class ProjectGenerationMixin:
                     if result["status"] == "error" and auto_regen_retry_attempts > 0 and attempt < auto_regen_retry_attempts:
                         # Saveback wrote status="error"; _claim_chunk_generation in
                         # the recursive call will re-claim it to "generating".
-                        print(f"Chunk {index} failed sanity check; auto-regenerating attempt {attempt + 1}/{auto_regen_retry_attempts}")
-                        return self.generate_chunk_audio(index, attempt=attempt + 1, generation_token=generation_token)
+                        print(f"Chunk {display_index} failed sanity check; auto-regenerating attempt {attempt + 1}/{auto_regen_retry_attempts}")
+                        return self.generate_chunk_audio(chunk_uid, attempt=attempt + 1, generation_token=generation_token)
 
                     if generation_token is None:
                         self.flush_dirty_chunks(force=True)
                     return result["status"] == "done", result["audio_path"] if result["status"] == "done" else result["error"]
                 else:
                     self._update_chunk_fields_if_token(
-                        index,
+                        chunk_uid,
                         generation_token,
                         status="error",
                         audio_validation=None,
@@ -239,7 +313,7 @@ class ProjectGenerationMixin:
             except Exception as e:
                 try:
                     self._update_chunk_fields_if_token(
-                        index,
+                        chunk_uid,
                         generation_token,
                         status="error",
                         audio_validation=None,
@@ -247,8 +321,8 @@ class ProjectGenerationMixin:
                         generation_token=None,
                     )
                 except Exception as update_err:
-                    print(f"Warning: Failed to update chunk {index} status to error: {update_err}")
-                self._cleanup_temp_file(os.path.join(self.root_dir, f"temp_chunk_{index}.wav"))
+                    print(f"Warning: Failed to update chunk {display_index} status to error: {update_err}")
+                self._cleanup_temp_file(os.path.join(self.root_dir, f"temp_chunk_{sanitize_filename(chunk_uid) or display_index}.wav"))
                 if generation_token is None:
                     self.flush_dirty_chunks(force=True)
                 return False, str(e)
@@ -273,34 +347,36 @@ class ProjectGenerationMixin:
 
             results = {"completed": [], "failed": [], "cancelled": 0}
 
-            # Filter out empty-text chunks
-            chunks = self.load_chunks()
-            if chunks:
-                indices = [i for i in indices if 0 <= i < len(chunks) and chunks[i].get("text", "").strip()]
+            target_chunks = [
+                chunk for chunk in self._load_generation_chunks(indices)
+                if (chunk.get("text") or "").strip()
+            ]
+            target_uids = [chunk.get("uid") for chunk in target_chunks if chunk.get("uid")]
 
-            total = len(indices)
+            total = len(target_uids)
 
             if total == 0:
                 return results
 
             print(f"Starting parallel generation of {total} chunks with {max_workers} workers...")
             word_counts = {
-                idx: len(re.findall(r"\b\w+\b", chunks[idx].get("text", "")))
-                for idx in indices if 0 <= idx < len(chunks)
+                chunk.get("uid"): len(re.findall(r"\b\w+\b", chunk.get("text", "")))
+                for chunk in target_chunks
+                if chunk.get("uid")
             }
 
-            def _timed_generate(idx):
+            def _timed_generate(uid):
                 start = time.time()
                 try:
-                    success, msg = self.generate_chunk_audio(idx, generation_token=generation_token)
+                    success, msg = self.generate_chunk_audio(uid, generation_token=generation_token)
                     return success, msg, time.time() - start
                 except Exception as e:
                     return False, str(e), time.time() - start
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {
-                    executor.submit(_timed_generate, idx): idx
-                    for idx in indices
+                    executor.submit(_timed_generate, uid): uid
+                    for uid in target_uids
                 }
 
                 cancelled = False
@@ -311,31 +387,31 @@ class ProjectGenerationMixin:
                         executor.shutdown(wait=False, cancel_futures=True)
                         break
 
-                    idx = futures[future]
+                    uid = futures[future]
                     success, msg, elapsed_seconds = future.result()
                     if success:
-                        results["completed"].append(idx)
-                        print(f"Chunk {idx} completed: {msg}")
+                        results["completed"].append(uid)
+                        print(f"Chunk {uid} completed: {msg}")
                         if item_callback:
-                            item_callback(idx, True, elapsed_seconds, word_counts.get(idx, 0), word_counts.get(idx, 0))
+                            item_callback(uid, True, elapsed_seconds, word_counts.get(uid, 0), word_counts.get(uid, 0))
                     else:
-                        results["failed"].append((idx, msg))
-                        print(f"Chunk {idx} failed: {msg}")
+                        results["failed"].append((uid, msg))
+                        print(f"Chunk {uid} failed: {msg}")
                         if item_callback:
-                            item_callback(idx, False, elapsed_seconds, word_counts.get(idx, 0), 0)
+                            item_callback(uid, False, elapsed_seconds, word_counts.get(uid, 0), 0)
                     if progress_callback:
                         progress_callback(len(results["completed"]), len(results["failed"]), total)
 
                 # Reset remaining "generating" chunks to "pending"
                 if cancelled:
-                    done_indices = set(results["completed"]) | {idx for idx, _ in results["failed"]}
-                    reset_indices = [
-                        idx for idx in indices
-                        if idx not in done_indices and (self.get_chunk_view_by_index(idx) or {}).get("status") == "generating"
+                    done_uids = set(results["completed"]) | {uid for uid, _ in results["failed"]}
+                    reset_uids = [
+                        uid for uid in target_uids
+                        if uid not in done_uids and (self.get_chunk_view(uid) or {}).get("status") == "generating"
                     ]
-                    if reset_indices:
+                    if reset_uids:
                         results["cancelled"] += self.reset_generating_chunks(
-                            reset_indices,
+                            reset_uids,
                             generation_token=generation_token,
                         )
 
@@ -344,8 +420,8 @@ class ProjectGenerationMixin:
                   f"{len(results['failed'])} failed, {results['cancelled']} cancelled")
             return results
 
-        def _group_indices_by_voice_type(self, indices, chunks, voice_config):
-            """Reorder indices so chunks with the same voice type are contiguous.
+        def _group_indices_by_voice_type(self, chunk_refs, chunks, voice_config):
+            """Reorder chunk refs so chunks with the same voice type are contiguous.
 
             Grouping key matches how tts.py routes batches:
             - "custom" for custom voices (all batched together)
@@ -357,15 +433,32 @@ class ProjectGenerationMixin:
             """
             from collections import OrderedDict
             groups = OrderedDict()
-            labels = {}
+            narrator_name = self._resolve_narrator_name(voice_config, chunks)
+            chunk_by_uid = {
+                str((chunk or {}).get("uid") or "").strip(): chunk
+                for chunk in (chunks or [])
+                if str((chunk or {}).get("uid") or "").strip()
+            }
+            chunk_by_position = {
+                index: chunk
+                for index, chunk in enumerate(chunks or [])
+            }
 
-            for idx in indices:
-                if not (0 <= idx < len(chunks)):
-                    groups.setdefault("custom", []).append(idx)
+            for chunk_ref in chunk_refs:
+                chunk = chunk_by_uid.get(str(chunk_ref).strip())
+                if chunk is None and isinstance(chunk_ref, int):
+                    chunk = chunk_by_position.get(chunk_ref)
+                if chunk is None:
+                    chunk = self.get_chunk_raw(chunk_ref)
+                if not chunk:
+                    groups.setdefault("custom", []).append(chunk_ref)
                     continue
 
-                speaker = chunks[idx].get("speaker", "")
-                speaker = self.resolve_voice_speaker(speaker, voice_config, chunks=chunks)
+                speaker = self._resolve_generation_speaker(
+                    chunk,
+                    voice_config,
+                    narrator_name=narrator_name,
+                )
                 voice_data = voice_config.get(speaker, {})
                 voice_type = voice_data.get("type", "custom")
 
@@ -379,17 +472,17 @@ class ProjectGenerationMixin:
                 else:
                     key = "custom"
 
-                groups.setdefault(key, []).append(idx)
+                groups.setdefault(key, []).append(chunk_ref if chunk.get("uid") is None else str(chunk.get("uid") or chunk_ref))
 
             reordered = []
-            for key, group_indices in groups.items():
-                print(f"  Voice group '{key}': {len(group_indices)} chunks")
-                reordered.extend(group_indices)
+            for key, group_refs in groups.items():
+                print(f"  Voice group '{key}': {len(group_refs)} chunks")
+                reordered.extend(group_refs)
 
             return reordered
 
         def group_indices_by_resolved_speaker(self, indices, chunks=None, voice_config=None):
-            """Reorder indices so each resolved speaker is generated contiguously.
+            """Reorder chunk refs so each resolved speaker is generated contiguously.
 
             This is primarily useful for external TTS backends where clone prompt
             reuse is much faster when all lines for the same character are rendered
@@ -397,20 +490,38 @@ class ProjectGenerationMixin:
             """
             from collections import OrderedDict
 
-            chunks = chunks if chunks is not None else self.load_chunks()
+            chunks = chunks if chunks is not None else self._load_generation_chunks(indices)
             voice_config = voice_config if voice_config is not None else self._load_voice_config()
             groups = OrderedDict()
             labels = {}
+            narrator_name = self._resolve_narrator_name(voice_config, chunks)
+            chunk_by_uid = {
+                str((chunk or {}).get("uid") or "").strip(): chunk
+                for chunk in (chunks or [])
+                if str((chunk or {}).get("uid") or "").strip()
+            }
+            chunk_by_position = {
+                index: chunk
+                for index, chunk in enumerate(chunks or [])
+            }
 
-            for idx in indices:
-                if not (0 <= idx < len(chunks)):
-                    groups.setdefault("", []).append(idx)
+            for chunk_ref in indices:
+                chunk = chunk_by_uid.get(str(chunk_ref).strip())
+                if chunk is None and isinstance(chunk_ref, int):
+                    chunk = chunk_by_position.get(chunk_ref)
+                if chunk is None:
+                    chunk = self.get_chunk_raw(chunk_ref)
+                if not chunk:
+                    groups.setdefault("", []).append(chunk_ref)
                     continue
 
-                speaker = chunks[idx].get("speaker", "")
-                resolved = self.resolve_voice_speaker(speaker, voice_config, chunks=chunks)
+                resolved = self._resolve_generation_speaker(
+                    chunk,
+                    voice_config,
+                    narrator_name=narrator_name,
+                )
                 group_key = self._normalize_speaker_name(resolved) or resolved
-                groups.setdefault(group_key, []).append(idx)
+                groups.setdefault(group_key, []).append(chunk_ref if chunk.get("uid") is None else str(chunk.get("uid") or chunk_ref))
                 labels.setdefault(group_key, resolved)
 
             reordered = []
@@ -440,14 +551,12 @@ class ProjectGenerationMixin:
             """
             results = {"completed": [], "failed": [], "cancelled": 0}
 
-            # Load chunks and voice config
-            chunks = self.load_chunks()
-
-            # Filter out empty-text chunks
-            if chunks:
-                indices = [i for i in indices if 0 <= i < len(chunks) and chunks[i].get("text", "").strip()]
-
-            total = len(indices)
+            target_chunks = [
+                chunk for chunk in self._load_generation_chunks(indices)
+                if (chunk.get("text") or "").strip()
+            ]
+            target_uids = [chunk.get("uid") for chunk in target_chunks if chunk.get("uid")]
+            total = len(target_uids)
 
             if total == 0:
                 return results
@@ -455,22 +564,21 @@ class ProjectGenerationMixin:
             print(f"Starting batch generation of {total} chunks (batch_size={batch_size}, seed={batch_seed}, "
                   f"group_by_type={batch_group_by_type})...")
             word_counts = {
-                idx: len(re.findall(r"\b\w+\b", chunks[idx].get("text", "")))
-                for idx in indices if 0 <= idx < len(chunks)
+                chunk.get("uid"): len(re.findall(r"\b\w+\b", chunk.get("text", "")))
+                for chunk in target_chunks
+                if chunk.get("uid")
             }
-            voice_config = {}
             voice_config = self._load_voice_config()
             narrator_overrides = self.get_narrator_overrides()
+            narrator_name = self._resolve_narrator_name(voice_config, target_chunks)
             resolved_speakers = {
-                self.resolve_voice_speaker(
-                    self._apply_narrator_override(
-                        chunks[idx].get("speaker", ""),
-                        (chunks[idx].get("chapter") or "").strip(),
-                        narrator_overrides,
-                    ),
-                    voice_config, chunks=chunks,
+                self._resolve_generation_speaker(
+                    chunk,
+                    voice_config,
+                    narrator_overrides=narrator_overrides,
+                    narrator_name=narrator_name,
                 )
-                for idx in indices if 0 <= idx < len(chunks)
+                for chunk in target_chunks
             }
             voice_config = self.prepare_runtime_voice_config(voice_config, resolved_speakers)
             dictionary_entries = self.load_dictionary_entries()
@@ -479,51 +587,53 @@ class ProjectGenerationMixin:
             # Get TTS engine
             engine = self.get_engine()
             if not engine:
-                for idx in indices:
-                    results["failed"].append((idx, "TTS engine not initialized"))
+                for uid in target_uids:
+                    results["failed"].append((uid, "TTS engine not initialized"))
                 return results
 
-            self._claim_chunks_generation(indices, generation_token)
+            self._claim_chunks_generation(target_uids, generation_token)
 
             # Optionally reorder indices so same voice-type chunks are contiguous.
             # This produces larger homogeneous batches (e.g. all custom voices
             # together) instead of fragmenting each batch across voice types.
             if batch_group_by_type:
-                indices = self._group_indices_by_voice_type(indices, chunks, voice_config)
+                target_uids = self._group_indices_by_voice_type(target_uids, target_chunks, voice_config)
 
             # Split indices into batches
-            batches = [indices[i:i + batch_size] for i in range(0, len(indices), batch_size)]
+            batches = [target_uids[i:i + batch_size] for i in range(0, len(target_uids), batch_size)]
             print(f"Processing {len(batches)} batches...")
 
             cancelled = False
-            for batch_num, batch_indices in enumerate(batches):
+            for batch_num, batch_uids in enumerate(batches):
                 if cancel_check and cancel_check():
                     cancelled = True
                     print(f"[CANCEL] Cancellation requested before batch {batch_num + 1}")
                     break
 
-                print(f"Batch {batch_num + 1}/{len(batches)}: {len(batch_indices)} chunks")
+                print(f"Batch {batch_num + 1}/{len(batches)}: {len(batch_uids)} chunks")
 
                 # Build batch request data
                 batch_chunks = []
                 transformed_texts = {}
-                for idx in batch_indices:
-                    if 0 <= idx < len(chunks):
-                        chunk = chunks[idx]
-                        transformed_text, _ = apply_dictionary_to_text(chunk.get("text", ""), dictionary_entries)
-                        transformed_texts[idx] = transformed_text
-                        effective_speaker = self._apply_narrator_override(
-                            chunk.get("speaker", ""),
-                            (chunk.get("chapter") or "").strip(),
-                            narrator_overrides,
-                        )
-                        resolved_speaker = self.resolve_voice_speaker(effective_speaker, voice_config, chunks=chunks)
-                        batch_chunks.append({
-                            "index": idx,
-                            "text": transformed_text,
-                            "instruct": chunk.get("instruct", ""),
-                            "speaker": resolved_speaker
-                        })
+                batch_rows = {chunk.get("uid"): chunk for chunk in self._load_generation_chunks(batch_uids)}
+                for uid in batch_uids:
+                    chunk = batch_rows.get(uid)
+                    if chunk is None:
+                        continue
+                    transformed_text, _ = apply_dictionary_to_text(chunk.get("text", ""), dictionary_entries)
+                    transformed_texts[uid] = transformed_text
+                    resolved_speaker = self._resolve_generation_speaker(
+                        chunk,
+                        voice_config,
+                        narrator_overrides=narrator_overrides,
+                        narrator_name=narrator_name,
+                    )
+                    batch_chunks.append({
+                        "index": uid,
+                        "text": transformed_text,
+                        "instruct": chunk.get("instruct", ""),
+                        "speaker": resolved_speaker,
+                    })
 
                 # Call batch TTS with single seed
                 batch_start = time.time()
@@ -536,7 +646,7 @@ class ProjectGenerationMixin:
                 )
 
                 # Process completed chunks - convert to MP3 and update status
-                chunks = self.load_chunks()  # Reload for each batch
+                live_rows = {chunk.get("uid"): chunk for chunk in self._load_generation_chunks(batch_uids)}
                 if cancel_check and cancel_check():
                     cancelled = True
 
@@ -544,23 +654,24 @@ class ProjectGenerationMixin:
                 shared_elapsed = (time.time() - batch_start) / processed_in_batch if processed_in_batch > 0 else 0.0
 
                 postprocess_futures = {}
-                for idx in batch_results["completed"]:
+                for uid in batch_results["completed"]:
                     if cancel_check and cancel_check():
                         cancelled = True
-                        temp_path = os.path.join(self.root_dir, f"temp_batch_{idx}.wav")
+                        temp_path = os.path.join(self.root_dir, f"temp_batch_{uid}.wav")
                         self._cleanup_temp_file(temp_path)
                         continue
-                    if not (0 <= idx < len(chunks)):
-                        print(f"Chunk {idx} skipped: index out of range (chunks changed during generation?)")
-                        results["failed"].append((idx, "Index out of range after reload"))
+                    chunk = live_rows.get(uid) or self.get_chunk_raw(uid)
+                    if chunk is None:
+                        print(f"Chunk {uid} skipped: row missing after generation")
+                        results["failed"].append((uid, "Chunk missing after reload"))
                         continue
 
-                    temp_path = os.path.join(self.root_dir, f"temp_batch_{idx}.wav")
+                    temp_path = os.path.join(self.root_dir, f"temp_batch_{uid}.wav")
 
                     if not os.path.exists(temp_path):
-                        results["failed"].append((idx, "Temp audio file not found"))
+                        results["failed"].append((uid, "Temp audio file not found"))
                         self._update_chunk_fields_if_token(
-                            idx,
+                            uid,
                             generation_token,
                             status="error",
                             audio_validation=None,
@@ -569,17 +680,16 @@ class ProjectGenerationMixin:
                         continue
 
                     try:
-                        if generation_token is not None and not self.chunk_has_generation_token(idx, generation_token):
+                        if generation_token is not None and not self.chunk_has_generation_token(uid, generation_token):
                             self._cleanup_temp_file(temp_path)
                             continue
-                        chunk = chunks[idx]
                         speaker = chunk.get("speaker", "unknown")
                         will_retry_on_error = auto_regen_retry_attempts > 0
 
                         fut = self._enqueue_postprocess(
-                            index=idx,
+                            index=int(chunk.get("id") or 0),
                             speaker=speaker,
-                            text=transformed_texts.get(idx, chunk.get("text", "")),
+                            text=transformed_texts.get(uid, chunk.get("text", "")),
                             temp_path=temp_path,
                             attempt=0,
                             chunk_uid=chunk.get("uid"),
@@ -587,12 +697,12 @@ class ProjectGenerationMixin:
                             error_status_override="pending" if will_retry_on_error else None,
                             keep_token=will_retry_on_error,
                         )
-                        postprocess_futures[fut] = (idx, will_retry_on_error)
+                        postprocess_futures[fut] = (uid, will_retry_on_error)
                     except Exception as e:
-                        print(f"Error queueing postprocess for chunk {idx}: {e}")
-                        results["failed"].append((idx, str(e)))
+                        print(f"Error queueing postprocess for chunk {uid}: {e}")
+                        results["failed"].append((uid, str(e)))
                         self._update_chunk_fields_if_token(
-                            idx,
+                            uid,
                             generation_token,
                             status="error",
                             audio_validation=None,
@@ -600,48 +710,47 @@ class ProjectGenerationMixin:
                         )
                         self._cleanup_temp_file(temp_path)
                         if item_callback:
-                            item_callback(idx, False, shared_elapsed, word_counts.get(idx, 0), 0)
+                            item_callback(uid, False, shared_elapsed, word_counts.get(uid, 0), 0)
 
                 for fut in concurrent.futures.as_completed(list(postprocess_futures)):
-                    idx, will_retry_on_error = postprocess_futures[fut]
+                    uid, will_retry_on_error = postprocess_futures[fut]
                     try:
                         result = fut.result()
                         if result["status"] == "cancelled":
                             continue
 
-                        live_chunk = self.get_chunk_view_by_index(idx)
+                        live_chunk = self.get_chunk_view(uid)
 
                         if result["status"] == "done":
-                            results["completed"].append(idx)
-                            print(f"Chunk {idx} completed: {(live_chunk or {}).get('audio_path')}")
+                            results["completed"].append(uid)
+                            print(f"Chunk {uid} completed: {(live_chunk or {}).get('audio_path')}")
                             if item_callback:
-                                item_callback(idx, True, shared_elapsed, word_counts.get(idx, 0), word_counts.get(idx, 0))
+                                item_callback(uid, True, shared_elapsed, word_counts.get(uid, 0), word_counts.get(uid, 0))
                         elif will_retry_on_error and not (cancel_check and cancel_check()):
-                            print(f"Chunk {idx} failed validation in batch; retrying immediately at the front of the queue")
+                            print(f"Chunk {uid} failed validation in batch; retrying immediately at the front of the queue")
                             retry_start = time.time()
-                            retry_success, retry_msg = self.generate_chunk_audio(idx, attempt=1, generation_token=generation_token)
+                            retry_success, retry_msg = self.generate_chunk_audio(uid, attempt=1, generation_token=generation_token)
                             retry_elapsed = time.time() - retry_start
-                            chunks = self.load_chunks()
                             if retry_success:
-                                results["completed"].append(idx)
-                                print(f"Chunk {idx} completed after auto-regeneration: {retry_msg}")
+                                results["completed"].append(uid)
+                                print(f"Chunk {uid} completed after auto-regeneration: {retry_msg}")
                                 if item_callback:
-                                    item_callback(idx, True, shared_elapsed + retry_elapsed, word_counts.get(idx, 0), word_counts.get(idx, 0))
+                                    item_callback(uid, True, shared_elapsed + retry_elapsed, word_counts.get(uid, 0), word_counts.get(uid, 0))
                             else:
-                                results["failed"].append((idx, retry_msg))
-                                print(f"Chunk {idx} failed after auto-regeneration: {retry_msg}")
+                                results["failed"].append((uid, retry_msg))
+                                print(f"Chunk {uid} failed after auto-regeneration: {retry_msg}")
                                 if item_callback:
-                                    item_callback(idx, False, shared_elapsed + retry_elapsed, word_counts.get(idx, 0), 0)
+                                    item_callback(uid, False, shared_elapsed + retry_elapsed, word_counts.get(uid, 0), 0)
                         else:
-                            results["failed"].append((idx, result["error"]))
-                            print(f"Chunk {idx} failed validation: {result['error']}")
+                            results["failed"].append((uid, result["error"]))
+                            print(f"Chunk {uid} failed validation: {result['error']}")
                             if item_callback:
-                                item_callback(idx, False, shared_elapsed, word_counts.get(idx, 0), 0)
+                                item_callback(uid, False, shared_elapsed, word_counts.get(uid, 0), 0)
                     except Exception as e:
-                        print(f"Error processing chunk {idx}: {e}")
-                        results["failed"].append((idx, str(e)))
+                        print(f"Error processing chunk {uid}: {e}")
+                        results["failed"].append((uid, str(e)))
                         self._update_chunk_fields_if_token(
-                            idx,
+                            uid,
                             generation_token,
                             status="error",
                             audio_validation=None,
@@ -649,22 +758,20 @@ class ProjectGenerationMixin:
                         )
                         self._cleanup_temp_file(temp_path)
                         if item_callback:
-                            item_callback(idx, False, shared_elapsed, word_counts.get(idx, 0), 0)
+                            item_callback(uid, False, shared_elapsed, word_counts.get(uid, 0), 0)
 
-                for idx, error in batch_results["failed"]:
-                    if 0 <= idx < len(chunks):
+                for uid, error in batch_results["failed"]:
+                    if self.get_chunk_raw(uid) is not None:
                         self._update_chunk_fields_if_token(
-                            idx,
+                            uid,
                             generation_token,
                             status="error",
                             audio_validation=None,
                             generation_token=None,
                         )
-                    results["failed"].append((idx, error))
+                    results["failed"].append((uid, error))
                     if item_callback:
-                        item_callback(idx, False, shared_elapsed, word_counts.get(idx, 0), 0)
-
-                chunks = self.load_chunks()
+                        item_callback(uid, False, shared_elapsed, word_counts.get(uid, 0), 0)
                 if cancel_check and cancel_check():
                     cancelled = True
 
@@ -676,13 +783,13 @@ class ProjectGenerationMixin:
                     break
 
             # Reset remaining live "generating" chunks to "pending" on cancel or completion.
-            done_indices = set(results["completed"]) | {idx for idx, _ in results["failed"]}
-            reset_indices = [
-                idx for idx in indices
-                if idx not in done_indices and (self.get_chunk_view_by_index(idx) or {}).get("status") == "generating"
+            done_uids = set(results["completed"]) | {uid for uid, _ in results["failed"]}
+            reset_uids = [
+                uid for uid in target_uids
+                if uid not in done_uids and (self.get_chunk_view(uid) or {}).get("status") == "generating"
             ]
-            if reset_indices:
-                results["cancelled"] += self.reset_generating_chunks(reset_indices, generation_token=generation_token)
+            if reset_uids:
+                results["cancelled"] += self.reset_generating_chunks(reset_uids, generation_token=generation_token)
 
             self.flush_dirty_chunks(force=True)
 

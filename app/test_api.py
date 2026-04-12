@@ -811,6 +811,17 @@ def test_get_chunks_view():
                 raise TestFailure(f"Chapter-scoped view returned chunks outside {chapter!r}")
 
 
+def test_get_chunk_chapters():
+    r = get("/api/chunks/chapters")
+    assert_status(r, 200)
+    data = r.json()
+    if not isinstance(data, dict):
+        raise TestFailure(f"Expected object, got {type(data).__name__}")
+    chapters = data.get("chapters")
+    if not isinstance(chapters, list):
+        raise TestFailure(f"Expected chapters list, got {type(chapters).__name__}")
+
+
 def test_get_single_chunk():
     if not shared.get("has_chunks"):
         skip_test("no chunks available")
@@ -827,6 +838,19 @@ def test_get_single_chunk():
 def test_get_single_chunk_404():
     r = get("/api/chunks/99999")
     assert_status(r, 404)
+
+
+def test_get_single_chunk_audio_ref():
+    if not shared.get("has_chunks"):
+        skip_test("no chunks available")
+
+    r = get("/api/chunks/0/audio")
+    assert_status(r, 200)
+    data = r.json()
+    if not isinstance(data, dict):
+        raise TestFailure(f"Expected object, got {type(data).__name__}")
+    if "uid" not in data or "status" not in data or "audio_fingerprint" not in data:
+        raise TestFailure(f"Missing audio ref keys: {data}")
 
 
 def test_update_chunk():
@@ -1314,6 +1338,23 @@ def test_generate_batch():
     # Wait for batch to finish so subsequent tests don't conflict
     if not wait_for_task("audio", timeout=120):
         raise TestFailure("generate_batch did not complete within 120s")
+
+
+def test_generate_batch_scope_request():
+    require_full_mode()
+    if not shared.get("has_chunks"):
+        skip_test("no chunks available")
+    chapter = shared.get("chunk0_chapter")
+    payload = {"scope_mode": "chapter" if chapter else "project", "chapter": chapter, "regenerate_all": False}
+    r = post("/api/generate_batch", json=payload)
+    if r.status_code == 400:
+        skip_test("audio generation already running or no renderable chunks in scope")
+    assert_status(r, 200)
+    data = r.json()
+    if data.get("status") not in ("started", "queued"):
+        raise TestFailure(f"Expected status=started|queued, got {data}")
+    if not wait_for_task("audio", timeout=120):
+        raise TestFailure("generate_batch scope request did not complete within 120s")
 
 
 def test_generate_batch_fast():

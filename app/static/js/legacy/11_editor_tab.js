@@ -6,10 +6,13 @@
         let cachedProofreadVisibleChunkIds = [];
         let selectedEditorChapter = WHOLE_PROJECT_CHAPTER_ID;
         let editorChapterAutoSelected = false;
+        let editorChapterSummaries = [];
         let selectedProofreadChapter = WHOLE_PROJECT_CHAPTER_ID;
         let proofreadChapterAutoSelected = false;
         let audioQueuePollTimer = null;
         let audioQueuePollInFlight = null;
+        let editorEventSource = null;
+        let editorEventsConnected = false;
         let latestAudioState = null;
         let latestProofreadStatus = null;
         let renderPrepComplete = false;
@@ -105,8 +108,32 @@
             const onPlayAttr = stopOthersId == null
                 ? ''
                 : ` onplay='stopOthers(${JSON.stringify(stopOthersId)})'`;
-            return `<audio class="chunk-audio" data-id="${escapeHtml(chunkRef)}" data-audio-path="${escapeHtml(audioPath)}" data-audio-fingerprint="${escapeHtml(fingerprint)}" data-audio-retry-count="0" controls preload="none" src="${src}" style="width: ${width}px; height: 30px;" onerror='handleChunkAudioError(this)'${onPlayAttr}></audio>`;
+            return `<audio class="chunk-audio" data-id="${escapeHtml(chunkRef)}" data-audio-path="${escapeHtml(audioPath)}" data-audio-fingerprint="${escapeHtml(fingerprint)}" data-audio-retry-count="0" controls preload="none" src="${src}" style="width: ${width}px; height: 30px;" onerror='handleChunkAudioError(this)' onpointerdown='primeChunkAudioPlayback(this)'${onPlayAttr}></audio>`;
         }
+
+        window.primeChunkAudioPlayback = async (audioEl) => {
+            if (!audioEl) return;
+            const chunkRef = String(audioEl.dataset?.id || '').trim();
+            if (!chunkRef) return;
+            try {
+                const payload = await API.get(`/api/chunks/${encodeURIComponent(chunkRef)}/audio`);
+                const nextPath = String(payload?.audio_path || '').trim();
+                const nextFingerprint = String(payload?.audio_fingerprint || '').trim();
+                if (!nextPath) return;
+                if (audioEl.dataset.audioPath === nextPath && audioEl.dataset.audioFingerprint === nextFingerprint) {
+                    return;
+                }
+                audioEl.dataset.audioPath = nextPath;
+                audioEl.dataset.audioFingerprint = nextFingerprint;
+                audioEl.dataset.audioRetryCount = '0';
+                audioEl.src = buildAudioSrcFromPath(nextPath, nextFingerprint || Date.now().toString());
+                if (typeof audioEl.load === 'function') {
+                    audioEl.load();
+                }
+            } catch (e) {
+                console.warn(`Failed to refresh audio ref for ${chunkRef}`, e);
+            }
+        };
 
         window.handleChunkAudioError = (audioEl) => {
             if (!audioEl) return;
@@ -312,29 +339,18 @@
             });
         }
 
-        function buildEditorChapterOptions(chunks) {
-            const options = [{
+        function buildEditorChapterOptions(chapters) {
+            const summaries = Array.isArray(chapters) ? chapters : [];
+            const total = summaries.reduce((sum, chapter) => sum + (Number(chapter?.chunk_count) || 0), 0);
+            return [{
                 id: WHOLE_PROJECT_CHAPTER_ID,
                 label: 'Whole Project',
-                count: chunks.length
-            }];
-            const counts = new Map();
-
-            chunks.forEach(chunk => {
-                const chapter = getChunkChapterName(chunk);
-                if (!chapter) return;
-                counts.set(chapter, (counts.get(chapter) || 0) + 1);
-            });
-
-            counts.forEach((count, chapter) => {
-                options.push({
-                    id: chapter,
-                    label: chapter,
-                    count
-                });
-            });
-
-            return options;
+                count: total
+            }, ...summaries.map(chapter => ({
+                id: String(chapter?.chapter || ''),
+                label: String(chapter?.chapter || ''),
+                count: Number(chapter?.chunk_count) || 0
+            }))];
         }
 
         function getVisibleChunks(chunks) {
@@ -363,11 +379,11 @@
             return `chapter "${selectedEditorChapter}"`;
         }
 
-        function syncEditorChapterState(chunks) {
+        function syncEditorChapterState(chunks = cachedChunks) {
             const select = document.getElementById('editor-chapter-select');
             if (!select) return;
 
-            const options = buildEditorChapterOptions(chunks);
+            const options = buildEditorChapterOptions(editorChapterSummaries);
             const firstRealChapter = options.find(option => option.id !== WHOLE_PROJECT_CHAPTER_ID);
             if (!editorChapterAutoSelected && selectedEditorChapter === WHOLE_PROJECT_CHAPTER_ID && firstRealChapter) {
                 selectedEditorChapter = firstRealChapter.id;
@@ -467,6 +483,7 @@
             updateDeleteChapterButtonVisibility();
             await loadChunks(false);
             updateNarratorSelector(cachedChunks); // syncEditorChapterState is skipped when cache is warm
+            connectEditorEventStream();
         };
 
 
@@ -1689,9 +1706,74 @@
         }
 
         function ensureAudioQueuePolling() {
+            if (editorEventsConnected) return;
             if (audioQueuePollTimer) return;
             audioQueuePollTimer = setInterval(pollAudioQueueOnce, 2000);
             pollAudioQueueOnce();
+        }
+
+        function disconnectEditorEventStream() {
+            editorEventsConnected = false;
+            if (editorEventSource) {
+                editorEventSource.close();
+                editorEventSource = null;
+            }
+        }
+
+        function connectEditorEventStream() {
+            disconnectEditorEventStream();
+            const params = new URLSearchParams();
+            params.set('scope_mode', selectedEditorChapter === WHOLE_PROJECT_CHAPTER_ID ? 'project' : 'chapter');
+            if (selectedEditorChapter !== WHOLE_PROJECT_CHAPTER_ID) {
+                params.set('chapter', selectedEditorChapter);
+            }
+            const source = new EventSource(`/api/editor/events?${params.toString()}`);
+            editorEventSource = source;
+            source.addEventListener('open', () => {
+                editorEventsConnected = true;
+                if (audioQueuePollTimer) {
+                    clearInterval(audioQueuePollTimer);
+                    audioQueuePollTimer = null;
+                }
+            });
+            source.addEventListener('chunk_upsert', (event) => {
+                try {
+                    const payload = JSON.parse(event.data || '{}');
+                    applyTrackedChunkUpdate(payload);
+                } catch (e) {
+                    console.warn('Failed to apply chunk_upsert event', e);
+                }
+            });
+            source.addEventListener('chunk_delete', () => {
+                loadChunks(true).catch(err => console.error('Chunk refetch after delete failed', err));
+            });
+            source.addEventListener('chapter_deleted', () => {
+                loadChunks(true).catch(err => console.error('Chapter refetch after delete failed', err));
+            });
+            source.addEventListener('chapter_list_changed', (event) => {
+                try {
+                    const payload = JSON.parse(event.data || '{}');
+                    editorChapterSummaries = Array.isArray(payload?.chapters) ? payload.chapters : [];
+                    syncEditorChapterState(cachedChunks);
+                } catch (e) {
+                    console.warn('Failed to update chapter list from SSE', e);
+                }
+            });
+            source.addEventListener('audio_status', (event) => {
+                try {
+                    latestAudioState = JSON.parse(event.data || '{}');
+                    updateAudioQueueControls(latestAudioState);
+                    renderAudioQueueStatus(latestAudioState);
+                    renderAudioEstimatePanel(latestAudioState);
+                    renderEditorProgressBar(cachedChunks, latestAudioState);
+                } catch (e) {
+                    console.warn('Failed to apply audio_status event', e);
+                }
+            });
+            source.onerror = () => {
+                editorEventsConnected = false;
+                ensureAudioQueuePolling();
+            };
         }
 
         function buildSilenceRowHtml(chunk) {
@@ -1763,20 +1845,18 @@
             }
 
             try {
-                const useChapterScope = cachedChunks.length > 0
-                    && selectedEditorChapter !== WHOLE_PROJECT_CHAPTER_ID;
+                const chapterPayload = await API.get('/api/chunks/chapters');
+                editorChapterSummaries = Array.isArray(chapterPayload?.chapters) ? chapterPayload.chapters : [];
+                syncEditorChapterState(cachedChunks);
+
                 const chunks = await API.get(
-                    useChapterScope
+                    selectedEditorChapter !== WHOLE_PROJECT_CHAPTER_ID
                         ? `/api/chunks/view?chapter=${encodeURIComponent(selectedEditorChapter)}`
                         : '/api/chunks/view'
                 );
-                const rawMerged = useChapterScope
-                    ? mergeChapterScopedSnapshots(cachedChunks, chunks, selectedEditorChapter)
-                    : chunks;
-                // Filter out any UIDs still being deleted (guards against polling race)
                 const mergedChunks = pendingDeleteRefs.size > 0
-                    ? rawMerged.filter(c => !pendingDeleteRefs.has(getChunkRef(c)))
-                    : rawMerged;
+                    ? (chunks || []).filter(c => !pendingDeleteRefs.has(getChunkRef(c)))
+                    : (chunks || []);
                 if (mergedChunks.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="5" class="text-center">No chunks found. Please generate script first.</td></tr>';
                     cachedChunks = [];
@@ -1789,8 +1869,8 @@
                     return;
                 }
 
-                if (!useChapterScope || forceFullRedraw || cachedChunks.length === 0) {
-                    syncEditorChapterState(mergedChunks);
+                syncEditorChapterState(mergedChunks);
+                if (forceFullRedraw || cachedChunks.length === 0) {
                     syncProofreadChapterState(mergedChunks);
                     refreshDictionaryCounts(mergedChunks);
                 }
@@ -1863,6 +1943,7 @@
                 cachedChunks = mergedChunks;
                 cachedVisibleChunkIds = visibleChunks.map(chunk => getChunkRef(chunk));
                 syncTrackedChunkPollers(visibleChunks);
+                connectEditorEventStream();
 
             } catch (e) {
                 console.error("Error loading chunks:", e);
@@ -2675,9 +2756,12 @@
                 if (!regenerateAll) {
                     await autoPrepareSegmentsBeforeRender();
                 }
-                const chunks = await API.get('/api/chunks/view');
-                const targetChunks = getActionTargetChunks(chunks);
-                const toProcess = (regenerateAll ? targetChunks : targetChunks.filter(c => c.status !== 'done'))
+                const scopeMode = isChapterOnlyEnabled() && selectedEditorChapter !== WHOLE_PROJECT_CHAPTER_ID
+                    ? 'chapter'
+                    : 'project';
+                const chapter = scopeMode === 'chapter' ? selectedEditorChapter : null;
+                const visibleChunks = scopeMode === 'chapter' ? cachedChunks : await API.get('/api/chunks/view');
+                const toProcess = (regenerateAll ? visibleChunks : visibleChunks.filter(c => c.status !== 'done'))
                     .filter(c => c.text && c.text.trim());
 
                 if (toProcess.length === 0) {
@@ -2689,20 +2773,24 @@
                     return;
                 }
 
-                const indices = toProcess.map(c => c.id);
-
                 if (regenerateAll) {
                     // Cancel any running job and immediately reset all target chunks to
                     // pending so the UI reflects the full reset before generation starts.
-                    await API.post('/api/chunks/reset_to_pending', { indices });
+                    await API.post('/api/chunks/reset_to_pending', {
+                        scope_mode: scopeMode,
+                        chapter,
+                        regenerate_all: true,
+                    });
                     await loadChunks(true);
                 }
 
                 // Call batch endpoint for parallel processing
                 const response = await API.post('/api/generate_batch', {
-                    indices,
+                    scope_mode: scopeMode,
+                    chapter,
+                    regenerate_all: regenerateAll,
                     label: regenerateAll ? `Regenerate ${getActionScopeLabel()}` : `Render pending in ${getActionScopeLabel()}`,
-                    scope: getActionScopeLabel()
+                    scope: getActionScopeLabel(),
                 });
                 if (window.setNavTaskSpinner) {
                     window.setNavTaskSpinner('editor');
@@ -2725,9 +2813,12 @@
                 if (!regenerateAll) {
                     await autoPrepareSegmentsBeforeRender();
                 }
-                const chunks = await API.get('/api/chunks/view');
-                const targetChunks = getActionTargetChunks(chunks);
-                const toProcess = (regenerateAll ? targetChunks : targetChunks.filter(c => c.status !== 'done'))
+                const scopeMode = isChapterOnlyEnabled() && selectedEditorChapter !== WHOLE_PROJECT_CHAPTER_ID
+                    ? 'chapter'
+                    : 'project';
+                const chapter = scopeMode === 'chapter' ? selectedEditorChapter : null;
+                const visibleChunks = scopeMode === 'chapter' ? cachedChunks : await API.get('/api/chunks/view');
+                const toProcess = (regenerateAll ? visibleChunks : visibleChunks.filter(c => c.status !== 'done'))
                     .filter(c => c.text && c.text.trim());
 
                 if (toProcess.length === 0) {
@@ -2735,19 +2826,23 @@
                     return;
                 }
 
-                const indices = toProcess.map(c => c.id);
-
                 if (regenerateAll) {
                     // Cancel any running job and immediately reset all target chunks to
                     // pending so the UI reflects the full reset before generation starts.
-                    await API.post('/api/chunks/reset_to_pending', { indices });
+                    await API.post('/api/chunks/reset_to_pending', {
+                        scope_mode: scopeMode,
+                        chapter,
+                        regenerate_all: true,
+                    });
                     await loadChunks(true);
                 }
 
                 const response = await API.post('/api/generate_batch_fast', {
-                    indices,
+                    scope_mode: scopeMode,
+                    chapter,
+                    regenerate_all: regenerateAll,
                     label: regenerateAll ? `Batch regenerate ${getActionScopeLabel()}` : `Batch render pending in ${getActionScopeLabel()}`,
-                    scope: getActionScopeLabel()
+                    scope: getActionScopeLabel(),
                 });
                 if (window.setNavTaskSpinner) {
                     window.setNavTaskSpinner('editor');

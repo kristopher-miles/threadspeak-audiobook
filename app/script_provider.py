@@ -29,11 +29,67 @@ class ScriptStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_chunk(self, chunk_ref):
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_chunks_by_uids(self, uids):
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_chapter_chunks(self, chapter):
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_chapter_list(self):
+        raise NotImplementedError
+
+    @abstractmethod
+    def resolve_generation_targets(self, scope_mode="project", chapter=None, pending_only=True):
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_chunk_audio_ref(self, chunk_ref):
+        raise NotImplementedError
+
+    @abstractmethod
     def replace_chunks(self, chunks, *, reason="replace_chunks", wait=True):
         raise NotImplementedError
 
     @abstractmethod
     def patch_chunks(self, patches, *, reason="patch_chunks", wait=True):
+        raise NotImplementedError
+
+    @abstractmethod
+    def patch_chunk_if(self, uid, expected=None, fields=None, clear_fields=(), *, reason="patch_chunk_if", wait=True):
+        raise NotImplementedError
+
+    @abstractmethod
+    def patch_chunks_if(self, updates, *, reason="patch_chunks_if", wait=True):
+        raise NotImplementedError
+
+    @abstractmethod
+    def claim_generation(self, uid, token, *, reason="claim_generation", wait=True):
+        raise NotImplementedError
+
+    @abstractmethod
+    def claim_generation_many(self, uids, token, *, reason="claim_generation_many", wait=True):
+        raise NotImplementedError
+
+    @abstractmethod
+    def reset_generation(self, uids, token=None, target_status="pending", *, reason="reset_generation", wait=True):
+        raise NotImplementedError
+
+    @abstractmethod
+    def prepare_chunk_for_regeneration(self, uid, *, reason="prepare_chunk_for_regeneration", wait=True):
+        raise NotImplementedError
+
+    @abstractmethod
+    def delete_chunk(self, uid, *, reason="delete_chunk", wait=True):
+        raise NotImplementedError
+
+    @abstractmethod
+    def delete_chapter(self, chapter, *, reason="delete_chapter", wait=True):
         raise NotImplementedError
 
     @abstractmethod
@@ -163,6 +219,102 @@ class SQLiteScriptStore(ScriptStore):
             rows = conn.execute(query, params).fetchall()
         return [self._row_to_chunk(row) for row in rows]
 
+    def get_chunk(self, chunk_ref):
+        self._bootstrap_if_needed()
+        resolved = self._resolve_chunk_ref(chunk_ref)
+        if resolved is None:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT uid, ordinal, speaker, text, instruct, chapter, paragraph_id,
+                       chunk_type, silence_duration_s, status, audio_path,
+                       audio_validation_json, proofread_json, auto_regen_count,
+                       generation_token, extra_json
+                FROM chunks
+                WHERE uid = ?
+                """,
+                (resolved["uid"],),
+            ).fetchone()
+        return self._row_to_chunk(row) if row is not None else None
+
+    def get_chunks_by_uids(self, uids):
+        self._bootstrap_if_needed()
+        normalized = [str(uid).strip() for uid in (uids or []) if str(uid).strip()]
+        if not normalized:
+            return []
+        placeholders = ",".join("?" for _ in normalized)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT uid, ordinal, speaker, text, instruct, chapter, paragraph_id,
+                       chunk_type, silence_duration_s, status, audio_path,
+                       audio_validation_json, proofread_json, auto_regen_count,
+                       generation_token, extra_json
+                FROM chunks
+                WHERE uid IN ({placeholders})
+                ORDER BY ordinal ASC
+                """,
+                normalized,
+            ).fetchall()
+        return [self._row_to_chunk(row) for row in rows]
+
+    def get_chapter_chunks(self, chapter):
+        return self.load_chunks(chapter=chapter)
+
+    def get_chapter_list(self):
+        self._bootstrap_if_needed()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT chapter, COUNT(*) AS chunk_count, MIN(ordinal) AS first_ordinal
+                FROM chunks
+                WHERE TRIM(COALESCE(chapter, '')) != ''
+                GROUP BY chapter
+                ORDER BY first_ordinal ASC
+                """
+            ).fetchall()
+        return [
+            {
+                "chapter": row["chapter"],
+                "chunk_count": int(row["chunk_count"] or 0),
+            }
+            for row in rows
+        ]
+
+    def resolve_generation_targets(self, scope_mode="project", chapter=None, pending_only=True):
+        self._bootstrap_if_needed()
+        query = (
+            "SELECT uid, ordinal, speaker, text, instruct, chapter, paragraph_id, "
+            "chunk_type, silence_duration_s, status, audio_path, audio_validation_json, "
+            "proofread_json, auto_regen_count, generation_token, extra_json "
+            "FROM chunks WHERE TRIM(COALESCE(text, '')) != ''"
+        )
+        params = []
+        normalized_scope = str(scope_mode or "project").strip().lower()
+        normalized_chapter = str(chapter or "").strip()
+        if normalized_scope == "chapter" and normalized_chapter:
+            query += " AND chapter = ?"
+            params.append(normalized_chapter)
+        if pending_only:
+            query += " AND COALESCE(status, 'pending') != 'done'"
+        query += " ORDER BY ordinal ASC"
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._row_to_chunk(row) for row in rows]
+
+    def get_chunk_audio_ref(self, chunk_ref):
+        chunk = self.get_chunk(chunk_ref)
+        if chunk is None:
+            return None
+        return {
+            "uid": chunk.get("uid"),
+            "id": chunk.get("id"),
+            "status": chunk.get("status"),
+            "audio_path": chunk.get("audio_path"),
+            "audio_fingerprint": self._chunk_audio_fingerprint(chunk),
+        }
+
     def replace_chunks(self, chunks, *, reason="replace_chunks", wait=True):
         payload = [self._normalize_chunk(chunk, index) for index, chunk in enumerate(chunks or [])]
         return self._submit_command("replace_chunks", {"chunks": payload, "reason": reason}, wait=wait)
@@ -174,10 +326,103 @@ class SQLiteScriptStore(ScriptStore):
             if not uid:
                 continue
             fields = dict((patch or {}).get("fields") or {})
-            normalized.append({"uid": uid, "fields": fields})
+            normalized.append({"uid": uid, "fields": fields, "expected": {}, "clear_fields": ()})
         if not normalized:
             return 0
         return self._submit_command("patch_chunks", {"patches": normalized, "reason": reason}, wait=wait)
+
+    def patch_chunk_if(self, uid, expected=None, fields=None, clear_fields=(), *, reason="patch_chunk_if", wait=True):
+        updates = [{
+            "uid": uid,
+            "expected": dict(expected or {}),
+            "fields": dict(fields or {}),
+            "clear_fields": list(clear_fields or ()),
+        }]
+        result = self.patch_chunks_if(updates, reason=reason, wait=wait)
+        if wait:
+            return result[0] if result else None
+        return result
+
+    def patch_chunks_if(self, updates, *, reason="patch_chunks_if", wait=True):
+        normalized = []
+        for update in updates or []:
+            uid = str((update or {}).get("uid") or "").strip()
+            if not uid:
+                continue
+            normalized.append({
+                "uid": uid,
+                "expected": dict((update or {}).get("expected") or {}),
+                "fields": dict((update or {}).get("fields") or {}),
+                "clear_fields": list((update or {}).get("clear_fields") or ()),
+            })
+        if not normalized:
+            return []
+        return self._submit_command("patch_chunks", {"patches": normalized, "reason": reason}, wait=wait)
+
+    def claim_generation(self, uid, token, *, reason="claim_generation", wait=True):
+        result = self._submit_command(
+            "claim_generation",
+            {"uids": [str(uid).strip()], "token": token, "reason": reason},
+            wait=wait,
+        )
+        if wait:
+            return result[0] if result else None
+        return result
+
+    def claim_generation_many(self, uids, token, *, reason="claim_generation_many", wait=True):
+        normalized = [str(uid).strip() for uid in (uids or []) if str(uid).strip()]
+        if not normalized:
+            return []
+        return self._submit_command(
+            "claim_generation",
+            {"uids": normalized, "token": token, "reason": reason},
+            wait=wait,
+        )
+
+    def reset_generation(self, uids, token=None, target_status="pending", *, reason="reset_generation", wait=True):
+        normalized = [str(uid).strip() for uid in (uids or []) if str(uid).strip()]
+        if not normalized:
+            return []
+        return self._submit_command(
+            "reset_generation",
+            {
+                "uids": normalized,
+                "token": token,
+                "target_status": target_status,
+                "reason": reason,
+            },
+            wait=wait,
+        )
+
+    def prepare_chunk_for_regeneration(self, uid, *, reason="prepare_chunk_for_regeneration", wait=True):
+        normalized = str(uid or "").strip()
+        if not normalized:
+            return None
+        return self._submit_command(
+            "prepare_chunk_for_regeneration",
+            {"uid": normalized, "reason": reason},
+            wait=wait,
+        )
+
+    def delete_chunk(self, uid, *, reason="delete_chunk", wait=True):
+        normalized = str(uid or "").strip()
+        if not normalized:
+            return None
+        return self._submit_command(
+            "delete_chunk",
+            {"uid": normalized, "reason": reason},
+            wait=wait,
+        )
+
+    def delete_chapter(self, chapter, *, reason="delete_chapter", wait=True):
+        normalized = str(chapter or "").strip()
+        if not normalized:
+            return None
+        return self._submit_command(
+            "delete_chapter",
+            {"chapter": normalized, "reason": reason},
+            wait=wait,
+        )
 
     def flush(self, timeout=None):
         return self._submit_command("barrier", {"reason": "flush"}, wait=True, timeout=timeout)
@@ -366,6 +611,21 @@ class SQLiteScriptStore(ScriptStore):
             return self._replace_chunks_tx(conn, payload.get("chunks") or [])
         if name == "patch_chunks":
             return self._patch_chunks_tx(conn, payload.get("patches") or [])
+        if name == "claim_generation":
+            return self._claim_generation_tx(conn, payload.get("uids") or [], payload.get("token"))
+        if name == "reset_generation":
+            return self._reset_generation_tx(
+                conn,
+                payload.get("uids") or [],
+                token=payload.get("token"),
+                target_status=payload.get("target_status") or "pending",
+            )
+        if name == "prepare_chunk_for_regeneration":
+            return self._prepare_chunk_for_regeneration_tx(conn, payload.get("uid"))
+        if name == "delete_chunk":
+            return self._delete_chunk_tx(conn, payload.get("uid"))
+        if name == "delete_chapter":
+            return self._delete_chapter_tx(conn, payload.get("chapter"))
         if name == "barrier":
             return True
         raise ValueError(f"Unsupported script store command: {name}")
@@ -394,8 +654,8 @@ class SQLiteScriptStore(ScriptStore):
 
     def _patch_chunks_tx(self, conn, patches):
         if not patches:
-            return 0
-        updated = 0
+            return []
+        updated = []
         with conn:
             for patch in patches:
                 uid = patch["uid"]
@@ -412,6 +672,11 @@ class SQLiteScriptStore(ScriptStore):
                 if row is None:
                     continue
                 chunk = self._row_to_chunk(row)
+                expected = patch.get("expected") or {}
+                if any(chunk.get(field) != value for field, value in expected.items()):
+                    continue
+                for field in patch.get("clear_fields") or ():
+                    chunk.pop(field, None)
                 chunk.update(patch.get("fields") or {})
                 normalized = self._normalize_chunk(chunk, int(chunk.get("id") or row["ordinal"] or 0))
                 conn.execute(
@@ -444,12 +709,257 @@ class SQLiteScriptStore(ScriptStore):
                         uid,
                     ),
                 )
-                updated += 1
+                updated.append(self._row_to_chunk(conn.execute(
+                    """
+                    SELECT uid, ordinal, speaker, text, instruct, chapter, paragraph_id,
+                           chunk_type, silence_duration_s, status, audio_path,
+                           audio_validation_json, proofread_json, auto_regen_count,
+                           generation_token, extra_json
+                    FROM chunks WHERE uid = ?
+                    """,
+                    (uid,),
+                ).fetchone()))
             conn.execute(
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('last_write_at', ?)",
                 (str(time.time()),),
             )
         return updated
+
+    def _claim_generation_tx(self, conn, uids, token):
+        claimed = []
+        normalized = [str(uid).strip() for uid in (uids or []) if str(uid).strip()]
+        if not normalized:
+            return claimed
+        with conn:
+            for uid in normalized:
+                row = conn.execute(
+                    """
+                    SELECT uid, ordinal, speaker, text, instruct, chapter, paragraph_id,
+                           chunk_type, silence_duration_s, status, audio_path,
+                           audio_validation_json, proofread_json, auto_regen_count,
+                           generation_token, extra_json
+                    FROM chunks WHERE uid = ?
+                    """,
+                    (uid,),
+                ).fetchone()
+                if row is None:
+                    continue
+                chunk = self._row_to_chunk(row)
+                existing_token = chunk.get("generation_token")
+                if existing_token and existing_token != token:
+                    continue
+                chunk["status"] = "generating"
+                chunk["generation_token"] = token
+                normalized_chunk = self._normalize_chunk(chunk, chunk["id"])
+                conn.execute(
+                    """
+                    UPDATE chunks
+                    SET ordinal = ?, speaker = ?, text = ?, instruct = ?, chapter = ?,
+                        paragraph_id = ?, chunk_type = ?, silence_duration_s = ?, status = ?,
+                        audio_path = ?, audio_validation_json = ?, proofread_json = ?,
+                        auto_regen_count = ?, generation_token = ?, extra_json = ?
+                    WHERE uid = ?
+                    """,
+                    (
+                        normalized_chunk["id"],
+                        normalized_chunk.get("speaker"),
+                        normalized_chunk.get("text"),
+                        normalized_chunk.get("instruct"),
+                        normalized_chunk.get("chapter"),
+                        normalized_chunk.get("paragraph_id"),
+                        normalized_chunk.get("type"),
+                        normalized_chunk.get("silence_duration_s"),
+                        normalized_chunk.get("status"),
+                        normalized_chunk.get("audio_path"),
+                        json.dumps(normalized_chunk.get("audio_validation"), ensure_ascii=False)
+                        if normalized_chunk.get("audio_validation") is not None else None,
+                        json.dumps(normalized_chunk.get("proofread"), ensure_ascii=False)
+                        if normalized_chunk.get("proofread") is not None else None,
+                        int(normalized_chunk.get("auto_regen_count") or 0),
+                        normalized_chunk.get("generation_token"),
+                        self._encode_extra_json(normalized_chunk),
+                        uid,
+                    ),
+                )
+                claimed.append(normalized_chunk)
+            if claimed:
+                conn.execute(
+                    "INSERT OR REPLACE INTO metadata(key, value) VALUES('last_write_at', ?)",
+                    (str(time.time()),),
+                )
+        return claimed
+
+    def _reset_generation_tx(self, conn, uids, token=None, target_status="pending"):
+        updated = []
+        normalized = [str(uid).strip() for uid in (uids or []) if str(uid).strip()]
+        if not normalized:
+            return updated
+        with conn:
+            for uid in normalized:
+                row = conn.execute(
+                    """
+                    SELECT uid, ordinal, speaker, text, instruct, chapter, paragraph_id,
+                           chunk_type, silence_duration_s, status, audio_path,
+                           audio_validation_json, proofread_json, auto_regen_count,
+                           generation_token, extra_json
+                    FROM chunks WHERE uid = ?
+                    """,
+                    (uid,),
+                ).fetchone()
+                if row is None:
+                    continue
+                chunk = self._row_to_chunk(row)
+                if token is not None and chunk.get("generation_token") != token:
+                    continue
+                if chunk.get("status") != "generating" and token is not None:
+                    continue
+                chunk["status"] = target_status
+                chunk.pop("generation_token", None)
+                normalized_chunk = self._normalize_chunk(chunk, chunk["id"])
+                conn.execute(
+                    """
+                    UPDATE chunks
+                    SET ordinal = ?, speaker = ?, text = ?, instruct = ?, chapter = ?,
+                        paragraph_id = ?, chunk_type = ?, silence_duration_s = ?, status = ?,
+                        audio_path = ?, audio_validation_json = ?, proofread_json = ?,
+                        auto_regen_count = ?, generation_token = ?, extra_json = ?
+                    WHERE uid = ?
+                    """,
+                    (
+                        normalized_chunk["id"],
+                        normalized_chunk.get("speaker"),
+                        normalized_chunk.get("text"),
+                        normalized_chunk.get("instruct"),
+                        normalized_chunk.get("chapter"),
+                        normalized_chunk.get("paragraph_id"),
+                        normalized_chunk.get("type"),
+                        normalized_chunk.get("silence_duration_s"),
+                        normalized_chunk.get("status"),
+                        normalized_chunk.get("audio_path"),
+                        json.dumps(normalized_chunk.get("audio_validation"), ensure_ascii=False)
+                        if normalized_chunk.get("audio_validation") is not None else None,
+                        json.dumps(normalized_chunk.get("proofread"), ensure_ascii=False)
+                        if normalized_chunk.get("proofread") is not None else None,
+                        int(normalized_chunk.get("auto_regen_count") or 0),
+                        normalized_chunk.get("generation_token"),
+                        self._encode_extra_json(normalized_chunk),
+                        uid,
+                    ),
+                )
+                updated.append(normalized_chunk)
+            if updated:
+                conn.execute(
+                    "INSERT OR REPLACE INTO metadata(key, value) VALUES('last_write_at', ?)",
+                    (str(time.time()),),
+                )
+        return updated
+
+    def _prepare_chunk_for_regeneration_tx(self, conn, uid):
+        normalized = str(uid or "").strip()
+        if not normalized:
+            return None
+        result = self._patch_chunks_tx(conn, [{
+            "uid": normalized,
+            "expected": {},
+            "fields": {
+                "audio_path": None,
+                "audio_validation": None,
+                "status": "pending",
+                "auto_regen_count": 0,
+            },
+            "clear_fields": ["generation_token", "proofread"],
+        }])
+        return result[0] if result else None
+
+    def _delete_chunk_tx(self, conn, uid):
+        normalized = str(uid or "").strip()
+        if not normalized:
+            return None
+        with conn:
+            rows = conn.execute(
+                """
+                SELECT uid, ordinal, speaker, text, instruct, chapter, paragraph_id,
+                       chunk_type, silence_duration_s, status, audio_path,
+                       audio_validation_json, proofread_json, auto_regen_count,
+                       generation_token, extra_json
+                FROM chunks
+                ORDER BY ordinal ASC
+                """
+            ).fetchall()
+            chunks = [self._row_to_chunk(row) for row in rows]
+            target_index = next((i for i, chunk in enumerate(chunks) if chunk.get("uid") == normalized), None)
+            if target_index is None or len(chunks) <= 1:
+                return None
+            restore_after_uid = chunks[target_index - 1].get("uid") if target_index > 0 else None
+            deleted = chunks.pop(target_index)
+            conn.execute("DELETE FROM chunks")
+            for index, chunk in enumerate(chunks):
+                normalized_chunk = self._normalize_chunk(chunk, index)
+                conn.execute(
+                    """
+                    INSERT INTO chunks(
+                        uid, ordinal, speaker, text, instruct, chapter, paragraph_id,
+                        chunk_type, silence_duration_s, status, audio_path,
+                        audio_validation_json, proofread_json, auto_regen_count,
+                        generation_token, extra_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    self._chunk_to_params(normalized_chunk),
+                )
+            conn.execute(
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES('last_write_at', ?)",
+                (str(time.time()),),
+            )
+        return {
+            "deleted": deleted,
+            "restore_after_uid": restore_after_uid,
+            "total": len(chunks),
+        }
+
+    def _delete_chapter_tx(self, conn, chapter):
+        normalized = str(chapter or "").strip()
+        if not normalized:
+            return None
+        with conn:
+            rows = conn.execute(
+                """
+                SELECT uid, ordinal, speaker, text, instruct, chapter, paragraph_id,
+                       chunk_type, silence_duration_s, status, audio_path,
+                       audio_validation_json, proofread_json, auto_regen_count,
+                       generation_token, extra_json
+                FROM chunks
+                ORDER BY ordinal ASC
+                """
+            ).fetchall()
+            chunks = [self._row_to_chunk(row) for row in rows]
+            deleted = [chunk for chunk in chunks if str(chunk.get("chapter") or "").strip() == normalized]
+            if not deleted:
+                return None
+            keep = [chunk for chunk in chunks if str(chunk.get("chapter") or "").strip() != normalized]
+            conn.execute("DELETE FROM chunks")
+            for index, chunk in enumerate(keep):
+                normalized_chunk = self._normalize_chunk(chunk, index)
+                conn.execute(
+                    """
+                    INSERT INTO chunks(
+                        uid, ordinal, speaker, text, instruct, chapter, paragraph_id,
+                        chunk_type, silence_duration_s, status, audio_path,
+                        audio_validation_json, proofread_json, auto_regen_count,
+                        generation_token, extra_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    self._chunk_to_params(normalized_chunk),
+                )
+            conn.execute(
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES('last_write_at', ?)",
+                (str(time.time()),),
+            )
+        return {
+            "chapter": normalized,
+            "deleted": deleted,
+            "deleted_count": len(deleted),
+            "total": len(keep),
+        }
 
     def _chunk_to_params(self, chunk):
         return (
@@ -520,6 +1030,39 @@ class SQLiteScriptStore(ScriptStore):
             normalized["silence_duration_s"] = float(normalized["silence_duration_s"])
         return normalized
 
+    @staticmethod
+    def _chunk_audio_fingerprint(chunk):
+        validation = (chunk or {}).get("audio_validation") or {}
+        return "|".join([
+            str((chunk or {}).get("audio_path") or ""),
+            str(validation.get("file_size_bytes") or 0),
+            str(validation.get("actual_duration_sec") or 0),
+            str((chunk or {}).get("status") or ""),
+        ])
+
+    def _resolve_chunk_ref(self, chunk_ref):
+        base_ref = "" if chunk_ref is None else str(chunk_ref).strip()
+        if not base_ref:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT uid, ordinal FROM chunks WHERE uid = ?",
+                (base_ref,),
+            ).fetchone()
+            if row is not None:
+                return {"uid": row["uid"], "id": int(row["ordinal"] or 0)}
+            try:
+                numeric_ref = int(base_ref)
+            except (TypeError, ValueError):
+                return None
+            row = conn.execute(
+                "SELECT uid, ordinal FROM chunks WHERE ordinal = ?",
+                (numeric_ref,),
+            ).fetchone()
+            if row is not None:
+                return {"uid": row["uid"], "id": int(row["ordinal"] or 0)}
+        return None
+
     def _encode_extra_json(self, chunk):
         extra = {
             key: value
@@ -537,7 +1080,11 @@ class SQLiteScriptStore(ScriptStore):
             "reason": (payload or {}).get("reason"),
         }
         with self._log_lock:
-            os.makedirs(os.path.dirname(self.queue_log_path) or ".", exist_ok=True)
+            log_dir = os.path.dirname(self.queue_log_path) or "."
+            if not os.path.isdir(self.root_dir):
+                return
+            if log_dir and not os.path.isdir(log_dir):
+                return
             with open(self.queue_log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 

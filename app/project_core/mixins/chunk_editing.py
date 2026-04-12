@@ -189,25 +189,27 @@ class ProjectChunkEditingMixin:
 
         def delete_chunk(self, chunk_ref):
             """Delete a chunk at the given index. Returns (deleted_chunk, updated_chunks) or None."""
-            with self._chunks_lock:
-                chunks = self.load_chunks_raw()
-                if not isinstance(chunks, list) or not chunks:
-                    return None
-                index = self.resolve_chunk_index(chunk_ref, chunks)
-                if index is None or not (0 <= index < len(chunks)):
-                    return None
-                if len(chunks) <= 1:
-                    return None  # don't allow deleting the last chunk
+            deleted_files = []
+            result = self.delete_chunk_by_uid(
+                (self.get_chunk_raw(chunk_ref) or {}).get("uid")
+            )
+            if result is None:
+                return None
+            deleted = result.get("deleted") or {}
+            audio_path = (deleted.get("audio_path") or "").strip()
+            if audio_path:
+                deleted_files.append(audio_path)
 
-                restore_after_uid = chunks[index - 1].get("uid") if index > 0 else None
-                deleted = chunks.pop(index)
+            for relative_path in deleted_files:
+                full_ap = os.path.join(self.root_dir, relative_path)
+                if not os.path.exists(full_ap):
+                    continue
+                try:
+                    os.remove(full_ap)
+                except OSError:
+                    pass
 
-                # Re-number all IDs
-                for i, chunk in enumerate(chunks):
-                    chunk["id"] = i
-
-                self._atomic_json_write(chunks, self.chunks_path)
-                return deleted, chunks, restore_after_uid
+            return deleted, self.load_chunks_raw(), result.get("restore_after_uid")
 
         def delete_chapter(self, chapter_name):
             """Delete all chunks belonging to a chapter and remove their audio files.
@@ -216,33 +218,26 @@ class ProjectChunkEditingMixin:
             if not chapter_name or not isinstance(chapter_name, str) or not chapter_name.strip():
                 return None
             chapter_name = chapter_name.strip()
-            with self._chunks_lock:
-                chunks = self.load_chunks_raw()
-                if not chunks:
-                    return None
+            files_to_delete = []
+            result = self.delete_chapter_by_name(chapter_name)
+            if result is None:
+                return None
+            deleted = result.get("deleted") or []
+            for chunk in deleted:
+                ap = chunk.get("audio_path")
+                if ap:
+                    files_to_delete.append(ap)
 
-                deleted = [c for c in chunks if c.get("chapter") == chapter_name]
-                if not deleted:
-                    return None
-                keep = [c for c in chunks if c.get("chapter") != chapter_name]
+            for relative_path in files_to_delete:
+                full_ap = os.path.join(self.root_dir, relative_path)
+                if not os.path.exists(full_ap):
+                    continue
+                try:
+                    os.remove(full_ap)
+                except OSError:
+                    pass
 
-                # Re-number all IDs
-                for i, chunk in enumerate(keep):
-                    chunk["id"] = i
-
-                # Collect and delete audio files for deleted chunks
-                for chunk in deleted:
-                    ap = chunk.get("audio_path")
-                    if ap:
-                        full_ap = os.path.join(self.root_dir, ap)
-                        if os.path.exists(full_ap):
-                            try:
-                                os.remove(full_ap)
-                            except OSError:
-                                pass
-
-                self._atomic_json_write(keep, self.chunks_path)
-                return len(deleted), keep
+            return result.get("deleted_count"), self.load_chunks_raw()
 
         def restore_chunk(self, at_index, chunk_data, after_uid=None):
             """Re-insert a chunk at a specific index. Returns the updated chunk list."""
@@ -602,30 +597,18 @@ class ProjectChunkEditingMixin:
                 return chunk
 
         def prepare_chunk_for_regeneration(self, chunk_ref):
-            with self._chunks_lock:
-                chunks = self.load_chunks_raw()
-                if not chunks:
-                    return None
-                index = self.resolve_chunk_index(chunk_ref, chunks)
-                if index is None or not (0 <= index < len(chunks)):
-                    return None
-
-                chunk = chunks[index]
-                audio_path = (chunk.get("audio_path") or "").strip()
-                if audio_path:
-                    full_audio_path = os.path.join(self.root_dir, audio_path)
-                    if os.path.exists(full_audio_path):
-                        try:
-                            os.remove(full_audio_path)
-                        except OSError:
-                            pass
-
-                chunk["audio_path"] = None
-                chunk["audio_validation"] = None
-                chunk["status"] = "pending"
-                chunk["auto_regen_count"] = 0
-                chunk.pop("generation_token", None)
-                self._clear_proofread_state(chunk)
-                self._atomic_json_write(chunks, self.chunks_path)
-                self.clear_chunk_runtime(chunk.get("uid"))
-                return {"index": index, "chunk": chunk}
+            chunk = self.get_chunk_raw(chunk_ref)
+            if chunk is None:
+                return None
+            updated = self.prepare_chunk_for_regeneration_by_uid(chunk.get("uid"))
+            if updated is None:
+                return None
+            audio_path = (chunk.get("audio_path") or "").strip()
+            if audio_path:
+                full_audio_path = os.path.join(self.root_dir, audio_path)
+                if os.path.exists(full_audio_path):
+                    try:
+                        os.remove(full_audio_path)
+                    except OSError:
+                        pass
+            return {"index": updated.get("id"), "chunk": updated}

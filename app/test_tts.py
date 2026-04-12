@@ -5,6 +5,7 @@ import os
 import base64
 import io
 import wave
+import numpy as np
 
 from tts import TTSEngine
 
@@ -155,6 +156,26 @@ class LocalBackendResolutionTests(unittest.TestCase):
     def test_explicit_mlx_falls_back_to_qwen_off_apple_silicon(self, _mock_platform):
         engine = TTSEngine({"tts": {"mode": "local", "local_backend": "mlx"}})
         self.assertEqual(engine.local_backend, "qwen")
+
+
+class LocalBatchRegressionTests(unittest.TestCase):
+    def test_persist_batch_audio_outputs_marks_missing_outputs_as_failed(self):
+        engine = TTSEngine({"tts": {"mode": "local", "local_backend": "qwen"}})
+        results = {"completed": [], "failed": []}
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            duration = engine._persist_batch_audio_outputs(
+                [np.zeros(2400, dtype=np.float32)],
+                24000,
+                output_dir,
+                ["uid-1", "uid-2"],
+                results,
+            )
+
+            self.assertAlmostEqual(duration, 0.1, places=2)
+            self.assertEqual(results["completed"], ["uid-1"])
+            self.assertEqual(results["failed"], [("uid-2", "Batch returned 1/2 audio clips")])
+            self.assertTrue(os.path.exists(os.path.join(output_dir, "temp_batch_uid-1.wav")))
 
 if __name__ == "__main__":
     unittest.main()

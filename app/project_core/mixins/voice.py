@@ -50,6 +50,28 @@ from project_core.chunking import _coerce_bool, get_speaker, _is_structural_text
 
 class ProjectVoiceMixin:
         """Resolve speaker-to-voice mapping and manage voice-driven invalidation."""
+        def _script_voice_line_counts(self, script_entries=None):
+            counts = Counter()
+            voices_map = {}
+            entries = script_entries
+            if entries is None:
+                try:
+                    entries = load_script_document(self.script_path).get("entries", [])
+                except Exception:
+                    entries = []
+
+            for entry in entries or []:
+                speaker = (entry.get("speaker") or entry.get("type") or "").strip()
+                normalized = self._normalize_speaker_name(speaker)
+                if not normalized:
+                    continue
+                canonical_name = voices_map.get(normalized)
+                if not canonical_name:
+                    canonical_name = speaker
+                    voices_map[normalized] = canonical_name
+                counts[canonical_name] += 1
+            return counts
+
         @staticmethod
         def _paragraph_mentions_speaker(paragraph_text, speaker):
             normalized_paragraph = re.sub(r"\s+", " ", paragraph_text or "").casefold()
@@ -370,6 +392,7 @@ class ProjectVoiceMixin:
             state = self._load_state()
             state["narrator_threshold"] = parsed
             self._save_state(state)
+            self.refresh_auto_narrator_aliases()
             return parsed
 
         def get_narrator_overrides(self):
@@ -394,6 +417,73 @@ class ProjectVoiceMixin:
                 overrides.pop(chapter, None)
             state["narrator_overrides"] = overrides
             self._save_state(state)
+
+        def get_auto_narrator_aliases(self):
+            state = self._load_state()
+            aliases = state.get("auto_narrator_aliases", {})
+            return aliases if isinstance(aliases, dict) else {}
+
+        def compute_auto_narrator_aliases(
+            self,
+            voice_config=None,
+            script_entries=None,
+            line_counts=None,
+            narrator_name=None,
+        ):
+            voice_config = voice_config if isinstance(voice_config, dict) else self._load_voice_config()
+            if line_counts is None:
+                line_counts = self._script_voice_line_counts(script_entries)
+
+            threshold = self.get_narrator_threshold()
+            if threshold <= 0:
+                return {}
+
+            if narrator_name is None:
+                narrator_name = self._resolve_narrator_name(
+                    voice_config,
+                    [{"speaker": speaker} for speaker in line_counts.keys()],
+                )
+            if not narrator_name:
+                return {}
+
+            config_lookup = {
+                self._normalize_speaker_name(name): value
+                for name, value in (voice_config or {}).items()
+                if self._normalize_speaker_name(name)
+            }
+            aliases = {}
+            narrator_key = self._normalize_speaker_name("NARRATOR")
+            for speaker, count in (line_counts or {}).items():
+                if self._normalize_speaker_name(speaker) == narrator_key:
+                    continue
+                config = config_lookup.get(self._normalize_speaker_name(speaker), {})
+                if str((config or {}).get("alias") or "").strip():
+                    continue
+                try:
+                    parsed_count = int(count or 0)
+                except (TypeError, ValueError):
+                    parsed_count = 0
+                if parsed_count < threshold:
+                    aliases[speaker] = narrator_name
+            return aliases
+
+        def refresh_auto_narrator_aliases(
+            self,
+            voice_config=None,
+            script_entries=None,
+            line_counts=None,
+            narrator_name=None,
+        ):
+            aliases = self.compute_auto_narrator_aliases(
+                voice_config=voice_config,
+                script_entries=script_entries,
+                line_counts=line_counts,
+                narrator_name=narrator_name,
+            )
+            state = self._load_state()
+            state["auto_narrator_aliases"] = aliases
+            self._save_state(state)
+            return aliases
 
         @staticmethod
         def _count_speaker_lines(chunks, speaker):
@@ -420,7 +510,15 @@ class ProjectVoiceMixin:
                     return speaker
             return None
 
-        def resolve_voice_speaker(self, speaker, voice_config, chunks=None):
+        def resolve_voice_speaker(
+            self,
+            speaker,
+            voice_config,
+            chunks=None,
+            speaker_line_counts=None,
+            narrator_name=None,
+            auto_narrator_aliases=None,
+        ):
             """Resolve a speaker alias to a configured target speaker.
 
             Aliases are case-insensitive and can chain, but any invalid target,
@@ -464,27 +562,48 @@ class ProjectVoiceMixin:
             if manual_alias_used:
                 return resolved
 
+            alias_lookup = {}
+            for raw_speaker, raw_target in (
+                auto_narrator_aliases if isinstance(auto_narrator_aliases, dict) else self.get_auto_narrator_aliases()
+            ).items():
+                normalized_speaker = self._normalize_speaker_name(raw_speaker)
+                normalized_target = self._normalize_speaker_name(raw_target)
+                if normalized_speaker and normalized_target:
+                    alias_lookup[normalized_speaker] = raw_target
+
+            resolved_key = self._normalize_speaker_name(resolved)
+            stored_alias_target = alias_lookup.get(resolved_key)
+            if stored_alias_target and self._normalize_speaker_name(stored_alias_target) != resolved_key:
+                return stored_alias_target
+
+            if speaker_line_counts is None and not chunks:
+                return resolved
+
             threshold = self.get_narrator_threshold()
             if threshold <= 0:
                 return resolved
 
-            resolved_key = self._normalize_speaker_name(resolved)
             narrator_key = self._normalize_speaker_name("NARRATOR")
             if resolved_key == narrator_key:
                 return resolved
 
-            try:
-                chunk_list = chunks if chunks is not None else self.load_chunks()
-            except Exception:
-                chunk_list = []
-
-            narrator_name = self._resolve_narrator_name(voice_config, chunk_list)
+            if narrator_name is None:
+                try:
+                    chunk_list = chunks if chunks is not None else self.load_chunks()
+                except Exception:
+                    chunk_list = []
+                narrator_name = self._resolve_narrator_name(voice_config, chunk_list)
+            else:
+                chunk_list = chunks if chunks is not None else []
             if not narrator_name:
                 return resolved
             if self._normalize_speaker_name(narrator_name) == resolved_key:
                 return resolved
 
-            line_count = self._count_speaker_lines(chunk_list, resolved)
+            if speaker_line_counts is not None:
+                line_count = int(speaker_line_counts.get(resolved_key, 0) or 0)
+            else:
+                line_count = self._count_speaker_lines(chunk_list, resolved)
             if line_count < threshold:
                 return narrator_name
 
@@ -614,6 +733,7 @@ class ProjectVoiceMixin:
                 return {"status": "confirmation_required", **preview}
 
             self._save_voice_config(new_config)
+            self.refresh_auto_narrator_aliases(voice_config=new_config)
             if preview["invalidated_clips"] <= 0:
                 return {"status": "saved", "invalidated_clips": 0, "deleted_files": 0, **preview}
 

@@ -424,36 +424,40 @@ class ProjectProofreadASRMixin:
             return self._manually_mark_proofread_clip(chunk_ref, threshold, accept=False)
 
         def compare_proofread_clip(self, chunk_ref, threshold=1.0):
-            with self._chunks_lock:
-                chunks = self.load_chunks_raw()
-                if not chunks:
-                    return None
+            chunks = self.load_chunks_raw()
+            if not chunks:
+                return None
 
-                index = self.resolve_chunk_index(chunk_ref, chunks)
-                if index is None or not (0 <= index < len(chunks)):
-                    return None
+            index = self.resolve_chunk_index(chunk_ref, chunks)
+            if index is None or not (0 <= index < len(chunks)):
+                return None
 
-                chunk = chunks[index]
-                audio_path = (chunk.get("audio_path") or "").strip()
-                if not audio_path:
-                    raise ValueError("Cannot compare a clip with no audio.")
+            chunk = chunks[index]
+            uid = str(chunk.get("uid") or "").strip()
+            audio_path = (chunk.get("audio_path") or "").strip()
+            if not audio_path:
+                raise ValueError("Cannot compare a clip with no audio.")
 
-                full_audio_path = os.path.join(self.root_dir, audio_path)
-                if not os.path.exists(full_audio_path):
-                    raise ValueError("Cannot compare a clip whose audio file is missing.")
+            full_audio_path = os.path.join(self.root_dir, audio_path)
+            if not os.path.exists(full_audio_path):
+                raise ValueError("Cannot compare a clip whose audio file is missing.")
 
-                dictionary_entries = self.load_dictionary_entries()
-                voice_config = self._load_voice_config()
-                proofread_result = self._build_chunk_proofread_result(
-                    chunk,
-                    threshold=threshold,
-                    voice_config=voice_config,
-                    dictionary_entries=dictionary_entries,
-                    force_compare=True,
-                )
-                chunk["proofread"] = proofread_result
-                self._atomic_json_write(chunks, self.chunks_path)
-                return chunk
+            dictionary_entries = self.load_dictionary_entries()
+            voice_config = self._load_voice_config()
+            proofread_result = self._build_chunk_proofread_result(
+                chunk,
+                threshold=threshold,
+                voice_config=voice_config,
+                dictionary_entries=dictionary_entries,
+                force_compare=True,
+            )
+
+            self._commit_chunk_updates([{
+                "uid": uid,
+                "expected": {"audio_path": audio_path},
+                "fields": {"proofread": proofread_result},
+            }])
+            return self.get_chunk_view(uid)
 
         def discard_proofread_selection(self, chapter=None):
             with self._chunks_lock:

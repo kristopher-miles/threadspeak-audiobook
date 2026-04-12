@@ -1,7 +1,10 @@
 from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
 import urllib.parse
 from .. import shared as _shared
 from pydub import AudioSegment
+import json
+import queue as stdlib_queue
 
 globals().update({k: v for k, v in vars(_shared).items() if not k.startswith("__")})
 
@@ -31,6 +34,58 @@ def _export_download_basename():
         pass
     return "audiobook"
 
+
+def _normalize_editor_scope_mode(scope_mode: Optional[str]) -> str:
+    normalized = str(scope_mode or "project").strip().lower()
+    return normalized if normalized in {"chapter", "project"} else "project"
+
+
+def _resolve_batch_target_rows(request: BatchGenerateRequest, *, pending_only: Optional[bool] = None):
+    explicit_refs = list(request.indices or [])
+    if explicit_refs:
+        rows = []
+        seen = set()
+        for chunk_ref in explicit_refs:
+            chunk = project_manager.get_chunk_raw(chunk_ref)
+            if chunk is None:
+                continue
+            uid = str(chunk.get("uid") or "").strip()
+            if not uid or uid in seen or not (chunk.get("text") or "").strip():
+                continue
+            seen.add(uid)
+            rows.append(chunk)
+        return rows
+
+    scope_mode = _normalize_editor_scope_mode(request.scope_mode or request.scope)
+    chapter = (request.chapter or "").strip() or None
+    if pending_only is None:
+        pending_only = not bool(request.regenerate_all)
+    return project_manager.resolve_generation_targets(
+        scope_mode=scope_mode,
+        chapter=chapter,
+        pending_only=pending_only,
+    )
+
+
+def _audio_status_payload():
+    with audio_queue_lock:
+        _refresh_audio_process_state_locked()
+        return {
+            "running": bool(process_state["audio"].get("running")),
+            "logs": list(process_state["audio"].get("logs") or []),
+            "queue": list(process_state["audio"].get("queue") or []),
+            "current_job": dict(process_state["audio"].get("current_job") or {}) or None,
+            "recent_jobs": list(process_state["audio"].get("recent_jobs") or []),
+            "merge_running": bool(process_state["audio"].get("merge_running")),
+            "merge_progress": dict(process_state["audio"].get("merge_progress") or {}),
+            "metrics": dict(process_state["audio"].get("metrics") or {}),
+            "heartbeat": dict(process_state["audio"].get("heartbeat") or {}),
+        }
+
+
+def _sse_frame(event: str, payload: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
 @router.get("/api/audiobook")
 async def get_audiobook():
     if not os.path.exists(AUDIOBOOK_PATH):
@@ -51,12 +106,47 @@ async def get_chunks_view(chapter: Optional[str] = None):
     return project_manager.load_chunks_view(chapter=(chapter or "").strip() or None)
 
 
+@router.get("/api/chunks/chapters")
+async def get_chunk_chapters():
+    return {"chapters": project_manager.get_chapter_list()}
+
+
 @router.get("/api/chunks/{index}")
 async def get_chunk(index: str):
     chunk = project_manager.get_chunk_view(index)
     if chunk is None:
         raise HTTPException(status_code=404, detail="Invalid chunk id")
     return chunk
+
+
+@router.get("/api/chunks/{index}/audio")
+async def get_chunk_audio(index: str):
+    audio_ref = project_manager.get_chunk_audio_ref(index)
+    if audio_ref is None:
+        raise HTTPException(status_code=404, detail="Invalid chunk id")
+    return audio_ref
+
+
+@router.get("/api/editor/events")
+async def editor_events(chapter: Optional[str] = None, scope_mode: Optional[str] = None):
+    normalized_scope = _normalize_editor_scope_mode(scope_mode)
+    chapter_filter = (chapter or "").strip() if normalized_scope == "chapter" else None
+    subscriber = chunk_event_broker.subscribe(chapter=chapter_filter)
+
+    async def stream():
+        try:
+            yield _sse_frame("chapter_list_changed", {"chapters": project_manager.get_chapter_list()})
+            yield _sse_frame("audio_status", _audio_status_payload())
+            while True:
+                try:
+                    event, payload = await asyncio.to_thread(subscriber.get, True, 15.0)
+                    yield _sse_frame(event, payload)
+                except stdlib_queue.Empty:
+                    yield ": keepalive\n\n"
+        finally:
+            chunk_event_broker.unsubscribe(subscriber)
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 @router.post("/api/chunks/sync_from_script_if_stale")
@@ -150,14 +240,8 @@ async def reset_chunks_to_pending(request: BatchGenerateRequest):
             )
         _refresh_audio_process_state_locked(persist=True)
 
-    chunks = project_manager.load_chunks()
-    resolved = []
-    for ref in (request.indices or []):
-        idx = project_manager.resolve_chunk_index(ref, chunks)
-        if idx is not None and 0 <= idx < len(chunks):
-            resolved.append(idx)
-
-    reset_count = project_manager.force_reset_chunks_to_pending(resolved)
+    target_rows = _resolve_batch_target_rows(request, pending_only=False)
+    reset_count = project_manager.force_reset_chunks_to_pending([chunk.get("uid") for chunk in target_rows if chunk.get("uid")])
     return {"status": "ok", "reset": reset_count}
 
 
@@ -392,16 +476,15 @@ async def delete_chapter_endpoint(chapter_name: str):
 
 @router.post("/api/chunks/{index}/generate")
 async def generate_chunk_endpoint(index: str, background_tasks: BackgroundTasks):
-    chunks = project_manager.load_chunks()
-    resolved_index = project_manager.resolve_chunk_index(index, chunks)
-    if resolved_index is None or not (0 <= resolved_index < len(chunks)):
+    chunk = project_manager.get_chunk_raw(index)
+    if chunk is None:
         raise HTTPException(status_code=404, detail="Invalid chunk id")
-    if not chunks[resolved_index].get("text", "").strip():
+    if not chunk.get("text", "").strip():
         raise HTTPException(status_code=400, detail="Cannot generate audio for an empty line")
     return _enqueue_audio_job(
         "parallel",
-        [resolved_index],
-        label=f"Single chunk render ({resolved_index})",
+        [chunk.get("uid")],
+        label=f"Single chunk render ({chunk.get('id')})",
         scope="single_chunk",
     )
 
@@ -412,13 +495,12 @@ async def regenerate_chunk_endpoint(index: str, background_tasks: BackgroundTask
         raise HTTPException(status_code=404, detail="Invalid chunk id")
 
     chunk = prepared["chunk"]
-    resolved_index = prepared["index"]
     if not chunk.get("text", "").strip():
         raise HTTPException(status_code=400, detail="Cannot generate audio for an empty line")
     return _enqueue_audio_job(
         "parallel",
-        [resolved_index],
-        label=f"Single chunk regenerate ({resolved_index})",
+        [chunk.get("uid")],
+        label=f"Single chunk regenerate ({chunk.get('id')})",
         scope="single_chunk",
     )
 
@@ -1049,30 +1131,48 @@ async def delete_m4b_cover():
 @router.post("/api/generate_batch")
 async def generate_batch_endpoint(request: BatchGenerateRequest, background_tasks: BackgroundTasks):
     """Generate multiple chunks in parallel using configured worker count."""
-    indices = request.indices
-    if not indices:
-        raise HTTPException(status_code=400, detail="No chunk indices provided")
+    target_rows = _resolve_batch_target_rows(request)
+    target_uids = [chunk.get("uid") for chunk in target_rows if chunk.get("uid")]
+    if not target_uids:
+        raise HTTPException(status_code=400, detail="No non-empty chunks matched the requested scope")
     settings = _load_audio_worker_settings()
+    scope_mode = _normalize_editor_scope_mode(request.scope_mode or request.scope)
+    chapter = (request.chapter or "").strip() or None
+    default_label = request.label or (
+        f"{'Regenerate' if request.regenerate_all else 'Render pending'} "
+        f"{chapter if scope_mode == 'chapter' and chapter else 'project'}"
+    )
     return _enqueue_audio_job(
         "parallel",
-        indices,
-        label=request.label or f"Parallel render ({len(indices)} chunks)",
-        scope=request.scope or "custom",
+        target_uids,
+        label=default_label,
+        scope=request.scope or scope_mode,
+        scope_mode=scope_mode,
+        chapter=chapter,
     ) | {"workers": settings["workers"]}
 
 @router.post("/api/generate_batch_fast")
 async def generate_batch_fast_endpoint(request: BatchGenerateRequest, background_tasks: BackgroundTasks):
     """Generate multiple chunks using batch TTS API with single seed. Faster but less flexible.
     Requires custom Qwen3-TTS with /generate_batch endpoint."""
-    indices = request.indices
-    if not indices:
-        raise HTTPException(status_code=400, detail="No chunk indices provided")
+    target_rows = _resolve_batch_target_rows(request)
+    target_uids = [chunk.get("uid") for chunk in target_rows if chunk.get("uid")]
+    if not target_uids:
+        raise HTTPException(status_code=400, detail="No non-empty chunks matched the requested scope")
     settings = _load_audio_worker_settings()
+    scope_mode = _normalize_editor_scope_mode(request.scope_mode or request.scope)
+    chapter = (request.chapter or "").strip() or None
+    default_label = request.label or (
+        f"{'Batch regenerate' if request.regenerate_all else 'Batch render pending'} "
+        f"{chapter if scope_mode == 'chapter' and chapter else 'project'}"
+    )
     return _enqueue_audio_job(
         "batch_fast",
-        indices,
-        label=request.label or f"Batch render ({len(indices)} chunks)",
-        scope=request.scope or "custom",
+        target_uids,
+        label=default_label,
+        scope=request.scope or scope_mode,
+        scope_mode=scope_mode,
+        chapter=chapter,
     ) | {
         "batch_seed": settings["batch_seed"],
         "batch_size": settings["batch_size"],

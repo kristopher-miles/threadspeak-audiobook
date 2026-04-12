@@ -136,6 +136,7 @@ async def get_voices():
     # Parse voices directly from the current script (no stale cache)
     voices_list = []
     line_counts: dict[str, int] = {}
+    script_data = []
     if os.path.exists(SCRIPT_PATH):
         try:
             script_data = _load_project_script_document()["entries"]
@@ -198,6 +199,12 @@ async def get_voices():
     result = []
     chunks = project_manager.load_chunks()
     inferred_aliases = _infer_contained_name_aliases(voices_list, voice_config, line_counts, para_counts_by_norm)
+    auto_narrator_aliases = project_manager.refresh_auto_narrator_aliases(
+        voice_config=voice_config,
+        script_entries=script_data,
+        line_counts=line_counts,
+        narrator_name=narrator_name,
+    )
     for voice_name in voices_list:
         config_key = _find_config_key_case_insensitive(voice_config, voice_name)
         config = dict(voice_config.get(config_key, {}) if config_key else {})
@@ -206,14 +213,16 @@ async def get_voices():
             if inferred_alias:
                 config["alias"] = inferred_alias
         sample_suggestion = project_manager.suggest_design_sample_text(voice_name, chunks)
-        manual_alias = bool((config.get("alias") or "").strip())
         line_count = line_counts.get(voice_name, 0)
-        auto_narrator_alias = (
-            not manual_alias
-            and bool(narrator_name)
-            and _normalized_speaker(voice_name) != _normalized_speaker("NARRATOR")
-            and line_count < narrator_threshold
+        auto_alias_target = next(
+            (
+                target_name
+                for speaker_name, target_name in auto_narrator_aliases.items()
+                if _normalized_speaker(speaker_name) == _normalized_speaker(voice_name)
+            ),
+            "",
         )
+        auto_narrator_alias = bool(auto_alias_target)
         ref_audio = (config.get("ref_audio") or "").strip()
         ref_audio_path = os.path.join(ROOT_DIR, ref_audio) if ref_audio and not os.path.isabs(ref_audio) else ref_audio
         design_clone_loaded = bool(ref_audio and ref_audio_path and os.path.exists(ref_audio_path))
@@ -225,7 +234,7 @@ async def get_voices():
             "line_count": line_count,
             "paragraph_count": para_counts_by_norm.get(_normalized_speaker(voice_name), 0),
             "auto_narrator_alias": auto_narrator_alias,
-            "auto_alias_target": narrator_name if auto_narrator_alias else "",
+            "auto_alias_target": auto_alias_target,
         })
     return result
 

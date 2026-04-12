@@ -191,34 +191,23 @@ class ProjectRuntimeStateMixin:
                 self.flush_dirty_chunks(force=False)
 
         def _claim_chunk_generation(self, index, generation_token=None):
-            chunks = self.load_chunks_raw()
-            if not (0 <= index < len(chunks)):
+            chunk = self.get_chunk_raw(index)
+            if chunk is None:
                 return None
-            chunk = chunks[index]
-            uid = chunk.get("uid")
-            self.set_chunk_runtime(
-                uid,
-                status="generating",
-                generation_token=generation_token,
-                auto_regen_count=int(chunk.get("auto_regen_count") or 0),
-            )
-            return self._runtime_chunk_state(chunk)
+            claimed = self.claim_generation(chunk.get("uid"), generation_token)
+            return claimed if claimed is not None else None
 
         def _claim_chunks_generation(self, indices, generation_token=None):
-            claimed = 0
-            chunks = self.load_chunks_raw()
-            for index in indices:
-                if not (0 <= index < len(chunks)):
+            uids = []
+            for chunk_ref in indices or []:
+                chunk = self.get_chunk_raw(chunk_ref)
+                if chunk is None:
                     continue
-                chunk = chunks[index]
-                self.set_chunk_runtime(
-                    chunk.get("uid"),
-                    status="generating",
-                    generation_token=generation_token,
-                    auto_regen_count=int(chunk.get("auto_regen_count") or 0),
-                )
-                claimed += 1
-            return claimed
+                uid = str(chunk.get("uid") or "").strip()
+                if uid:
+                    uids.append(uid)
+            claimed = self.claim_generation_many(uids, generation_token)
+            return len(claimed or [])
 
         def _chunk_token_matches(self, chunks, index, generation_token=None):
             if generation_token is None:
@@ -228,25 +217,33 @@ class ProjectRuntimeStateMixin:
             return chunks[index].get("generation_token") == generation_token
 
         def chunk_has_generation_token(self, index, generation_token=None):
-            chunks = self.load_chunks_raw()
-            if not (0 <= index < len(chunks)):
+            chunk = self.get_chunk_raw(index)
+            if chunk is None:
                 return False
-            return self._chunk_token_matches_live(chunks[index], generation_token)
+            if generation_token is None:
+                return True
+            return chunk.get("generation_token") == generation_token
 
         def _update_chunk_fields_if_token(self, index, expected_token=None, **fields):
-            chunks = self.load_chunks_raw()
-            if not (0 <= index < len(chunks)):
+            chunk = self.get_chunk_raw(index)
+            if chunk is None:
                 return None
-            chunk = chunks[index]
-            if not self._chunk_token_matches_live(chunk, expected_token):
-                return None
-
-            runtime_fields = dict(fields)
-            if runtime_fields.get("status") != "generating" and "generation_token" not in runtime_fields:
-                runtime_fields["generation_token"] = None
-            runtime_chunk = self.set_chunk_runtime(chunk.get("uid"), **runtime_fields)
-            self.mark_chunks_dirty([chunk.get("uid")])
-            return self._merge_runtime_chunk(dict(chunk), runtime_chunk)
+            uid = chunk.get("uid")
+            update_fields = dict(fields)
+            clear_fields = []
+            if update_fields.get("status") != "generating" and "generation_token" not in update_fields:
+                clear_fields.append("generation_token")
+            expected = {}
+            if expected_token is not None:
+                expected["generation_token"] = expected_token
+            updated = self.patch_chunk_if(
+                uid,
+                expected=expected,
+                fields=update_fields,
+                clear_fields=clear_fields,
+                reason="_update_chunk_fields_if_token",
+            )
+            return updated
 
         def force_reset_chunks_to_pending(self, indices):
             """Force any chunk in `indices` to pending status regardless of current state.
@@ -256,47 +253,49 @@ class ProjectRuntimeStateMixin:
             Regenerate-All job is enqueued so the user gets instant feedback.
             """
             reset_count = 0
-            with self._chunks_lock:
-                chunks = self.load_chunks_raw()
-                for index in indices:
-                    if not (0 <= index < len(chunks)):
-                        continue
-                    chunk = chunks[index]
-                    chunk["status"] = "pending"
-                    chunk["audio_path"] = None
-                    chunk["audio_validation"] = None
-                    chunk.pop("generation_token", None)
-                    self._clear_proofread_state(chunk)
+            for chunk_ref in indices or []:
+                chunk = self.get_chunk_raw(chunk_ref)
+                if chunk is None:
+                    continue
+                updated = self.patch_chunk_if(
+                    chunk.get("uid"),
+                    fields={
+                        "status": "pending",
+                        "audio_path": None,
+                        "audio_validation": None,
+                        "auto_regen_count": 0,
+                    },
+                    clear_fields=["generation_token", "proofread"],
+                    reason="force_reset_chunks_to_pending",
+                )
+                if updated is not None:
                     self.clear_chunk_runtime(chunk.get("uid"))
                     reset_count += 1
-                if reset_count:
-                    self._atomic_json_write(chunks, self.chunks_path)
             return reset_count
 
         def reset_generating_chunks(self, indices=None, generation_token=None, target_status="pending"):
-            reset_count = 0
-            chunks = self.load_chunks_raw()
             if indices is None:
-                index_iter = range(len(chunks))
+                targets = [
+                    chunk.get("uid")
+                    for chunk in self.resolve_generation_targets(scope_mode="project", chapter=None, pending_only=False)
+                    if chunk.get("status") == "generating"
+                ]
             else:
-                index_iter = [index for index in indices if 0 <= index < len(chunks)]
-            for index in index_iter:
-                chunk = chunks[index]
-                live_chunk = self._runtime_chunk_state(chunk)
-                if live_chunk.get("status") != "generating":
-                    continue
-                if generation_token is not None and live_chunk.get("generation_token") != generation_token:
-                    continue
-                self.set_chunk_runtime(
-                    chunk.get("uid"),
-                    status=target_status,
-                    generation_token=None,
-                )
-                self.mark_chunks_dirty([chunk.get("uid")])
-                reset_count += 1
-            if reset_count:
-                self.flush_dirty_chunks(force=True)
-            return reset_count
+                targets = []
+                for chunk_ref in indices:
+                    chunk = self.get_chunk_raw(chunk_ref)
+                    if chunk is None:
+                        continue
+                    targets.append(chunk.get("uid"))
+            updated = self.reset_generation_rows(
+                targets,
+                token=generation_token,
+                target_status=target_status,
+                reason="reset_generating_chunks",
+            )
+            for chunk in updated or []:
+                self.clear_chunk_runtime(chunk.get("uid"))
+            return len(updated or [])
 
         def _runtime_chunk_state(self, chunk, runtime_chunk=None):
             runtime = runtime_chunk
@@ -397,6 +396,7 @@ class ProjectRuntimeStateMixin:
             temp_path = task["temp_path"]
             generation_token = task["generation_token"]
             fut = task["future"]
+            chunk_uid = task["chunk_uid"]
 
             try:
                 result = self._finalize_generated_audio(
@@ -416,7 +416,7 @@ class ProjectRuntimeStateMixin:
                     keep_token = False
 
                 updated_chunk = self._update_chunk_fields_if_token(
-                    index,
+                    chunk_uid,
                     generation_token,
                     audio_path=result["audio_path"],
                     audio_validation=result["audio_validation"],
@@ -433,14 +433,14 @@ class ProjectRuntimeStateMixin:
 
                 fut.set_result({
                     **result,
-                    "uid": task["chunk_uid"],
+                    "uid": chunk_uid,
                     "index": index,
                     "generation_token": generation_token,
                 })
             except Exception as e:
                 try:
                     self._update_chunk_fields_if_token(
-                        index,
+                        chunk_uid,
                         generation_token,
                         status="error",
                         audio_validation=None,

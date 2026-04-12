@@ -25,6 +25,7 @@ import uuid
 import urllib.request
 import urllib.error
 from openai import OpenAI
+from chunk_events import chunk_event_broker
 
 # Import ProjectManager
 from project import ProjectManager
@@ -742,9 +743,12 @@ class RenderPrepStateRequest(BaseModel):
     complete: bool = True
 
 class BatchGenerateRequest(BaseModel):
-    indices: List[Union[str, int]]
+    indices: List[Union[str, int]] = []
     label: Optional[str] = None
     scope: Optional[str] = None
+    scope_mode: Optional[str] = None
+    chapter: Optional[str] = None
+    regenerate_all: bool = False
 
 
 class DictionaryEntry(BaseModel):
@@ -1256,7 +1260,38 @@ def _recompute_audio_metrics_locked():
         metrics["error_rate"] = 0.0
 
 
+def _job_uids(job):
+    if not job:
+        return []
+    return [str(uid).strip() for uid in (job.get("uids") or job.get("indices") or []) if str(uid).strip()]
+
+
+def _job_pending_uids(job):
+    if not job:
+        return []
+    return [str(uid).strip() for uid in (job.get("pending_uids") or job.get("pending_indices") or []) if str(uid).strip()]
+
+
+def _job_word_counts(job):
+    raw = job.get("word_counts_by_uid")
+    if raw is None:
+        raw = job.get("word_counts") or {}
+    return {str(uid).strip(): int(count or 0) for uid, count in dict(raw).items() if str(uid).strip()}
+
+
+def _resolve_uid_ordinals(uids):
+    rows = project_manager.get_chunks_by_uids(uids)
+    return {
+        str((row or {}).get("uid") or "").strip(): int((row or {}).get("id") or 0)
+        for row in rows
+        if str((row or {}).get("uid") or "").strip()
+    }
+
+
 def _serialize_audio_job(job):
+    uids = _job_uids(job)
+    pending_uids = _job_pending_uids(job)
+    ordinals = _resolve_uid_ordinals(uids) if uids else {}
     return {
         "id": job["id"],
         "corr_id": job.get("corr_id"),
@@ -1264,13 +1299,17 @@ def _serialize_audio_job(job):
         "status": job["status"],
         "label": job["label"],
         "scope": job["scope"],
-        "indices": list(job["indices"]),
+        "scope_mode": job.get("scope_mode"),
+        "chapter": job.get("chapter"),
+        "uids": uids,
+        "pending_uids": pending_uids,
+        "indices": [ordinals[uid] for uid in uids if uid in ordinals],
         "total_chunks": job["total_chunks"],
         "total_words": job.get("total_words", 0),
         "remaining_words": job.get("remaining_words", 0),
         "processed_clips": job.get("processed_clips", 0),
         "error_clips": job.get("error_clips", 0),
-        "pending_indices": list(job.get("pending_indices", [])),
+        "pending_indices": [ordinals[uid] for uid in pending_uids if uid in ordinals],
         "recovery_count": job.get("recovery_count", 0),
         "queued_at": job["queued_at"],
         "started_at": job.get("started_at"),
@@ -2196,8 +2235,8 @@ def _persist_audio_queue_state_locked():
 
     payload = {
         "job_counter": audio_job_counter,
-        "queue": [_serialize_audio_job(job) | {"word_counts": job.get("word_counts", {})} for job in audio_queue],
-        "current_job": (_serialize_audio_job(audio_current_job) | {"word_counts": audio_current_job.get("word_counts", {})}) if audio_current_job else None,
+        "queue": [_serialize_audio_job(job) | {"word_counts_by_uid": _job_word_counts(job)} for job in audio_queue],
+        "current_job": (_serialize_audio_job(audio_current_job) | {"word_counts_by_uid": _job_word_counts(audio_current_job)}) if audio_current_job else None,
         "metrics": _format_audio_metrics_locked(),
         "heartbeat": _format_audio_heartbeat_locked(),
         "updated_at": time.time(),
@@ -2217,6 +2256,16 @@ def _refresh_audio_process_state_locked(persist=False):
     process_state["audio"]["merge_progress"] = dict(process_state["audio"].get("merge_progress") or _new_audio_merge_progress())
     if persist:
         _persist_audio_queue_state_locked()
+    chunk_event_broker.publish("audio_status", {
+        "running": process_state["audio"]["running"],
+        "queue": list(process_state["audio"]["queue"]),
+        "current_job": dict(process_state["audio"]["current_job"]) if process_state["audio"]["current_job"] else None,
+        "recent_jobs": list(process_state["audio"].get("recent_jobs") or []),
+        "metrics": dict(process_state["audio"]["metrics"]),
+        "heartbeat": dict(process_state["audio"]["heartbeat"]),
+        "merge_running": bool(process_state["audio"].get("merge_running")),
+        "merge_progress": dict(process_state["audio"].get("merge_progress") or {}),
+    })
 
 
 def _write_audio_cancel_tombstone_locked(reason, job=None):
@@ -2249,7 +2298,7 @@ def _hard_wipe_audio_runtime_locked(reason):
     reset_count = 0
     if active_job is not None:
         reset_count = project_manager.reset_generating_chunks(
-            indices=active_job.get("indices"),
+            indices=_job_uids(active_job),
             generation_token=active_job.get("run_token"),
         )
     else:
@@ -2321,7 +2370,7 @@ def _record_audio_recent_job_locked(job):
     del process_state["audio"]["recent_jobs"][10:]
 
 
-def _record_audio_sample_locked(job, chunk_index, elapsed_seconds, input_words, output_words, success):
+def _record_audio_sample_locked(job, chunk_uid, elapsed_seconds, input_words, output_words, success):
     metrics = process_state["audio"]["metrics"]
     # Older refresh paths may have serialized metrics without the rolling sample
     # buffer. Recreate it so timing estimates continue updating instead of
@@ -2330,7 +2379,7 @@ def _record_audio_sample_locked(job, chunk_index, elapsed_seconds, input_words, 
     now = time.time()
     sample = {
         "job_id": job["id"],
-        "chunk_index": chunk_index,
+        "chunk_uid": chunk_uid,
         "elapsed_seconds": max(0.0, float(elapsed_seconds)),
         "input_words": max(0, int(input_words)),
         "output_words": max(0, int(output_words)),
@@ -2356,8 +2405,10 @@ def _record_audio_sample_locked(job, chunk_index, elapsed_seconds, input_words, 
         metrics["error_clips"] += 1
 
     job["processed_clips"] = job.get("processed_clips", 0) + 1
-    if chunk_index in job.get("pending_indices", []):
-        job["pending_indices"].remove(chunk_index)
+    pending_uids = _job_pending_uids(job)
+    if chunk_uid in pending_uids:
+        pending_uids.remove(chunk_uid)
+        job["pending_uids"] = pending_uids
     if not success:
         job["error_clips"] = job.get("error_clips", 0) + 1
     job["remaining_words"] = max(0, job.get("remaining_words", 0) - sample["input_words"])
@@ -2366,18 +2417,84 @@ def _record_audio_sample_locked(job, chunk_index, elapsed_seconds, input_words, 
     _recompute_audio_metrics_locked()
 
 
-def _restore_job_progress_from_chunks(raw_job, chunks):
-    indices = [int(idx) for idx in raw_job.get("indices", [])]
-    word_counts = {int(k): int(v) for k, v in (raw_job.get("word_counts") or {}).items()}
-    dictionary_entries = project_manager.load_dictionary_entries()
+def _restore_job_progress_from_chunks(raw_job, chunks=None):
+    if chunks is not None and not raw_job.get("uids") and not raw_job.get("pending_uids") and not raw_job.get("word_counts_by_uid"):
+        legacy_indices = [int(idx) for idx in (raw_job.get("indices") or []) if str(idx).strip()]
+        reconciled_indices = [idx for idx in legacy_indices if 0 <= idx < len(chunks)]
+        word_counts = {
+            str(idx): int(value or 0)
+            for idx, value in dict(raw_job.get("word_counts") or {}).items()
+            if str(idx).strip()
+        }
+        dictionary_entries = project_manager.load_dictionary_entries()
+        pending_indices = []
+        processed_clips = 0
+        error_clips = 0
 
-    reconciled_indices = [idx for idx in indices if 0 <= idx < len(chunks)]
-    pending_indices = []
+        for idx in reconciled_indices:
+            chunk = chunks[idx]
+            status = chunk.get("status")
+            if status == "done":
+                processed_clips += 1
+                continue
+
+            validation = project_manager._validate_chunk_audio(chunk, dictionary_entries)
+            if validation and validation.get("is_valid"):
+                processed_clips += 1
+                chunk["status"] = "done"
+                chunk["audio_validation"] = validation
+                chunk["auto_regen_count"] = 0
+                continue
+
+            if status == "error":
+                processed_clips += 1
+                error_clips += 1
+                continue
+
+            pending_indices.append(idx)
+
+        total_words = sum(word_counts.get(str(idx), 0) for idx in reconciled_indices)
+        remaining_words = sum(word_counts.get(str(idx), 0) for idx in pending_indices)
+        return {
+            "indices": reconciled_indices,
+            "pending_indices": pending_indices,
+            "word_counts": word_counts,
+            "total_chunks": len(reconciled_indices),
+            "total_words": total_words,
+            "remaining_words": remaining_words,
+            "processed_clips": processed_clips,
+            "error_clips": error_clips,
+        }
+
+    uids = _job_uids(raw_job)
+    if not uids:
+        legacy_indices = [idx for idx in (raw_job.get("indices") or [])]
+        resolved_uids = []
+        for chunk_ref in legacy_indices:
+            chunk = project_manager.get_chunk_raw(chunk_ref)
+            if chunk is None:
+                continue
+            uid = str(chunk.get("uid") or "").strip()
+            if uid:
+                resolved_uids.append(uid)
+        uids = resolved_uids
+
+    word_counts = _job_word_counts(raw_job)
+    dictionary_entries = project_manager.load_dictionary_entries()
+    chunks = project_manager.get_chunks_by_uids(uids)
+    chunks_by_uid = {
+        str((chunk or {}).get("uid") or "").strip(): chunk
+        for chunk in chunks
+        if str((chunk or {}).get("uid") or "").strip()
+    }
+
+    reconciled_uids = [uid for uid in uids if uid in chunks_by_uid]
+    pending_uids = []
     processed_clips = 0
     error_clips = 0
 
-    for idx in reconciled_indices:
-        chunk = chunks[idx]
+    for uid in reconciled_uids:
+        chunk = chunks_by_uid[uid]
         status = chunk.get("status")
         if status == "done":
             processed_clips += 1
@@ -2397,16 +2514,16 @@ def _restore_job_progress_from_chunks(raw_job, chunks):
             error_clips += 1
             continue
 
-        pending_indices.append(idx)
+        pending_uids.append(uid)
 
-    total_words = sum(word_counts.get(idx, 0) for idx in reconciled_indices)
-    remaining_words = sum(word_counts.get(idx, 0) for idx in pending_indices)
+    total_words = sum(word_counts.get(uid, 0) for uid in reconciled_uids)
+    remaining_words = sum(word_counts.get(uid, 0) for uid in pending_uids)
 
     return {
-        "indices": reconciled_indices,
-        "pending_indices": pending_indices,
-        "word_counts": word_counts,
-        "total_chunks": len(reconciled_indices),
+        "uids": reconciled_uids,
+        "pending_uids": pending_uids,
+        "word_counts_by_uid": word_counts,
+        "total_chunks": len(reconciled_uids),
         "total_words": total_words,
         "remaining_words": remaining_words,
         "processed_clips": processed_clips,
@@ -2454,7 +2571,7 @@ def _load_audio_worker_settings():
     }
 
 
-def _enqueue_audio_job(kind, indices, label=None, scope=None):
+def _enqueue_audio_job(kind, indices, label=None, scope=None, scope_mode=None, chapter=None):
     global audio_job_counter
 
     with audio_queue_condition:
@@ -2465,28 +2582,36 @@ def _enqueue_audio_job(kind, indices, label=None, scope=None):
             process_state["audio"]["recent_jobs"] = []
             process_state["audio"]["metrics"] = _new_audio_metrics()
 
-        chunks = project_manager.load_chunks()
-        valid_indices = []
-        word_counts = {}
+        valid_rows = []
+        seen_uids = set()
         for chunk_ref in indices:
-            idx = project_manager.resolve_chunk_index(chunk_ref, chunks)
-            if idx is not None and 0 <= idx < len(chunks):
-                text = chunks[idx].get("text", "")
-                if text and text.strip():
-                    valid_indices.append(idx)
-                    word_counts[idx] = _count_words(text)
-        if not valid_indices:
+            chunk = project_manager.get_chunk_raw(chunk_ref)
+            if chunk is None:
+                continue
+            uid = str(chunk.get("uid") or "").strip()
+            text = chunk.get("text", "")
+            if not uid or uid in seen_uids or not text or not text.strip():
+                continue
+            seen_uids.add(uid)
+            valid_rows.append(chunk)
+        if not valid_rows:
             _append_audio_log_locked("[QUEUE] Rejecting enqueue request: no valid non-empty indices after resolution.")
             raise HTTPException(status_code=400, detail="No non-empty chunk indices provided")
+        valid_uids = [chunk.get("uid") for chunk in valid_rows]
+        word_counts = {
+            chunk.get("uid"): _count_words(chunk.get("text", ""))
+            for chunk in valid_rows
+            if chunk.get("uid")
+        }
 
         job = {
             "id": audio_job_counter,
             "corr_id": f"audio-{audio_job_counter:05d}-{uuid.uuid4().hex[:8]}",
             "kind": kind,
-            "indices": valid_indices,
-            "pending_indices": list(valid_indices),
-            "word_counts": word_counts,
-            "total_chunks": len(valid_indices),
+            "uids": valid_uids,
+            "pending_uids": list(valid_uids),
+            "word_counts_by_uid": word_counts,
+            "total_chunks": len(valid_uids),
             "total_words": sum(word_counts.values()),
             "remaining_words": sum(word_counts.values()),
             "processed_clips": 0,
@@ -2494,6 +2619,8 @@ def _enqueue_audio_job(kind, indices, label=None, scope=None):
             "recovery_count": 0,
             "label": label or f"Audio Job {audio_job_counter}",
             "scope": scope or "custom",
+            "scope_mode": scope_mode,
+            "chapter": chapter,
             "status": "queued",
             "queued_at": time.time(),
             "started_at": None,
@@ -2520,24 +2647,25 @@ def _enqueue_audio_job(kind, indices, label=None, scope=None):
         }
 
 
-def _clone_audio_job_for_retry(job, pending_indices, reason):
+def _clone_audio_job_for_retry(job, pending_uids, reason):
     global audio_job_counter
 
-    pending_indices = [idx for idx in pending_indices if idx in job.get("word_counts", {})]
-    if not pending_indices:
+    word_counts_by_uid = _job_word_counts(job)
+    pending_uids = [uid for uid in pending_uids if uid in word_counts_by_uid]
+    if not pending_uids:
         return None
 
     audio_job_counter += 1
-    word_counts = {idx: job["word_counts"][idx] for idx in pending_indices if idx in job["word_counts"]}
+    word_counts = {uid: word_counts_by_uid[uid] for uid in pending_uids if uid in word_counts_by_uid}
     retry_count = job.get("recovery_count", 0) + 1
     return {
         "id": audio_job_counter,
         "corr_id": f"audio-{audio_job_counter:05d}-{uuid.uuid4().hex[:8]}",
         "kind": job["kind"],
-        "indices": list(pending_indices),
-        "pending_indices": list(pending_indices),
-        "word_counts": word_counts,
-        "total_chunks": len(pending_indices),
+        "uids": list(pending_uids),
+        "pending_uids": list(pending_uids),
+        "word_counts_by_uid": word_counts,
+        "total_chunks": len(pending_uids),
         "total_words": sum(word_counts.values()),
         "remaining_words": sum(word_counts.values()),
         "processed_clips": 0,
@@ -2545,6 +2673,8 @@ def _clone_audio_job_for_retry(job, pending_indices, reason):
         "recovery_count": retry_count,
         "label": f"{job['label']} (resume {retry_count})",
         "scope": job["scope"],
+        "scope_mode": job.get("scope_mode"),
+        "chapter": job.get("chapter"),
         "status": "queued",
         "queued_at": time.time(),
         "started_at": None,
@@ -2598,10 +2728,8 @@ def _restore_audio_queue_state():
     # server was down), discard the stale queue state rather than resuming generation
     # against a non-existent or empty project.
     try:
-        preloaded_chunks = project_manager.load_chunks()
-        has_valid_chunks = any(c.get("text") or c.get("voice") for c in preloaded_chunks)
+        has_valid_chunks = project_manager.has_substantive_chunks()
     except Exception:
-        preloaded_chunks = []
         has_valid_chunks = False
 
     if not has_valid_chunks:
@@ -2615,7 +2743,6 @@ def _restore_audio_queue_state():
     with audio_queue_condition:
         project_manager.recover_interrupted_generating_chunks()
         project_manager.reconcile_chunk_audio_states()
-        chunks = preloaded_chunks
         process_state["audio"]["metrics"] = _new_audio_metrics()
         process_state["audio"]["heartbeat"] = _new_audio_heartbeat_state()
         process_state["audio"]["logs"] = []
@@ -2631,16 +2758,16 @@ def _restore_audio_queue_state():
 
         restored_jobs = []
         for raw_job in payload.get("queue", []):
-            progress = _restore_job_progress_from_chunks(raw_job, chunks)
-            if not progress["pending_indices"]:
+            progress = _restore_job_progress_from_chunks(raw_job)
+            if not progress["pending_uids"]:
                 continue
             restored_jobs.append({
                 "id": int(raw_job.get("id", 0) or 0),
                 "corr_id": (raw_job.get("corr_id") or f"audio-{int(raw_job.get('id', 0) or 0):05d}-{uuid.uuid4().hex[:8]}"),
                 "kind": raw_job.get("kind", "parallel"),
-                "indices": progress["indices"],
-                "pending_indices": progress["pending_indices"],
-                "word_counts": progress["word_counts"],
+                "uids": progress["uids"],
+                "pending_uids": progress["pending_uids"],
+                "word_counts_by_uid": progress["word_counts_by_uid"],
                 "total_chunks": progress["total_chunks"],
                 "total_words": progress["total_words"],
                 "remaining_words": progress["remaining_words"],
@@ -2649,6 +2776,8 @@ def _restore_audio_queue_state():
                 "recovery_count": int(raw_job.get("recovery_count", 0) or 0),
                 "label": raw_job.get("label", "Recovered audio job"),
                 "scope": raw_job.get("scope", "custom"),
+                "scope_mode": raw_job.get("scope_mode"),
+                "chapter": raw_job.get("chapter"),
                 "status": "queued",
                 "queued_at": time.time(),
                 "started_at": None,
@@ -2660,15 +2789,15 @@ def _restore_audio_queue_state():
         raw_current = payload.get("current_job")
         resumed_job = None
         if raw_current:
-            progress = _restore_job_progress_from_chunks(raw_current, chunks)
-            if progress["pending_indices"]:
+            progress = _restore_job_progress_from_chunks(raw_current)
+            if progress["pending_uids"]:
                 resumed_job = {
                     "id": int(raw_current.get("id", 0) or 0),
                     "corr_id": (raw_current.get("corr_id") or f"audio-{int(raw_current.get('id', 0) or 0):05d}-{uuid.uuid4().hex[:8]}"),
                     "kind": raw_current.get("kind", "parallel"),
-                    "indices": progress["indices"],
-                    "pending_indices": progress["pending_indices"],
-                    "word_counts": progress["word_counts"],
+                    "uids": progress["uids"],
+                    "pending_uids": progress["pending_uids"],
+                    "word_counts_by_uid": progress["word_counts_by_uid"],
                     "total_chunks": progress["total_chunks"],
                     "total_words": progress["total_words"],
                     "remaining_words": progress["remaining_words"],
@@ -2677,6 +2806,8 @@ def _restore_audio_queue_state():
                     "recovery_count": int(raw_current.get("recovery_count", 0) or 0) + 1,
                     "label": f"{raw_current.get('label', 'Recovered audio job')} (resumed after restart)",
                     "scope": raw_current.get("scope", "custom"),
+                    "scope_mode": raw_current.get("scope_mode"),
+                    "chapter": raw_current.get("chapter"),
                     "status": "queued",
                     "queued_at": time.time(),
                     "started_at": None,
@@ -2686,13 +2817,10 @@ def _restore_audio_queue_state():
                 }
                 restored_jobs.insert(0, resumed_job)
                 _append_audio_log_locked(
-                    f"[RECOVER] Restored interrupted job from disk with {len(progress['pending_indices'])} pending chunk(s)"
+                    f"[RECOVER] Restored interrupted job from disk with {len(progress['pending_uids'])} pending chunk(s)"
                 )
 
         audio_queue[:] = restored_jobs
-        if restored_jobs:
-            # Persist any status repairs made while reconciling/restoring.
-            project_manager.save_chunks(chunks)
         _seed_audio_metrics_from_jobs_locked(*restored_jobs)
         if restored_jobs:
             _refresh_audio_process_state_locked(persist=True)
@@ -2725,8 +2853,8 @@ def _perform_audio_recovery_locked(job, run_token, reason):
     if audio_current_job["id"] != job["id"] or audio_current_job.get("run_token") != run_token:
         return False
 
-    pending_indices = list(job.get("pending_indices", []))
-    project_manager.reset_generating_chunks(indices=job.get("indices"), generation_token=run_token)
+    pending_uids = list(_job_pending_uids(job))
+    project_manager.reset_generating_chunks(indices=_job_uids(job), generation_token=run_token)
 
     job["status"] = "stalled"
     job["finished_at"] = time.time()
@@ -2737,11 +2865,11 @@ def _perform_audio_recovery_locked(job, run_token, reason):
     heartbeat["last_recovery_reason"] = reason
     heartbeat["recovery_count"] += 1
 
-    retry_job = _clone_audio_job_for_retry(job, pending_indices, reason)
+    retry_job = _clone_audio_job_for_retry(job, pending_uids, reason)
     if retry_job is not None:
         audio_queue.insert(0, retry_job)
         _append_audio_log_locked(
-            f"[RECOVER] Re-queued {len(retry_job['indices'])} stalled chunk(s) from job #{job['id']} ({job.get('corr_id')}) to the front of the queue as #{retry_job['id']} ({retry_job.get('corr_id')})"
+            f"[RECOVER] Re-queued {len(retry_job['uids'])} stalled chunk(s) from job #{job['id']} ({job.get('corr_id')}) to the front of the queue as #{retry_job['id']} ({retry_job.get('corr_id')})"
         )
     else:
         _append_audio_log_locked(f"[RECOVER] No remaining chunks to re-queue for job #{job['id']} ({job.get('corr_id')})")
@@ -2767,10 +2895,10 @@ def _abandon_audio_job_locked(job, run_token, reason, *, status="cancelled"):
         return False
 
     _append_audio_log_locked(
-        f"[CANCEL] Abandoning job #{job['id']} ({job.get('corr_id')}) status={status} reason='{reason}' run_token={run_token} pending={len(job.get('pending_indices', []))}"
+        f"[CANCEL] Abandoning job #{job['id']} ({job.get('corr_id')}) status={status} reason='{reason}' run_token={run_token} pending={len(_job_pending_uids(job))}"
     )
     reset_count = project_manager.reset_generating_chunks(
-        indices=job.get("indices"),
+        indices=_job_uids(job),
         generation_token=run_token,
     )
     job["status"] = status
@@ -2793,7 +2921,7 @@ def _abandon_audio_job_locked(job, run_token, reason, *, status="cancelled"):
 
 def _audio_job_runner(job, settings, run_token, result_holder, done_event):
     job_prefix = f"[JOB {job['id']}|{job.get('corr_id', 'no-cid')}]"
-    execution_indices = list(job.get("pending_indices") or job.get("indices") or [])
+    execution_uids = list(_job_pending_uids(job) or _job_uids(job))
 
     def is_active():
         with audio_queue_lock:
@@ -2809,11 +2937,11 @@ def _audio_job_runner(job, settings, run_token, result_holder, done_event):
                 f"{job_prefix} Progress: {completed + failed}/{total} ({completed} done, {failed} failed)"
             )
 
-    def item_callback(idx, success, elapsed_seconds, input_words, output_words):
+    def item_callback(uid, success, elapsed_seconds, input_words, output_words):
         with audio_queue_lock:
             if not is_active():
                 return
-            _record_audio_sample_locked(job, idx, elapsed_seconds, input_words, output_words, success)
+            _record_audio_sample_locked(job, uid, elapsed_seconds, input_words, output_words, success)
             _refresh_audio_process_state_locked(persist=True)
 
     def cancel_check():
@@ -2825,7 +2953,7 @@ def _audio_job_runner(job, settings, run_token, result_holder, done_event):
     try:
         if job["kind"] == "parallel":
             result_holder["results"] = project_manager.generate_chunks_parallel(
-                execution_indices,
+                execution_uids,
                 settings["workers"],
                 progress_callback,
                 cancel_check=cancel_check,
@@ -2834,7 +2962,7 @@ def _audio_job_runner(job, settings, run_token, result_holder, done_event):
             )
         else:
             result_holder["results"] = project_manager.generate_chunks_batch(
-                execution_indices,
+                execution_uids,
                 settings["batch_seed"],
                 settings["batch_size"],
                 progress_callback,
@@ -2854,17 +2982,17 @@ def _prepare_job_indices_for_execution_locked(job, settings):
     if tts_cfg.get("mode") != "external":
         return
 
-    chunks = project_manager.load_chunks()
+    chunks = project_manager.get_chunks_by_uids(_job_uids(job))
     if not chunks:
         return
 
-    reordered = project_manager.group_indices_by_resolved_speaker(job.get("indices", []), chunks=chunks)
-    if reordered == job.get("indices", []):
+    reordered = project_manager.group_indices_by_resolved_speaker(_job_uids(job), chunks=chunks)
+    if reordered == _job_uids(job):
         return
 
-    pending_lookup = set(job.get("pending_indices", []))
-    job["indices"] = reordered
-    job["pending_indices"] = [idx for idx in reordered if idx in pending_lookup]
+    pending_lookup = set(_job_pending_uids(job))
+    job["uids"] = reordered
+    job["pending_uids"] = [uid for uid in reordered if uid in pending_lookup]
     _append_audio_log_locked(
         f"[JOB {job['id']}] Reordered external job by speaker for clone/cache locality"
     )

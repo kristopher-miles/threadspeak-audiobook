@@ -44,12 +44,18 @@ from script_store import (
     apply_dictionary_to_text,
     load_script_document,
 )
+from chunk_events import chunk_event_broker
 from source_document import load_source_document, iter_document_paragraphs
 from project_core.constants import *
 from project_core.chunking import _coerce_bool, get_speaker, _is_structural_text, _extract_chapter_name, _build_chunk, group_into_chunks, script_entries_to_chunks
 
 class ProjectChunkStoreMixin:
         """Provide durable chunk storage and integrity/recovery helpers."""
+        @staticmethod
+        def _normalize_scope_mode(scope_mode):
+            normalized = str(scope_mode or "project").strip().lower()
+            return normalized if normalized in {"chapter", "project"} else "project"
+
         @staticmethod
         def _new_chunk_uid():
             return uuid.uuid4().hex
@@ -158,6 +164,53 @@ class ProjectChunkStoreMixin:
         def load_chunks(self, chapter=None):
             return self.load_chunks_raw(chapter=chapter)
 
+        def get_chunk_raw(self, chunk_ref):
+            return self.script_store.get_chunk(chunk_ref)
+
+        def get_chunks_by_uids(self, uids):
+            return self.script_store.get_chunks_by_uids(uids)
+
+        def get_chapter_chunks(self, chapter):
+            return self.script_store.get_chapter_chunks(chapter)
+
+        def get_chapter_list(self):
+            return self.script_store.get_chapter_list()
+
+        def resolve_generation_targets(self, scope_mode="project", chapter=None, pending_only=True):
+            return self.script_store.resolve_generation_targets(
+                scope_mode=self._normalize_scope_mode(scope_mode),
+                chapter=chapter,
+                pending_only=bool(pending_only),
+            )
+
+        def get_chunk_audio_ref(self, chunk_ref):
+            return self.script_store.get_chunk_audio_ref(chunk_ref)
+
+        def _publish_chunk_upsert(self, chunk_ref):
+            chunk = self.script_store.get_chunk(chunk_ref)
+            if chunk is None:
+                return None
+            payload = self.get_chunk_audio_ref(chunk.get("uid")) or {}
+            payload.update(chunk)
+            chunk_event_broker.publish("chunk_upsert", payload)
+            return chunk
+
+        def _publish_chunk_delete(self, uid, chapter=None):
+            chunk_event_broker.publish("chunk_delete", {
+                "uid": str(uid or "").strip(),
+                "chapter": str(chapter or "").strip(),
+            })
+
+        def _publish_chapter_deleted(self, chapter):
+            chunk_event_broker.publish("chapter_deleted", {
+                "chapter": str(chapter or "").strip(),
+            })
+
+        def _publish_chapter_list_changed(self):
+            chunk_event_broker.publish("chapter_list_changed", {
+                "chapters": self.get_chapter_list(),
+            })
+
         def get_chunk_view(self, chunk_ref, chunks=None):
             raw_chunk = None
 
@@ -166,10 +219,7 @@ class ProjectChunkStoreMixin:
                 if resolved_index is not None and 0 <= resolved_index < len(chunks):
                     raw_chunk = copy.deepcopy(chunks[resolved_index])
             else:
-                chunks = self.load_chunks_raw()
-                resolved_index = self.resolve_chunk_index(chunk_ref, chunks)
-                if resolved_index is not None and 0 <= resolved_index < len(chunks):
-                    raw_chunk = copy.deepcopy(chunks[resolved_index])
+                raw_chunk = self.script_store.get_chunk(chunk_ref)
 
             if raw_chunk is None:
                 return None
@@ -179,8 +229,7 @@ class ProjectChunkStoreMixin:
             return self._merge_runtime_chunk(raw_chunk, runtime_chunk)
 
         def get_chunk_view_by_index(self, index):
-            chunks = self.load_chunks_raw()
-            raw_chunk = copy.deepcopy(chunks[index]) if 0 <= index < len(chunks) else None
+            raw_chunk = self.script_store.get_chunk(index)
             if raw_chunk is None:
                 return None
             uid = raw_chunk.get("uid")
@@ -316,59 +365,56 @@ class ProjectChunkStoreMixin:
             generations, where a chunk may still be marked as error even though its
             audio file exists and now passes the duration sanity check.
             """
-            with self._chunks_lock:
-                chunks = self.load_chunks_raw()
-                if self._ensure_chunk_uids(chunks):
-                    self._atomic_json_write(chunks, self.chunks_path)
+            chunks = self.load_chunks_raw()
+            dictionary_entries = self.load_dictionary_entries()
+            updates = []
 
-                dictionary_entries = self.load_dictionary_entries()
-                changed = False
-                immediate_commits = 0
+            for chunk in chunks:
+                audio_path = chunk.get("audio_path")
+                uid = str(chunk.get("uid") or "").strip()
+                if not audio_path or not uid:
+                    continue
 
-                for chunk in chunks:
-                    audio_path = chunk.get("audio_path")
-                    if not audio_path:
-                        continue
+                full_audio_path = os.path.join(self.root_dir, audio_path)
+                if not os.path.exists(full_audio_path):
+                    continue
 
-                    full_audio_path = os.path.join(self.root_dir, audio_path)
-                    if not os.path.exists(full_audio_path):
-                        continue
+                try:
+                    transformed_text, _ = apply_dictionary_to_text(
+                        chunk.get("text", ""),
+                        dictionary_entries,
+                    )
+                    validation = validate_audio_clip(
+                        text=transformed_text,
+                        actual_duration_sec=get_audio_duration_seconds(full_audio_path),
+                        file_size_bytes=os.path.getsize(full_audio_path),
+                    ).to_dict()
+                except Exception as e:
+                    print(f"Warning: failed to revalidate chunk {chunk.get('id')}: {e}")
+                    continue
 
-                    try:
-                        transformed_text, _ = apply_dictionary_to_text(
-                            chunk.get("text", ""),
-                            dictionary_entries,
-                        )
-                        validation = validate_audio_clip(
-                            text=transformed_text,
-                            actual_duration_sec=get_audio_duration_seconds(full_audio_path),
-                            file_size_bytes=os.path.getsize(full_audio_path),
-                        ).to_dict()
-                    except Exception as e:
-                        print(f"Warning: failed to revalidate chunk {chunk.get('id')}: {e}")
-                        continue
+                fields = {}
+                if validation["is_valid"]:
+                    if chunk.get("status") != "done":
+                        fields["status"] = "done"
+                    if chunk.get("audio_validation") != validation:
+                        fields["audio_validation"] = validation
+                    if int(chunk.get("auto_regen_count") or 0) != 0:
+                        fields["auto_regen_count"] = 0
+                elif chunk.get("audio_validation") != validation:
+                    fields["audio_validation"] = validation
 
-                    if validation["is_valid"]:
-                        # Any chunk with valid persisted audio should be treated as done.
-                        # This prevents restart/resume from re-queueing already-rendered clips
-                        # when status drifted (e.g. pending/error/generating after interruption).
-                        if chunk.get("status") != "done":
-                            chunk["status"] = "done"
-                            changed = True
-                        if chunk.get("audio_validation") != validation:
-                            chunk["audio_validation"] = validation
-                            changed = True
-                        if int(chunk.get("auto_regen_count") or 0) != 0:
-                            chunk["auto_regen_count"] = 0
-                            changed = True
-                    elif chunk.get("audio_validation") != validation:
-                        chunk["audio_validation"] = validation
-                        changed = True
+                if fields:
+                    updates.append({
+                        "uid": uid,
+                        "expected": {"audio_path": audio_path},
+                        "fields": fields,
+                    })
 
-                if changed:
-                    self._atomic_json_write(chunks, self.chunks_path)
-
-                return chunks
+            if updates:
+                self._commit_chunk_updates(updates)
+                return self.load_chunks_raw()
+            return chunks
 
         def _validate_chunk_audio(self, chunk, dictionary_entries):
             audio_path = chunk.get("audio_path")
@@ -400,48 +446,68 @@ class ProjectChunkStoreMixin:
             """
             self.flush_dirty_chunks(force=True)
             outcome = {"recovered": 0, "reset": 0}
+            chunks = self.load_chunks_raw()
+            if not chunks:
+                return outcome
 
-            with self._chunks_lock:
-                chunks = self.load_chunks_raw()
-                if not chunks:
-                    return outcome
+            if indices is None:
+                index_iter = range(len(chunks))
+            else:
+                index_iter = [index for index in indices if 0 <= index < len(chunks)]
 
-                if indices is None:
-                    index_iter = range(len(chunks))
+            dictionary_entries = self.load_dictionary_entries()
+            updates = []
+            update_kinds = {}
+
+            for index in index_iter:
+                chunk = chunks[index]
+                uid = str(chunk.get("uid") or "").strip()
+                if not uid or chunk.get("status") != "generating":
+                    continue
+                if generation_token is not None and chunk.get("generation_token") != generation_token:
+                    continue
+
+                try:
+                    validation = self._validate_chunk_audio(chunk, dictionary_entries)
+                except Exception as e:
+                    print(f"Warning: failed to validate interrupted chunk {chunk.get('id')}: {e}")
+                    validation = None
+
+                expected = {
+                    "status": "generating",
+                    "audio_path": chunk.get("audio_path"),
+                }
+                if chunk.get("generation_token") is not None:
+                    expected["generation_token"] = chunk.get("generation_token")
+
+                if validation and validation["is_valid"]:
+                    fields = {
+                        "status": "done",
+                        "audio_validation": validation,
+                        "auto_regen_count": 0,
+                    }
+                    update_kinds[uid] = "recovered"
                 else:
-                    index_iter = [index for index in indices if 0 <= index < len(chunks)]
+                    fields = {"status": "pending"}
+                    update_kinds[uid] = "reset"
 
-                dictionary_entries = self.load_dictionary_entries()
-                changed = False
+                updates.append({
+                    "uid": uid,
+                    "expected": expected,
+                    "fields": fields,
+                    "clear_fields": ["generation_token"],
+                })
 
-                for index in index_iter:
-                    chunk = chunks[index]
-                    if chunk.get("status") != "generating":
-                        continue
-                    if generation_token is not None and chunk.get("generation_token") != generation_token:
-                        continue
+            if not updates:
+                return outcome
 
-                    try:
-                        validation = self._validate_chunk_audio(chunk, dictionary_entries)
-                    except Exception as e:
-                        print(f"Warning: failed to validate interrupted chunk {chunk.get('id')}: {e}")
-                        validation = None
-
-                    if validation and validation["is_valid"]:
-                        chunk["status"] = "done"
-                        chunk["audio_validation"] = validation
-                        chunk["auto_regen_count"] = 0
-                        outcome["recovered"] += 1
-                    else:
-                        chunk["status"] = "pending"
-                        outcome["reset"] += 1
-
-                    chunk.pop("generation_token", None)
-                    self.clear_chunk_runtime(chunk.get("uid"))
-                    changed = True
-
-                if changed:
-                    self._atomic_json_write(chunks, self.chunks_path)
+            result = self._commit_chunk_updates(updates)
+            for uid in result["applied"]:
+                if update_kinds.get(uid) == "recovered":
+                    outcome["recovered"] += 1
+                elif update_kinds.get(uid) == "reset":
+                    outcome["reset"] += 1
+                self.clear_chunk_runtime(uid)
 
             return outcome
 
@@ -529,6 +595,141 @@ class ProjectChunkStoreMixin:
                 for uid in stale_uids:
                     self._chunk_runtime.pop(uid, None)
                     self._dirty_chunk_uids.discard(uid)
+            self._publish_chapter_list_changed()
+
+        def _commit_chunk_updates(self, updates):
+            normalized = []
+            for update in updates or []:
+                uid = str((update or {}).get("uid") or "").strip()
+                fields = dict((update or {}).get("fields") or {})
+                expected = dict((update or {}).get("expected") or {})
+                clear_fields = tuple((update or {}).get("clear_fields") or ())
+                if not uid or (not fields and not clear_fields):
+                    continue
+                normalized.append({
+                    "uid": uid,
+                    "fields": fields,
+                    "expected": expected,
+                    "clear_fields": clear_fields,
+                })
+
+            if not normalized:
+                return {"changed": False, "applied": [], "skipped": []}
+
+            applied = []
+            skipped = []
+            changed = False
+
+            with self._chunks_lock:
+                latest = self._load_chunks_from_disk_locked()
+                latest_by_uid = {
+                    str((chunk or {}).get("uid") or "").strip(): chunk
+                    for chunk in latest
+                    if str((chunk or {}).get("uid") or "").strip()
+                }
+
+                for update in normalized:
+                    uid = update["uid"]
+                    chunk = latest_by_uid.get(uid)
+                    if chunk is None:
+                        skipped.append(uid)
+                        continue
+
+                    expected = update["expected"]
+                    if any(chunk.get(field) != value for field, value in expected.items()):
+                        skipped.append(uid)
+                        continue
+
+                    chunk_changed = False
+                    for field in update["clear_fields"]:
+                        if field in chunk:
+                            chunk.pop(field, None)
+                            chunk_changed = True
+
+                    for field, value in update["fields"].items():
+                        if chunk.get(field) != value:
+                            chunk[field] = copy.deepcopy(value)
+                            chunk_changed = True
+
+                    if chunk_changed:
+                        applied.append(uid)
+                        changed = True
+
+                if changed:
+                    self._atomic_json_write(latest, self.chunks_path)
+
+            if changed:
+                for uid in applied:
+                    self._publish_chunk_upsert(uid)
+            return {"changed": changed, "applied": applied, "skipped": skipped}
+
+        def patch_chunk_if(self, uid, expected=None, fields=None, clear_fields=(), reason="patch_chunk_if"):
+            result = self.script_store.patch_chunk_if(
+                uid,
+                expected=expected,
+                fields=fields,
+                clear_fields=clear_fields,
+                reason=reason,
+                wait=True,
+            )
+            if result is not None:
+                self._publish_chunk_upsert(uid)
+            return result
+
+        def patch_chunks_if(self, updates, reason="patch_chunks_if"):
+            result = self.script_store.patch_chunks_if(updates, reason=reason, wait=True)
+            for chunk in result or []:
+                self._publish_chunk_upsert(chunk.get("uid"))
+            return result
+
+        def claim_generation(self, uid, token, reason="claim_generation"):
+            claimed = self.script_store.claim_generation(uid, token, reason=reason, wait=True)
+            if claimed is not None:
+                self._publish_chunk_upsert(uid)
+            return claimed
+
+        def claim_generation_many(self, uids, token, reason="claim_generation_many"):
+            claimed = self.script_store.claim_generation_many(uids, token, reason=reason, wait=True)
+            for chunk in claimed or []:
+                self._publish_chunk_upsert(chunk.get("uid"))
+            return claimed
+
+        def reset_generation_rows(self, uids, token=None, target_status="pending", reason="reset_generation"):
+            updated = self.script_store.reset_generation(
+                uids,
+                token=token,
+                target_status=target_status,
+                reason=reason,
+                wait=True,
+            )
+            for chunk in updated or []:
+                self._publish_chunk_upsert(chunk.get("uid"))
+            return updated
+
+        def prepare_chunk_for_regeneration_by_uid(self, uid):
+            updated = self.script_store.prepare_chunk_for_regeneration(uid, wait=True)
+            if updated is not None:
+                self.clear_chunk_runtime(uid)
+                self._publish_chunk_upsert(uid)
+            return updated
+
+        def delete_chunk_by_uid(self, uid):
+            result = self.script_store.delete_chunk(uid, wait=True)
+            if result is not None:
+                deleted = result.get("deleted") or {}
+                self.clear_chunk_runtime(deleted.get("uid"))
+                self._publish_chunk_delete(deleted.get("uid"), deleted.get("chapter"))
+                self._publish_chapter_list_changed()
+            return result
+
+        def delete_chapter_by_name(self, chapter):
+            result = self.script_store.delete_chapter(chapter, wait=True)
+            if result is not None:
+                for chunk in result.get("deleted") or []:
+                    self.clear_chunk_runtime(chunk.get("uid"))
+                self._publish_chapter_deleted(chapter)
+                self._publish_chapter_list_changed()
+            return result
 
         def _update_chunk_fields(self, index, **fields):
             """Atomically update fields on a single chunk (thread-safe read-modify-write).
