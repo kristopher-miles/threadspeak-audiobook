@@ -151,8 +151,8 @@ class ChunkRuntimeOverlayTests(unittest.TestCase):
         sf.write(full_path, samples, sample_rate)
         return full_path
 
-    def _make_chunk(self, chunk_id, uid):
-        return {
+    def _make_chunk(self, chunk_id, uid, chapter=""):
+        chunk = {
             "id": chunk_id,
             "uid": uid,
             "speaker": "Narrator",
@@ -163,6 +163,9 @@ class ChunkRuntimeOverlayTests(unittest.TestCase):
             "audio_validation": None,
             "auto_regen_count": 0,
         }
+        if chapter:
+            chunk["chapter"] = chapter
+        return chunk
 
     def test_load_chunks_view_reflects_runtime_overlay_before_flush(self):
         self.manager.save_chunks([self._make_chunk(0, "chunk-1")])
@@ -185,6 +188,37 @@ class ChunkRuntimeOverlayTests(unittest.TestCase):
         self.assertEqual(view_chunks[0]["status"], "done")
         self.assertEqual(view_chunks[0]["audio_path"], "voicelines/chunk-1.mp3")
         self.assertTrue(view_chunks[0]["audio_validation"]["is_valid"])
+
+    def test_load_chunks_view_can_scope_to_a_single_chapter(self):
+        self.manager.save_chunks([
+            self._make_chunk(0, "chunk-1", chapter="Chapter A"),
+            self._make_chunk(1, "chunk-2", chapter="Chapter B"),
+            self._make_chunk(2, "chunk-3", chapter="Chapter A"),
+        ])
+        self.manager.set_chunk_runtime(
+            "chunk-1",
+            status="done",
+            audio_path="voicelines/chapter-a.mp3",
+            audio_validation={"is_valid": True},
+            auto_regen_count=0,
+            generation_token=None,
+        )
+        self.manager.set_chunk_runtime(
+            "chunk-2",
+            status="done",
+            audio_path="voicelines/chapter-b.mp3",
+            audio_validation={"is_valid": True},
+            auto_regen_count=0,
+            generation_token=None,
+        )
+
+        chapter_a_chunks = self.manager.load_chunks_view(chapter="Chapter A")
+
+        self.assertEqual([chunk["uid"] for chunk in chapter_a_chunks], ["chunk-1", "chunk-3"])
+        self.assertEqual(chapter_a_chunks[0]["status"], "done")
+        self.assertEqual(chapter_a_chunks[0]["audio_path"], "voicelines/chapter-a.mp3")
+        self.assertEqual(chapter_a_chunks[1]["status"], "pending")
+        self.assertIsNone(chapter_a_chunks[1]["audio_path"])
 
     def test_load_chunks_view_is_not_blocked_by_slow_flush(self):
         self.manager.save_chunks([self._make_chunk(0, "chunk-1")])
@@ -362,6 +396,27 @@ class ChunkRuntimeOverlayTests(unittest.TestCase):
         self.assertEqual(after_reset[0]["status"], "pending")
         self.assertNotIn("generation_token", after_reset[0])
         self.assertEqual(raw_chunks[0]["status"], "pending")
+
+    def test_get_chunk_view_returns_live_single_chunk_without_full_view_assembly(self):
+        self.manager.save_chunks([
+            self._make_chunk(0, "chunk-1", chapter="Chapter A"),
+            self._make_chunk(1, "chunk-2", chapter="Chapter B"),
+        ])
+        self.manager.set_chunk_runtime(
+            "chunk-2",
+            status="done",
+            audio_path="voicelines/chunk-2.mp3",
+            audio_validation={"is_valid": True},
+            auto_regen_count=0,
+            generation_token=None,
+        )
+
+        live_chunk = self.manager.get_chunk_view("chunk-2")
+
+        self.assertIsNotNone(live_chunk)
+        self.assertEqual(live_chunk["uid"], "chunk-2")
+        self.assertEqual(live_chunk["status"], "done")
+        self.assertEqual(live_chunk["audio_path"], "voicelines/chunk-2.mp3")
 
     def test_groups_indices_by_resolved_speaker(self):
         chunks = [

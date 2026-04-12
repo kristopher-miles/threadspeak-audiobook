@@ -28,7 +28,7 @@
                 }
             },
             get: async (url) => {
-                const res = await fetch(url);
+                const res = await fetch(url, { cache: 'no-store' });
                 await API._handleError(res);
                 return res.json();
             },

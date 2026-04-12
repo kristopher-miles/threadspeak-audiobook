@@ -9,6 +9,7 @@
         let selectedProofreadChapter = WHOLE_PROJECT_CHAPTER_ID;
         let proofreadChapterAutoSelected = false;
         let audioQueuePollTimer = null;
+        let audioQueuePollInFlight = null;
         let latestAudioState = null;
         let latestProofreadStatus = null;
         let renderPrepComplete = false;
@@ -124,6 +125,50 @@
             if (typeof audioEl.load === 'function') {
                 audioEl.load();
             }
+        }
+
+        function shouldReuseRenderedAudioElement(existingAudio, nextAudio) {
+            if (!existingAudio || !nextAudio) return false;
+
+            const existingPath = String(existingAudio.dataset?.audioPath || '').trim();
+            const nextPath = String(nextAudio.dataset?.audioPath || '').trim();
+            if (existingPath || nextPath) {
+                return existingPath === nextPath
+                    && String(existingAudio.dataset?.audioFingerprint || '').trim() === String(nextAudio.dataset?.audioFingerprint || '').trim();
+            }
+
+            const existingSrc = String(existingAudio.getAttribute?.('src') || existingAudio.src || '').trim();
+            const nextSrc = String(nextAudio.getAttribute?.('src') || nextAudio.src || '').trim();
+            return Boolean(existingSrc) && existingSrc === nextSrc;
+        }
+
+        function captureEditorAudioElements(tbody) {
+            const savedAudio = new Map();
+            if (!tbody) return savedAudio;
+
+            tbody.querySelectorAll('tr[data-id]').forEach(row => {
+                const chunkRef = String(row.dataset?.id || '').trim();
+                const audio = row.querySelector('.chunk-audio-slot audio');
+                if (chunkRef && audio) {
+                    savedAudio.set(chunkRef, audio);
+                }
+            });
+            return savedAudio;
+        }
+
+        function restoreEditorAudioElements(tbody, savedAudio) {
+            if (!tbody || !savedAudio || savedAudio.size === 0) return;
+
+            tbody.querySelectorAll('tr[data-id]').forEach(row => {
+                const chunkRef = String(row.dataset?.id || '').trim();
+                if (!chunkRef) return;
+
+                const existingAudio = savedAudio.get(chunkRef);
+                const nextAudio = row.querySelector('.chunk-audio-slot audio');
+                if (!shouldReuseRenderedAudioElement(existingAudio, nextAudio)) return;
+
+                nextAudio.replaceWith(existingAudio);
+            });
         }
 
         function updateCachedChunk(updatedChunk) {
@@ -1590,38 +1635,55 @@
         }
 
         async function pollAudioQueueOnce() {
-            try {
-                const audioState = await refreshAudioQueueUI();
-                await loadChunks(false);
-                const hasAudioWork = Boolean(audioState?.running) || (audioState?.queue || []).length > 0;
-                if (hasAudioWork && window.setNavTaskSpinner && !window.getNavTaskSpinnerTab?.()) {
-                    window.setNavTaskSpinner('editor');
-                }
-                if (!hasAudioWork && audioQueuePollTimer) {
-                    clearInterval(audioQueuePollTimer);
-                    audioQueuePollTimer = null;
-                    if (window.releaseNavTaskSpinner) {
-                        window.releaseNavTaskSpinner('editor');
+            if (audioQueuePollInFlight) {
+                return audioQueuePollInFlight;
+            }
+
+            const run = (async () => {
+                try {
+                    const audioState = await refreshAudioQueueUI();
+                    await loadChunks(false);
+                    const hasAudioWork = Boolean(audioState?.running) || (audioState?.queue || []).length > 0;
+                    if (hasAudioWork && window.setNavTaskSpinner && !window.getNavTaskSpinnerTab?.()) {
+                        window.setNavTaskSpinner('editor');
                     }
-                }
-                // Auto Proofread: trigger every 25 completed clips while audio is running
-                if (autoProofreadEnabled && audioState?.running) {
-                    const processed = Number(audioState?.metrics?.processed_clips) || 0;
-                    if (processed - clipsAtLastAutoProofread >= 25) {
-                        const proofreadRunning = !!latestProofreadStatus?.running;
-                        if (!proofreadRunning) {
-                            clipsAtLastAutoProofread = processed;
-                            const threshold = getProofreadThreshold();
-                            API.post('/api/proofread/auto', { threshold, chapter: '__ALL__' })
-                                .catch(err => console.warn('Auto proofread trigger failed:', err));
+                    if (!hasAudioWork && audioQueuePollTimer) {
+                        clearInterval(audioQueuePollTimer);
+                        audioQueuePollTimer = null;
+                        if (window.releaseNavTaskSpinner) {
+                            window.releaseNavTaskSpinner('editor');
                         }
                     }
+                    // Auto Proofread: trigger every 25 completed clips while audio is running
+                    if (autoProofreadEnabled && audioState?.running) {
+                        const processed = Number(audioState?.metrics?.processed_clips) || 0;
+                        if (processed - clipsAtLastAutoProofread >= 25) {
+                            const proofreadRunning = !!latestProofreadStatus?.running;
+                            if (!proofreadRunning) {
+                                clipsAtLastAutoProofread = processed;
+                                const threshold = getProofreadThreshold();
+                                API.post('/api/proofread/auto', { threshold, chapter: '__ALL__' })
+                                    .catch(err => console.warn('Auto proofread trigger failed:', err));
+                            }
+                        }
+                    }
+                    return audioState;
+                } catch (e) {
+                    console.error('Audio queue poll error', e);
+                    if (audioQueuePollTimer) {
+                        clearInterval(audioQueuePollTimer);
+                        audioQueuePollTimer = null;
+                    }
+                    return null;
                 }
-            } catch (e) {
-                console.error('Audio queue poll error', e);
-                if (audioQueuePollTimer) {
-                    clearInterval(audioQueuePollTimer);
-                    audioQueuePollTimer = null;
+            })();
+
+            audioQueuePollInFlight = run;
+            try {
+                return await run;
+            } finally {
+                if (audioQueuePollInFlight === run) {
+                    audioQueuePollInFlight = null;
                 }
             }
         }
@@ -1701,8 +1763,7 @@
             }
 
             try {
-                const useChapterScope = !forceFullRedraw
-                    && cachedChunks.length > 0
+                const useChapterScope = cachedChunks.length > 0
                     && selectedEditorChapter !== WHOLE_PROJECT_CHAPTER_ID;
                 const chunks = await API.get(
                     useChapterScope
@@ -1792,9 +1853,11 @@
                     });
                 } else {
                     // Full redraw needed
+                    const savedAudio = captureEditorAudioElements(tbody);
                     tbody.innerHTML = visibleChunks.length === 0
                         ? '<tr><td colspan="5" class="text-center text-muted">No segments in this chapter yet.</td></tr>'
                         : visibleChunks.map(buildChunkRowHtml).join('');
+                    restoreEditorAudioElements(tbody, savedAudio);
                 }
 
                 cachedChunks = mergedChunks;
@@ -2575,10 +2638,24 @@
                     if (result.status === 'cancelling' || result.status === 'cancelled') {
                         showToast('Audio queue cancellation requested.', 'warning');
                     }
-                    ensureAudioQueuePolling();
                 } catch (e) { console.error('Cancel error:', e); }
             }
-            await refreshAudioQueueUI().catch(err => console.error('Audio queue refresh error', err));
+            const audioState = await refreshAudioQueueUI().catch(err => {
+                console.error('Audio queue refresh error', err);
+                return null;
+            });
+            await loadChunks(false).catch(err => console.error('Chunk refresh error after audio cancel', err));
+
+            const hasAudioWork = Boolean(audioState?.running) || (audioState?.queue || []).length > 0;
+            if (hasAudioWork) {
+                ensureAudioQueuePolling();
+                return;
+            }
+
+            if (audioQueuePollTimer) {
+                clearInterval(audioQueuePollTimer);
+                audioQueuePollTimer = null;
+            }
             if (window.releaseNavTaskSpinner) {
                 window.releaseNavTaskSpinner('editor');
             }

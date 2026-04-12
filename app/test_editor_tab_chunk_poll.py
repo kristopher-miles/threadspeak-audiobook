@@ -127,6 +127,11 @@ class EditorTabChunkPollTests(unittest.TestCase):
                     setAttribute(name, value) {{
                         if (name === 'src') this.src = value;
                     }},
+                    replaceWith(node) {{
+                        if (!this.__container) return;
+                        this.__container.audio = node;
+                        if (node) node.__container = this.__container;
+                    }},
                     remove() {{
                         if (this.__container) this.__container.audio = null;
                     }},
@@ -217,6 +222,8 @@ class EditorTabChunkPollTests(unittest.TestCase):
                     if (selector === '.chunk-text') return textArea;
                     if (selector === '.chunk-generate-slot') return generateSlot;
                     if (selector === '.chunk-audio-slot') return audioContainer;
+                    if (selector === '.chunk-audio-slot audio') return audioContainer.audio;
+                    if (selector === 'audio') return audioContainer.audio;
                     return null;
                 }};
                 row.querySelectorAll = (selector) => {{
@@ -306,7 +313,40 @@ class EditorTabChunkPollTests(unittest.TestCase):
                                 if (id === 'legacy-mode-toggle') element.checked = true;
                                 if (id === 'chunks-table-body') {{
                                     element.children = [];
-                                    element.querySelectorAll = () => Array.from(rows.values());
+                                    element.querySelectorAll = (selector) => {{
+                                        if (selector === 'tr[data-id]') return Array.from(rows.values());
+                                        return [];
+                                    }};
+                                    Object.defineProperty(element, 'innerHTML', {{
+                                        get() {{
+                                            return element.__html || '';
+                                        }},
+                                        set(value) {{
+                                            element.__html = String(value || '');
+                                            rows.clear();
+                                            const html = element.__html;
+                                            const rowPattern = /<tr\\b([^>]*)data-id="([^"]+)"([^>]*)>([\\s\\S]*?)<\\/tr>/g;
+                                            let match = null;
+                                            while ((match = rowPattern.exec(html)) !== null) {{
+                                                const attrs = `${{match[1] || ''}} ${{match[3] || ''}}`;
+                                                const classMatch = attrs.match(/class="([^"]+)"/);
+                                                const classNames = classMatch ? classMatch[1] : '';
+                                                const row = createChunkRow({{
+                                                    id: match[2],
+                                                    status: classNames.includes('status-done')
+                                                        ? 'done'
+                                                        : (classNames.includes('status-generating') ? 'generating' : 'pending'),
+                                                }});
+                                                const audioMatch = match[4].match(/<audio\\b[^>]*>/);
+                                                if (audioMatch) {{
+                                                    row.__audioContainer.audio = createAudioNode(audioMatch[0]);
+                                                    row.__audioContainer.audio.__container = row.__audioContainer;
+                                                }}
+                                                rows.set(String(match[2]), row);
+                                            }}
+                                            element.children = Array.from(rows.values());
+                                        }},
+                                    }});
                                 }}
                                 if (id === 'editor-tab' || id === 'proofread-tab') {{
                                     element.style.display = 'block';
@@ -808,6 +848,136 @@ class EditorTabChunkPollTests(unittest.TestCase):
 
                 assert.strictEqual(row.__audioContainer.audio, preservedAudio, 'running generation should not replace an unchanged audio element');
                 assert.strictEqual(row.__audioContainer.audio.src, '/voicelines/existing.mp3?t=stable');
+            })().catch((error) => {{
+                console.error(error);
+                process.exit(1);
+            }});
+            """
+        )
+
+    def test_load_chunks_full_redraw_preserves_existing_editor_audio_element(self):
+        self._run_node_test(
+            """
+            (async () => {
+                const context = createContext();
+                vm.createContext(context);
+                vm.runInContext(source, context);
+
+                const initialChunk = {
+                    id: 9,
+                    speaker: 'Narrator',
+                    text: 'Existing audio should survive a full table redraw.',
+                    instruct: '',
+                    status: 'done',
+                    audio_path: 'voicelines/preserved.mp3',
+                    audio_validation: { file_size_bytes: 10, actual_duration_sec: 1.0 },
+                };
+
+                const row = context.__createChunkRow(initialChunk);
+                row.__audioContainer.audio = createAudioNode('<audio src="/voicelines/preserved.mp3?t=voicelines%2Fpreserved.mp3%7C10%7C1%7Cdone" data-audio-path="voicelines/preserved.mp3" data-audio-fingerprint="voicelines/preserved.mp3|10|1|done"></audio>');
+                row.__audioContainer.audio.__container = row.__audioContainer;
+                const preservedAudio = row.__audioContainer.audio;
+
+                const staleRow = context.__createChunkRow({ id: 99, speaker: 'Narrator', text: 'stale', instruct: '', status: 'pending' });
+                context.__rows.set('9', row);
+                context.__rows.set('99', staleRow);
+                const tbody = context.document.getElementById('chunks-table-body');
+                tbody.children = [row, staleRow];
+
+                context.API.get = async (url) => {
+                    assert.strictEqual(url, '/api/chunks/view');
+                    return [initialChunk];
+                };
+
+                context.__editorTabTestHooks.setCachedChunks([initialChunk]);
+
+                await context.loadChunks(false);
+                await flushTicks();
+
+                const redrawnRow = context.__rows.get('9');
+                assert.ok(redrawnRow, 'expected redrawn row to exist');
+                assert.strictEqual(redrawnRow.__audioContainer.audio, preservedAudio, 'full redraw should reuse the existing audio element');
+                assert.strictEqual(redrawnRow.__audioContainer.audio.src, '/voicelines/preserved.mp3?t=voicelines%2Fpreserved.mp3%7C10%7C1%7Cdone');
+            })().catch((error) => {{
+                console.error(error);
+                process.exit(1);
+            }});
+            """
+        )
+
+    def test_load_chunks_full_redraw_uses_chapter_scope_when_cached_project_is_available(self):
+        self._run_node_test(
+            """
+            (async () => {
+                const context = createContext();
+                vm.createContext(context);
+                vm.runInContext(source, context);
+
+                context.__editorTabTestHooks.setSelectedEditorChapter('Chapter 1');
+                context.__editorTabTestHooks.setCachedChunks([
+                    { id: 1, uid: 'chunk-1', speaker: 'Narrator', chapter: 'Chapter 1', text: 'one', instruct: '', status: 'done', audio_path: 'voicelines/one.mp3', audio_validation: { file_size_bytes: 10, actual_duration_sec: 1.0 } },
+                    { id: 2, uid: 'chunk-2', speaker: 'Narrator', chapter: 'Chapter 2', text: 'two', instruct: '', status: 'pending', audio_path: null, audio_validation: null },
+                ]);
+
+                const requestedUrls = [];
+                context.API.get = async (url) => {
+                    requestedUrls.push(url);
+                    if (url === '/api/chunks/view?chapter=Chapter%201') {
+                        return [
+                            { id: 1, uid: 'chunk-1', speaker: 'Narrator', chapter: 'Chapter 1', text: 'one', instruct: '', status: 'done', audio_path: 'voicelines/one.mp3', audio_validation: { file_size_bytes: 10, actual_duration_sec: 1.0 } },
+                        ];
+                    }
+                    if (url === '/api/voices') {
+                        return {};
+                    }
+                    throw new Error(`Unexpected GET ${url}`);
+                };
+
+                await context.loadChunks(true);
+                await flushTicks();
+
+                assert.strictEqual(requestedUrls[0], '/api/chunks/view?chapter=Chapter%201');
+            })().catch((error) => {{
+                console.error(error);
+                process.exit(1);
+            }});
+            """
+        )
+
+    def test_cancel_render_refreshes_chunks_and_hides_cancel_button_when_audio_is_idle(self):
+        self._run_node_test(
+            """
+            (async () => {
+                const context = createContext();
+                vm.createContext(context);
+                vm.runInContext(source, context);
+
+                const cancelBtn = context.document.getElementById('btn-cancel-render');
+                cancelBtn.style.display = 'inline-block';
+                let loadChunksCalls = 0;
+                context.__editorTabTestHooks.setLoadChunks(async () => {
+                    loadChunksCalls += 1;
+                });
+
+                context.API.post = async (url) => {
+                    assert.strictEqual(url, '/api/cancel_audio');
+                    return { status: 'cancelling' };
+                };
+                context.API.get = async (url) => {
+                    assert.strictEqual(url, '/api/status/audio');
+                    return {
+                        running: false,
+                        queue: [],
+                        current_job: null,
+                        metrics: {},
+                    };
+                };
+
+                await context.cancelRender();
+                await flushTicks();
+
+                assert.strictEqual(loadChunksCalls, 1, 'cancel should immediately reload chunk state');
+                assert.strictEqual(cancelBtn.style.display, 'none', 'cancel button should hide once audio work is idle');
             })().catch((error) => {{
                 console.error(error);
                 process.exit(1);

@@ -170,28 +170,70 @@ class ProjectChunkStoreMixin:
 
             return []
 
-        def load_chunks_raw(self):
-            snapshot = self._copy_chunks_snapshot()
+        def load_chunks_raw(self, chapter=None):
+            snapshot = self._copy_chunks_snapshot(chapter=chapter)
             if snapshot is not None:
                 return snapshot
 
             with self._chunks_lock:
-                snapshot = self._copy_chunks_snapshot()
+                snapshot = self._copy_chunks_snapshot(chapter=chapter)
                 if snapshot is None:
-                    snapshot = self._load_chunks_from_disk_locked()
-                    self._set_chunks_snapshot(snapshot)
-                return copy.deepcopy(snapshot)
+                    full_snapshot = self._load_chunks_from_disk_locked()
+                    self._set_chunks_snapshot(full_snapshot)
+                    snapshot = self._copy_chunks_snapshot(chapter=chapter)
+                return snapshot
 
-        def load_chunks_view(self):
-            chunks = self.load_chunks_raw()
-            runtime = self._copy_chunk_runtime()
+        def load_chunks_view(self, chapter=None):
+            chunks = self.load_chunks_raw(chapter=chapter)
+            runtime = self._copy_chunk_runtime(chunk.get("uid") for chunk in chunks)
             return [
                 self._merge_runtime_chunk(chunk, runtime.get(chunk.get("uid")))
                 for chunk in chunks
             ]
 
-        def load_chunks(self):
-            return self.load_chunks_raw()
+        def load_chunks(self, chapter=None):
+            return self.load_chunks_raw(chapter=chapter)
+
+        def get_chunk_view(self, chunk_ref, chunks=None):
+            raw_chunk = None
+
+            if chunks is not None:
+                resolved_index = self.resolve_chunk_index(chunk_ref, chunks)
+                if resolved_index is not None and 0 <= resolved_index < len(chunks):
+                    raw_chunk = copy.deepcopy(chunks[resolved_index])
+            else:
+                raw_chunk = self._copy_chunks_snapshot(chunk_ref=chunk_ref)
+                if raw_chunk is None:
+                    with self._chunks_lock:
+                        with self._chunks_snapshot_lock:
+                            snapshot_missing = self._chunks_snapshot is None
+                        if snapshot_missing:
+                            snapshot = self._load_chunks_from_disk_locked()
+                            self._set_chunks_snapshot(snapshot)
+                    raw_chunk = self._copy_chunks_snapshot(chunk_ref=chunk_ref)
+
+            if raw_chunk is None:
+                return None
+
+            uid = raw_chunk.get("uid")
+            runtime_chunk = self._copy_chunk_runtime([uid]).get(uid)
+            return self._merge_runtime_chunk(raw_chunk, runtime_chunk)
+
+        def get_chunk_view_by_index(self, index):
+            raw_chunk = self._copy_chunks_snapshot(index=index)
+            if raw_chunk is None:
+                with self._chunks_lock:
+                    with self._chunks_snapshot_lock:
+                        snapshot_missing = self._chunks_snapshot is None
+                    if snapshot_missing:
+                        snapshot = self._load_chunks_from_disk_locked()
+                        self._set_chunks_snapshot(snapshot)
+                raw_chunk = self._copy_chunks_snapshot(index=index)
+            if raw_chunk is None:
+                return None
+            uid = raw_chunk.get("uid")
+            runtime_chunk = self._copy_chunk_runtime([uid]).get(uid)
+            return self._merge_runtime_chunk(raw_chunk, runtime_chunk)
 
         @staticmethod
         def _chunk_has_generated_work(chunk):

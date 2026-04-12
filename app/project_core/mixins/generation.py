@@ -329,10 +329,9 @@ class ProjectGenerationMixin:
                 # Reset remaining "generating" chunks to "pending"
                 if cancelled:
                     done_indices = set(results["completed"]) | {idx for idx, _ in results["failed"]}
-                    live_chunks = self.load_chunks_view()
                     reset_indices = [
                         idx for idx in indices
-                        if idx not in done_indices and 0 <= idx < len(live_chunks) and live_chunks[idx].get("status") == "generating"
+                        if idx not in done_indices and (self.get_chunk_view_by_index(idx) or {}).get("status") == "generating"
                     ]
                     if reset_indices:
                         results["cancelled"] += self.reset_generating_chunks(
@@ -610,11 +609,11 @@ class ProjectGenerationMixin:
                         if result["status"] == "cancelled":
                             continue
 
-                        chunks = self.load_chunks_view()
+                        live_chunk = self.get_chunk_view_by_index(idx)
 
                         if result["status"] == "done":
                             results["completed"].append(idx)
-                            print(f"Chunk {idx} completed: {chunks[idx].get('audio_path')}")
+                            print(f"Chunk {idx} completed: {(live_chunk or {}).get('audio_path')}")
                             if item_callback:
                                 item_callback(idx, True, shared_elapsed, word_counts.get(idx, 0), word_counts.get(idx, 0))
                         elif will_retry_on_error and not (cancel_check and cancel_check()):
@@ -678,10 +677,9 @@ class ProjectGenerationMixin:
 
             # Reset remaining live "generating" chunks to "pending" on cancel or completion.
             done_indices = set(results["completed"]) | {idx for idx, _ in results["failed"]}
-            live_chunks = self.load_chunks_view()
             reset_indices = [
                 idx for idx in indices
-                if idx not in done_indices and 0 <= idx < len(live_chunks) and live_chunks[idx].get("status") == "generating"
+                if idx not in done_indices and (self.get_chunk_view_by_index(idx) or {}).get("status") == "generating"
             ]
             if reset_indices:
                 results["cancelled"] += self.reset_generating_chunks(reset_indices, generation_token=generation_token)

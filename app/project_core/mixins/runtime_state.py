@@ -69,19 +69,45 @@ class ProjectRuntimeStateMixin:
                 ),
             }
 
-        def _copy_chunks_snapshot(self):
+        def _copy_chunks_snapshot(self, chapter=None, chunk_ref=None, index=None):
             with self._chunks_snapshot_lock:
                 if self._chunks_snapshot is None:
                     return None
+                if index is not None:
+                    if 0 <= index < len(self._chunks_snapshot):
+                        return copy.deepcopy(self._chunks_snapshot[index])
+                    return None
+                if chunk_ref is not None:
+                    index = self.resolve_chunk_index(chunk_ref, self._chunks_snapshot)
+                    if index is None or not (0 <= index < len(self._chunks_snapshot)):
+                        return None
+                    return copy.deepcopy(self._chunks_snapshot[index])
+                normalized_chapter = str(chapter or "").strip()
+                if normalized_chapter:
+                    return [
+                        copy.deepcopy(chunk)
+                        for chunk in self._chunks_snapshot
+                        if (chunk.get("chapter") or "").strip() == normalized_chapter
+                    ]
                 return copy.deepcopy(self._chunks_snapshot)
 
         def _set_chunks_snapshot(self, chunks):
             with self._chunks_snapshot_lock:
                 self._chunks_snapshot = copy.deepcopy(chunks)
 
-        def _copy_chunk_runtime(self):
+        def _copy_chunk_runtime(self, uids=None):
             with self._chunk_runtime_lock:
-                return copy.deepcopy(self._chunk_runtime)
+                if uids is None:
+                    return copy.deepcopy(self._chunk_runtime)
+
+                subset = {}
+                for uid in uids:
+                    if not uid:
+                        continue
+                    runtime_chunk = self._chunk_runtime.get(uid)
+                    if runtime_chunk is not None:
+                        subset[uid] = copy.deepcopy(runtime_chunk)
+                return subset
 
         @staticmethod
         def _runtime_chunk_fields():
@@ -275,8 +301,10 @@ class ProjectRuntimeStateMixin:
                 self.flush_dirty_chunks(force=True)
             return reset_count
 
-        def _runtime_chunk_state(self, chunk):
-            runtime = self._copy_chunk_runtime().get(chunk.get("uid"))
+        def _runtime_chunk_state(self, chunk, runtime_chunk=None):
+            runtime = runtime_chunk
+            if runtime is None:
+                runtime = self._copy_chunk_runtime([chunk.get("uid")]).get(chunk.get("uid"))
             return self._merge_runtime_chunk(dict(chunk), runtime)
 
         def _chunk_token_matches_live(self, chunk, expected_token=None):

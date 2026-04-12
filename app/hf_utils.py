@@ -31,24 +31,24 @@ def fetch_builtin_manifest(builtin_dir, hf_repo=BUILTIN_LORA_HF_REPO):
     if _manifest_cache is not None and (now - _manifest_cache_time) < _MANIFEST_TTL:
         return _manifest_cache
 
-    # Try remote
-    try:
-        from huggingface_hub import hf_hub_download
-        cached_path = hf_hub_download(repo_id=hf_repo, filename="manifest.json")
-        with open(cached_path, "r", encoding="utf-8") as f:
+    local_path = os.path.join(builtin_dir, "manifest.json")
+
+    # Prefer the tracked local manifest to avoid startup network traffic.
+    if os.path.exists(local_path):
+        with open(local_path, "r", encoding="utf-8") as f:
             entries = json.load(f)
-        # Save local copy for offline fallback
-        os.makedirs(builtin_dir, exist_ok=True)
-        local_path = os.path.join(builtin_dir, "manifest.json")
-        with open(local_path, "w", encoding="utf-8") as f:
-            json.dump(entries, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        logger.warning(f"Failed to fetch remote LoRA manifest, using local fallback: {e}")
-        local_path = os.path.join(builtin_dir, "manifest.json")
-        if os.path.exists(local_path):
-            with open(local_path, "r", encoding="utf-8") as f:
+    else:
+        try:
+            from huggingface_hub import hf_hub_download
+            cached_path = hf_hub_download(repo_id=hf_repo, filename="manifest.json")
+            with open(cached_path, "r", encoding="utf-8") as f:
                 entries = json.load(f)
-        else:
+            # Save local copy for offline fallback.
+            os.makedirs(builtin_dir, exist_ok=True)
+            with open(local_path, "w", encoding="utf-8") as f:
+                json.dump(entries, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.warning(f"Failed to fetch remote LoRA manifest: {e}")
             entries = []
 
     _manifest_cache = entries

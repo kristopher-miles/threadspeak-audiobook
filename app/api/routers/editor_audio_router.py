@@ -48,20 +48,15 @@ async def get_chunks():
 
 @router.get("/api/chunks/view")
 async def get_chunks_view(chapter: Optional[str] = None):
-    chunks = project_manager.load_chunks_view()
-    chapter = (chapter or "").strip()
-    if chapter:
-        chunks = [chunk for chunk in chunks if (chunk.get("chapter") or "").strip() == chapter]
-    return chunks
+    return project_manager.load_chunks_view(chapter=(chapter or "").strip() or None)
 
 
 @router.get("/api/chunks/{index}")
 async def get_chunk(index: str):
-    chunks = project_manager.load_chunks_view()
-    resolved_index = project_manager.resolve_chunk_index(index, chunks)
-    if resolved_index is None or not (0 <= resolved_index < len(chunks)):
+    chunk = project_manager.get_chunk_view(index)
+    if chunk is None:
         raise HTTPException(status_code=404, detail="Invalid chunk id")
-    return chunks[resolved_index]
+    return chunk
 
 
 @router.post("/api/chunks/sync_from_script_if_stale")
