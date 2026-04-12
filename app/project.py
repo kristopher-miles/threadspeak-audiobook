@@ -1,9 +1,11 @@
 import os
 import json
+import atexit
 import shutil
 import subprocess
 import inspect
 import threading
+import queue
 import concurrent.futures
 import zipfile
 import io
@@ -236,9 +238,151 @@ class ProjectManager:
 
         self.engine = None
         self.asr_engine = None
-        self._chunks_lock = threading.Lock()  # Thread-safe file writes
+        self._chunks_lock = threading.RLock()  # Thread-safe durable chunk writes
+        self._chunks_snapshot_lock = threading.Lock()
+        self._chunks_snapshot = None
+        self._chunk_runtime_lock = threading.Lock()
+        self._chunk_runtime = {}
+        self._dirty_chunk_uids = set()
+        self._chunks_flush_lock = threading.Lock()
+        self._chunks_flush_condition = threading.Condition()
         self._transcription_cache_lock = threading.Lock()
         self._transcription_cache = None
+        runtime_settings = self._load_chunk_runtime_settings()
+        self._postprocess_workers = runtime_settings["saveback_workers"]
+        self._chunk_state_flush_interval_s = runtime_settings["chunk_state_flush_ms"] / 1000.0
+        self._chunk_state_flush_batch_size = runtime_settings["chunk_state_flush_batch_size"]
+        self._postprocess_queue: queue.Queue = queue.Queue(maxsize=self._postprocess_workers * 2)
+        self._postprocess_threads = []
+        self._chunks_flush_thread = threading.Thread(
+            target=self._chunks_flush_loop,
+            daemon=True,
+            name=f"chunk-flush-{os.path.basename(self.root_dir)}",
+        )
+        self._chunks_flush_thread.start()
+        for worker_index in range(self._postprocess_workers):
+            thread = threading.Thread(
+                target=self._postprocess_worker_loop,
+                daemon=True,
+                name=f"postprocess-{os.path.basename(self.root_dir)}-{worker_index + 1}",
+            )
+            thread.start()
+            self._postprocess_threads.append(thread)
+        atexit.register(self.flush_dirty_chunks, True)
+
+    def _load_chunk_runtime_settings(self):
+        tts_settings = self._load_tts_settings()
+
+        def _coerce_positive_int(value, default):
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return parsed if parsed > 0 else default
+
+        return {
+            "saveback_workers": _coerce_positive_int(tts_settings.get("saveback_workers", 2), 2),
+            "chunk_state_flush_ms": _coerce_positive_int(tts_settings.get("chunk_state_flush_ms", 250), 250),
+            "chunk_state_flush_batch_size": _coerce_positive_int(
+                tts_settings.get("chunk_state_flush_batch_size", 25),
+                25,
+            ),
+        }
+
+    def _copy_chunks_snapshot(self):
+        with self._chunks_snapshot_lock:
+            if self._chunks_snapshot is None:
+                return None
+            return copy.deepcopy(self._chunks_snapshot)
+
+    def _set_chunks_snapshot(self, chunks):
+        with self._chunks_snapshot_lock:
+            self._chunks_snapshot = copy.deepcopy(chunks)
+
+    def _copy_chunk_runtime(self):
+        with self._chunk_runtime_lock:
+            return copy.deepcopy(self._chunk_runtime)
+
+    @staticmethod
+    def _runtime_chunk_fields():
+        return (
+            "status",
+            "generation_token",
+            "audio_path",
+            "audio_validation",
+            "auto_regen_count",
+            "updated_at",
+        )
+
+    def _merge_runtime_chunk(self, chunk, runtime_chunk):
+        if not runtime_chunk:
+            return chunk
+        merged = dict(chunk)
+        for field in self._runtime_chunk_fields():
+            if field in runtime_chunk:
+                merged[field] = copy.deepcopy(runtime_chunk[field])
+        if merged.get("status") != "generating":
+            merged.pop("generation_token", None)
+        return merged
+
+    def set_chunk_runtime(self, uid, **fields):
+        if not uid:
+            return {}
+        with self._chunk_runtime_lock:
+            runtime_chunk = self._chunk_runtime.setdefault(uid, {})
+            for key, value in fields.items():
+                if key == "generation_token":
+                    if value is None:
+                        runtime_chunk.pop("generation_token", None)
+                    else:
+                        runtime_chunk["generation_token"] = value
+                else:
+                    runtime_chunk[key] = copy.deepcopy(value)
+            runtime_chunk["updated_at"] = time.time()
+            return copy.deepcopy(runtime_chunk)
+
+    def clear_chunk_runtime(self, uid, fields=None):
+        if not uid:
+            return False
+        with self._chunk_runtime_lock:
+            runtime_chunk = self._chunk_runtime.get(uid)
+            if runtime_chunk is None:
+                return False
+            if fields is None:
+                self._chunk_runtime.pop(uid, None)
+            else:
+                for field in fields:
+                    runtime_chunk.pop(field, None)
+                if not runtime_chunk:
+                    self._chunk_runtime.pop(uid, None)
+            self._dirty_chunk_uids.discard(uid)
+            return True
+
+    def mark_chunks_dirty(self, uids):
+        dirty_count = 0
+        queued = False
+        with self._chunk_runtime_lock:
+            for uid in uids:
+                if not uid or uid not in self._chunk_runtime:
+                    continue
+                self._dirty_chunk_uids.add(uid)
+                queued = True
+            dirty_count = len(self._dirty_chunk_uids)
+        if queued:
+            with self._chunks_flush_condition:
+                self._chunks_flush_condition.notify_all()
+        if dirty_count >= self._chunk_state_flush_batch_size:
+            self.flush_dirty_chunks(force=False)
+        return dirty_count
+
+    def _chunks_flush_loop(self):
+        while True:
+            with self._chunks_flush_condition:
+                while not self._dirty_chunk_uids:
+                    self._chunks_flush_condition.wait()
+                if len(self._dirty_chunk_uids) < self._chunk_state_flush_batch_size:
+                    self._chunks_flush_condition.wait(timeout=self._chunk_state_flush_interval_s)
+            self.flush_dirty_chunks(force=False)
 
     def load_paragraphs(self):
         """Return the paragraphs.json document, or None if it does not exist yet."""
@@ -2770,13 +2914,13 @@ class ProjectManager:
 
         return results
 
-    def load_chunks(self):
+    def _load_chunks_from_disk_locked(self):
         if os.path.exists(self.chunks_path):
             try:
                 with open(self.chunks_path, "r", encoding="utf-8") as f:
                     chunks = json.load(f)
                 if self._ensure_chunk_uids(chunks):
-                    self.save_chunks(chunks)
+                    self._atomic_json_write(chunks, self.chunks_path)
                 return chunks
             except (json.JSONDecodeError, ValueError) as e:
                 backup_path = f"{self.chunks_path}.corrupt-{int(time.time())}"
@@ -2790,24 +2934,43 @@ class ProjectManager:
                     + (f" Preserved a backup at {backup_path}." if backup_path else "")
                 ) from e
 
-        # If no chunks exist yet, generate from script
         if os.path.exists(self.script_path):
             script = load_script_document(self.script_path)["entries"]
             chunks = script_entries_to_chunks(script)
-
-            # Initialize chunk status
             for i, chunk in enumerate(chunks):
                 chunk["id"] = i
                 chunk["uid"] = chunk.get("uid") or self._new_chunk_uid()
-                chunk["status"] = "pending" # pending, generating, done, error
+                chunk["status"] = "pending"
                 chunk["audio_path"] = None
                 chunk["audio_validation"] = None
                 chunk["auto_regen_count"] = 0
-
-            self.save_chunks(chunks)
+            self._atomic_json_write(chunks, self.chunks_path)
             return chunks
 
         return []
+
+    def load_chunks_raw(self):
+        snapshot = self._copy_chunks_snapshot()
+        if snapshot is not None:
+            return snapshot
+
+        with self._chunks_lock:
+            snapshot = self._copy_chunks_snapshot()
+            if snapshot is None:
+                snapshot = self._load_chunks_from_disk_locked()
+                self._set_chunks_snapshot(snapshot)
+            return copy.deepcopy(snapshot)
+
+    def load_chunks_view(self):
+        chunks = self.load_chunks_raw()
+        runtime = self._copy_chunk_runtime()
+        return [
+            self._merge_runtime_chunk(chunk, runtime.get(chunk.get("uid")))
+            for chunk in chunks
+        ]
+
+    def load_chunks(self):
+        return self.load_chunks_raw()
 
     def sync_chunks_from_script_if_stale(self):
         """Rebuild chunks from annotated_script.json when the script is newer.
@@ -4080,6 +4243,7 @@ class ProjectManager:
         If a chunk was left in "generating" but its audio file already exists and
         validates, promote it to "done". Otherwise reset it back to "pending".
         """
+        self.flush_dirty_chunks(force=True)
         outcome = {"recovered": 0, "reset": 0}
 
         with self._chunks_lock:
@@ -4120,6 +4284,7 @@ class ProjectManager:
                     outcome["reset"] += 1
 
                 chunk.pop("generation_token", None)
+                self.clear_chunk_runtime(chunk.get("uid"))
                 changed = True
 
             if changed:
@@ -4194,12 +4359,19 @@ class ProjectManager:
     def _atomic_json_write(self, data, target_path, max_retries=5):
         self._atomic_json_write_raw(data, target_path, max_retries=max_retries)
         if os.path.abspath(target_path) == os.path.abspath(self.chunks_path):
+            self._set_chunks_snapshot(data)
             self._update_chunks_backups(data)
 
     def save_chunks(self, chunks):
         with self._chunks_lock:
             self._ensure_chunk_uids(chunks)
             self._atomic_json_write(chunks, self.chunks_path)
+        chunk_uids = {chunk.get("uid") for chunk in chunks if chunk.get("uid")}
+        with self._chunk_runtime_lock:
+            stale_uids = [uid for uid in self._chunk_runtime if uid not in chunk_uids]
+            for uid in stale_uids:
+                self._chunk_runtime.pop(uid, None)
+                self._dirty_chunk_uids.discard(uid)
 
     def _update_chunk_fields(self, index, **fields):
         """Atomically update fields on a single chunk (thread-safe read-modify-write).
@@ -4222,38 +4394,33 @@ class ProjectManager:
             return chunks[index]
 
     def _claim_chunk_generation(self, index, generation_token=None):
-        with self._chunks_lock:
-            if not os.path.exists(self.chunks_path):
-                return None
-            with open(self.chunks_path, "r", encoding="utf-8") as f:
-                chunks = json.load(f)
-            if not (0 <= index < len(chunks)):
-                return None
-            chunks[index]["status"] = "generating"
-            if generation_token is not None:
-                chunks[index]["generation_token"] = generation_token
-            else:
-                chunks[index].pop("generation_token", None)
-            self._atomic_json_write(chunks, self.chunks_path)
-            return chunks[index]
+        chunks = self.load_chunks_raw()
+        if not (0 <= index < len(chunks)):
+            return None
+        chunk = chunks[index]
+        uid = chunk.get("uid")
+        self.set_chunk_runtime(
+            uid,
+            status="generating",
+            generation_token=generation_token,
+            auto_regen_count=int(chunk.get("auto_regen_count") or 0),
+        )
+        return self._runtime_chunk_state(chunk)
 
     def _claim_chunks_generation(self, indices, generation_token=None):
         claimed = 0
-        with self._chunks_lock:
-            if not os.path.exists(self.chunks_path):
-                return claimed
-            with open(self.chunks_path, "r", encoding="utf-8") as f:
-                chunks = json.load(f)
-            for index in indices:
-                if not (0 <= index < len(chunks)):
-                    continue
-                chunks[index]["status"] = "generating"
-                if generation_token is not None:
-                    chunks[index]["generation_token"] = generation_token
-                else:
-                    chunks[index].pop("generation_token", None)
-                claimed += 1
-            self._atomic_json_write(chunks, self.chunks_path)
+        chunks = self.load_chunks_raw()
+        for index in indices:
+            if not (0 <= index < len(chunks)):
+                continue
+            chunk = chunks[index]
+            self.set_chunk_runtime(
+                chunk.get("uid"),
+                status="generating",
+                generation_token=generation_token,
+                auto_regen_count=int(chunk.get("auto_regen_count") or 0),
+            )
+            claimed += 1
         return claimed
 
     def _chunk_token_matches(self, chunks, index, generation_token=None):
@@ -4264,37 +4431,25 @@ class ProjectManager:
         return chunks[index].get("generation_token") == generation_token
 
     def chunk_has_generation_token(self, index, generation_token=None):
-        with self._chunks_lock:
-            if not os.path.exists(self.chunks_path):
-                return False
-            with open(self.chunks_path, "r", encoding="utf-8") as f:
-                chunks = json.load(f)
-            return self._chunk_token_matches(chunks, index, generation_token)
+        chunks = self.load_chunks_raw()
+        if not (0 <= index < len(chunks)):
+            return False
+        return self._chunk_token_matches_live(chunks[index], generation_token)
 
     def _update_chunk_fields_if_token(self, index, expected_token=None, **fields):
-        with self._chunks_lock:
-            if not os.path.exists(self.chunks_path):
-                return None
-            with open(self.chunks_path, "r", encoding="utf-8") as f:
-                chunks = json.load(f)
-            if not (0 <= index < len(chunks)):
-                return None
-            if not self._chunk_token_matches(chunks, index, expected_token):
-                return None
-            for key, value in fields.items():
-                if key == "generation_token":
-                    if value is None:
-                        chunks[index].pop("generation_token", None)
-                    else:
-                        chunks[index]["generation_token"] = value
-                else:
-                    chunks[index][key] = value
-            if "audio_path" in fields or "speaker" in fields or "text" in fields or "instruct" in fields:
-                self._clear_proofread_state(chunks[index])
-            if fields.get("status") != "generating" and "generation_token" not in fields:
-                chunks[index].pop("generation_token", None)
-            self._atomic_json_write(chunks, self.chunks_path)
-            return chunks[index]
+        chunks = self.load_chunks_raw()
+        if not (0 <= index < len(chunks)):
+            return None
+        chunk = chunks[index]
+        if not self._chunk_token_matches_live(chunk, expected_token):
+            return None
+
+        runtime_fields = dict(fields)
+        if runtime_fields.get("status") != "generating" and "generation_token" not in runtime_fields:
+            runtime_fields["generation_token"] = None
+        runtime_chunk = self.set_chunk_runtime(chunk.get("uid"), **runtime_fields)
+        self.mark_chunks_dirty([chunk.get("uid")])
+        return self._merge_runtime_chunk(dict(chunk), runtime_chunk)
 
     def force_reset_chunks_to_pending(self, indices):
         """Force any chunk in `indices` to pending status regardless of current state.
@@ -4318,6 +4473,7 @@ class ProjectManager:
                 chunk["audio_validation"] = None
                 chunk.pop("generation_token", None)
                 self._clear_proofread_state(chunk)
+                self.clear_chunk_runtime(chunk.get("uid"))
                 reset_count += 1
             if reset_count:
                 self._atomic_json_write(chunks, self.chunks_path)
@@ -4325,26 +4481,27 @@ class ProjectManager:
 
     def reset_generating_chunks(self, indices=None, generation_token=None, target_status="pending"):
         reset_count = 0
-        with self._chunks_lock:
-            if not os.path.exists(self.chunks_path):
-                return reset_count
-            with open(self.chunks_path, "r", encoding="utf-8") as f:
-                chunks = json.load(f)
-            if indices is None:
-                index_iter = range(len(chunks))
-            else:
-                index_iter = [index for index in indices if 0 <= index < len(chunks)]
-            for index in index_iter:
-                chunk = chunks[index]
-                if chunk.get("status") != "generating":
-                    continue
-                if generation_token is not None and chunk.get("generation_token") != generation_token:
-                    continue
-                chunk["status"] = target_status
-                chunk.pop("generation_token", None)
-                reset_count += 1
-            if reset_count:
-                self._atomic_json_write(chunks, self.chunks_path)
+        chunks = self.load_chunks_raw()
+        if indices is None:
+            index_iter = range(len(chunks))
+        else:
+            index_iter = [index for index in indices if 0 <= index < len(chunks)]
+        for index in index_iter:
+            chunk = chunks[index]
+            live_chunk = self._runtime_chunk_state(chunk)
+            if live_chunk.get("status") != "generating":
+                continue
+            if generation_token is not None and live_chunk.get("generation_token") != generation_token:
+                continue
+            self.set_chunk_runtime(
+                chunk.get("uid"),
+                status=target_status,
+                generation_token=None,
+            )
+            self.mark_chunks_dirty([chunk.get("uid")])
+            reset_count += 1
+        if reset_count:
+            self.flush_dirty_chunks(force=True)
         return reset_count
 
     def insert_chunk(self, after_ref):
@@ -4827,6 +4984,7 @@ class ProjectManager:
             print(f"update_chunk({index}): instruct='{chunk.get('instruct', '')}', speaker='{chunk.get('speaker', '')}'")
             self._ensure_chunk_uids(chunks)
             self._atomic_json_write(chunks, self.chunks_path)
+            self.clear_chunk_runtime(chunk.get("uid"))
             return chunk
 
     def prepare_chunk_for_regeneration(self, chunk_ref):
@@ -4856,6 +5014,7 @@ class ProjectManager:
             chunk.pop("generation_token", None)
             self._clear_proofread_state(chunk)
             self._atomic_json_write(chunks, self.chunks_path)
+            self.clear_chunk_runtime(chunk.get("uid"))
             return {"index": index, "chunk": chunk}
 
     def _load_tts_settings(self):
@@ -4970,6 +5129,180 @@ class ProjectManager:
             self._atomic_json_write(chunks, self.chunks_path)
         return target_audio_path
 
+    # ------------------------------------------------------------------
+    # Runtime overlay + postprocess workers
+    # ------------------------------------------------------------------
+
+    def _runtime_chunk_state(self, chunk):
+        runtime = self._copy_chunk_runtime().get(chunk.get("uid"))
+        return self._merge_runtime_chunk(dict(chunk), runtime)
+
+    def _chunk_token_matches_live(self, chunk, expected_token=None):
+        if expected_token is None:
+            return True
+        live_chunk = self._runtime_chunk_state(chunk)
+        return live_chunk.get("generation_token") == expected_token
+
+    def _postprocess_worker_loop(self):
+        while True:
+            task = self._postprocess_queue.get()
+            try:
+                self._process_postprocess_task(task)
+            except BaseException as e:
+                fut = task.get("future")
+                if fut is not None and not fut.done():
+                    fut.set_exception(e)
+            finally:
+                self._postprocess_queue.task_done()
+
+    def _apply_runtime_patch_to_chunk(self, chunk, runtime_state):
+        patched = dict(chunk)
+        for field in ("status", "audio_path", "audio_validation", "auto_regen_count"):
+            if field in runtime_state:
+                patched[field] = copy.deepcopy(runtime_state[field])
+        if "audio_path" in runtime_state:
+            self._clear_proofread_state(patched)
+        patched.pop("generation_token", None)
+        return patched
+
+    def flush_dirty_chunks(self, force=False):
+        chunks_dir = os.path.dirname(self.chunks_path)
+        if not os.path.isdir(self.root_dir) or (chunks_dir and not os.path.isdir(chunks_dir)):
+            with self._chunk_runtime_lock:
+                self._dirty_chunk_uids.clear()
+            return 0
+        with self._chunks_flush_lock:
+            with self._chunk_runtime_lock:
+                if not self._dirty_chunk_uids:
+                    return 0
+                pending_uids = list(self._dirty_chunk_uids)
+                runtime_snapshot = {
+                    uid: copy.deepcopy(self._chunk_runtime.get(uid, {}))
+                    for uid in pending_uids
+                    if uid in self._chunk_runtime
+                }
+
+            if not runtime_snapshot:
+                return 0
+
+            chunks = self.load_chunks_raw()
+            dirty_versions = {
+                uid: runtime_snapshot[uid].get("updated_at")
+                for uid in runtime_snapshot
+            }
+            patched_any = False
+            for chunk in chunks:
+                uid = chunk.get("uid")
+                runtime_state = runtime_snapshot.get(uid)
+                if not runtime_state:
+                    continue
+                if runtime_state.get("status") == "generating" and not force:
+                    continue
+                patched = self._apply_runtime_patch_to_chunk(chunk, runtime_state)
+                chunk.clear()
+                chunk.update(patched)
+                patched_any = True
+
+            if not patched_any:
+                return 0
+
+            self._atomic_json_write_raw(chunks, self.chunks_path)
+            self._set_chunks_snapshot(chunks)
+            self._atomic_json_write_raw(chunks, self.chunks_latest_backup_path)
+            current_audio_count = self._count_audio_linked_chunks(chunks)
+            best_audio_count = self._load_chunk_backup_audio_count(self.chunks_best_backup_path)
+            if current_audio_count > best_audio_count:
+                self._atomic_json_write_raw(chunks, self.chunks_best_backup_path)
+
+            flushed_count = len(runtime_snapshot)
+            with self._chunk_runtime_lock:
+                for uid, version in dirty_versions.items():
+                    runtime_chunk = self._chunk_runtime.get(uid)
+                    if runtime_chunk is None:
+                        self._dirty_chunk_uids.discard(uid)
+                        continue
+                    if runtime_chunk.get("updated_at") == version and runtime_chunk.get("status") != "generating":
+                        self._dirty_chunk_uids.discard(uid)
+            return flushed_count
+
+    def _process_postprocess_task(self, task):
+        index = task["index"]
+        temp_path = task["temp_path"]
+        generation_token = task["generation_token"]
+        fut = task["future"]
+
+        try:
+            result = self._finalize_generated_audio(
+                index,
+                task["speaker"],
+                task["text"],
+                temp_path,
+                attempt=task["attempt"],
+                chunk_uid=task["chunk_uid"],
+            )
+
+            if result["status"] == "error" and task.get("error_status_override"):
+                updated_status = task["error_status_override"]
+                keep_token = task.get("keep_token", False)
+            else:
+                updated_status = result["status"]
+                keep_token = False
+
+            updated_chunk = self._update_chunk_fields_if_token(
+                index,
+                generation_token,
+                audio_path=result["audio_path"],
+                audio_validation=result["audio_validation"],
+                status=updated_status,
+                auto_regen_count=task["attempt"],
+                generation_token=generation_token if keep_token else None,
+            )
+
+            self._cleanup_temp_file(temp_path)
+
+            if updated_chunk is None:
+                fut.set_result({"status": "cancelled", "audio_path": None, "audio_validation": None, "error": "cancelled"})
+                return
+
+            fut.set_result({
+                **result,
+                "uid": task["chunk_uid"],
+                "index": index,
+                "generation_token": generation_token,
+            })
+        except Exception as e:
+            try:
+                self._update_chunk_fields_if_token(
+                    index,
+                    generation_token,
+                    status="error",
+                    audio_validation=None,
+                    auto_regen_count=task["attempt"],
+                    generation_token=None,
+                )
+            except Exception:
+                pass
+            self._cleanup_temp_file(temp_path)
+            fut.set_exception(e)
+
+    def _enqueue_postprocess(self, index, speaker, text, temp_path, attempt,
+                             chunk_uid, generation_token,
+                             error_status_override=None, keep_token=False):
+        fut = concurrent.futures.Future()
+        self._postprocess_queue.put({
+            "index": index,
+            "speaker": speaker,
+            "text": text,
+            "temp_path": temp_path,
+            "attempt": attempt,
+            "chunk_uid": chunk_uid,
+            "generation_token": generation_token,
+            "error_status_override": error_status_override,
+            "keep_token": keep_token,
+            "future": fut,
+        })
+        return fut
+
     def _finalize_generated_audio(self, index, speaker, text, temp_path, attempt=0, chunk_uid=None):
         if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
             return {
@@ -5052,37 +5385,33 @@ class ProjectManager:
                 return False, "Generation abandoned"
 
             if success:
-                result = self._finalize_generated_audio(
-                    index,
-                    speaker,
-                    transformed_text,
-                    temp_path,
+                fut = self._enqueue_postprocess(
+                    index=index,
+                    speaker=speaker,
+                    text=transformed_text,
+                    temp_path=temp_path,
                     attempt=attempt,
                     chunk_uid=chunk.get("uid"),
+                    generation_token=generation_token,
                 )
+                # Block this TTS thread until saveback completes; other TTS
+                # threads in the executor can run their GPU work concurrently.
+                try:
+                    result = fut.result()
+                except Exception as e:
+                    return False, str(e)
+
+                if result["status"] == "cancelled":
+                    return False, "Generation abandoned"
+
                 if result["status"] == "error" and auto_regen_retry_attempts > 0 and attempt < auto_regen_retry_attempts:
-                    self._update_chunk_fields_if_token(
-                        index,
-                        generation_token,
-                        status="pending",
-                        audio_path=result["audio_path"],
-                        audio_validation=result["audio_validation"],
-                        auto_regen_count=attempt + 1,
-                        generation_token=None,
-                    )
-                    self._cleanup_temp_file(temp_path)
+                    # Saveback wrote status="error"; _claim_chunk_generation in
+                    # the recursive call will re-claim it to "generating".
                     print(f"Chunk {index} failed sanity check; auto-regenerating attempt {attempt + 1}/{auto_regen_retry_attempts}")
                     return self.generate_chunk_audio(index, attempt=attempt + 1, generation_token=generation_token)
-                self._update_chunk_fields_if_token(
-                    index,
-                    generation_token,
-                    status=result["status"],
-                    audio_path=result["audio_path"],
-                    audio_validation=result["audio_validation"],
-                    auto_regen_count=attempt,
-                    generation_token=None,
-                )
-                self._cleanup_temp_file(temp_path)
+
+                if generation_token is None:
+                    self.flush_dirty_chunks(force=True)
                 return result["status"] == "done", result["audio_path"] if result["status"] == "done" else result["error"]
             else:
                 self._update_chunk_fields_if_token(
@@ -5093,6 +5422,8 @@ class ProjectManager:
                     auto_regen_count=attempt,
                     generation_token=None,
                 )
+                if generation_token is None:
+                    self.flush_dirty_chunks(force=True)
                 self._cleanup_temp_file(temp_path)
                 return False, "Generation failed"
 
@@ -5109,6 +5440,8 @@ class ProjectManager:
             except Exception as update_err:
                 print(f"Warning: Failed to update chunk {index} status to error: {update_err}")
             self._cleanup_temp_file(os.path.join(self.root_dir, f"temp_chunk_{index}.wav"))
+            if generation_token is None:
+                self.flush_dirty_chunks(force=True)
             return False, str(e)
 
     def merge_audio(self, progress_callback=None, log_callback=None, export_config=None, chapter=None):
@@ -5936,15 +6269,18 @@ class ProjectManager:
             # Reset remaining "generating" chunks to "pending"
             if cancelled:
                 done_indices = set(results["completed"]) | {idx for idx, _ in results["failed"]}
-                chunks = self.load_chunks()
-                if chunks:
-                    for idx in indices:
-                        if idx not in done_indices and 0 <= idx < len(chunks) and chunks[idx].get("status") == "generating":
-                            chunks[idx]["status"] = "pending"
-                            chunks[idx].pop("generation_token", None)
-                            results["cancelled"] += 1
-                    self.save_chunks(chunks)
+                live_chunks = self.load_chunks_view()
+                reset_indices = [
+                    idx for idx in indices
+                    if idx not in done_indices and 0 <= idx < len(live_chunks) and live_chunks[idx].get("status") == "generating"
+                ]
+                if reset_indices:
+                    results["cancelled"] += self.reset_generating_chunks(
+                        reset_indices,
+                        generation_token=generation_token,
+                    )
 
+        self.flush_dirty_chunks(force=True)
         print(f"Parallel generation complete: {len(results['completed'])} succeeded, "
               f"{len(results['failed'])} failed, {results['cancelled']} cancelled")
         return results
@@ -6148,6 +6484,7 @@ class ProjectManager:
             processed_in_batch = len(batch_results["completed"]) + len(batch_results["failed"])
             shared_elapsed = (time.time() - batch_start) / processed_in_batch if processed_in_batch > 0 else 0.0
 
+            postprocess_futures = {}
             for idx in batch_results["completed"]:
                 if cancel_check and cancel_check():
                     cancelled = True
@@ -6178,35 +6515,49 @@ class ProjectManager:
                         continue
                     chunk = chunks[idx]
                     speaker = chunk.get("speaker", "unknown")
-                    result = self._finalize_generated_audio(
-                        idx,
-                        speaker,
-                        transformed_texts.get(idx, chunk.get("text", "")),
-                        temp_path,
+                    will_retry_on_error = auto_regen_retry_attempts > 0
+
+                    fut = self._enqueue_postprocess(
+                        index=idx,
+                        speaker=speaker,
+                        text=transformed_texts.get(idx, chunk.get("text", "")),
+                        temp_path=temp_path,
                         attempt=0,
                         chunk_uid=chunk.get("uid"),
+                        generation_token=generation_token,
+                        error_status_override="pending" if will_retry_on_error else None,
+                        keep_token=will_retry_on_error,
                     )
-                    updated_status = "pending" if (result["status"] == "error" and auto_regen_retry_attempts > 0) else result["status"]
-                    updated_chunk = self._update_chunk_fields_if_token(
+                    postprocess_futures[fut] = (idx, will_retry_on_error)
+                except Exception as e:
+                    print(f"Error queueing postprocess for chunk {idx}: {e}")
+                    results["failed"].append((idx, str(e)))
+                    self._update_chunk_fields_if_token(
                         idx,
                         generation_token,
-                        audio_path=result["audio_path"],
-                        audio_validation=result["audio_validation"],
-                        status=updated_status,
-                        auto_regen_count=0,
-                        generation_token=None if updated_status != "pending" else generation_token,
+                        status="error",
+                        audio_validation=None,
+                        generation_token=None,
                     )
-                    if updated_chunk is None:
-                        self._cleanup_temp_file(temp_path)
+                    self._cleanup_temp_file(temp_path)
+                    if item_callback:
+                        item_callback(idx, False, shared_elapsed, word_counts.get(idx, 0), 0)
+
+            for fut in concurrent.futures.as_completed(list(postprocess_futures)):
+                idx, will_retry_on_error = postprocess_futures[fut]
+                try:
+                    result = fut.result()
+                    if result["status"] == "cancelled":
                         continue
-                    chunks = self.load_chunks()
+
+                    chunks = self.load_chunks_view()
 
                     if result["status"] == "done":
                         results["completed"].append(idx)
-                        print(f"Chunk {idx} completed: {updated_chunk['audio_path']}")
+                        print(f"Chunk {idx} completed: {chunks[idx].get('audio_path')}")
                         if item_callback:
                             item_callback(idx, True, shared_elapsed, word_counts.get(idx, 0), word_counts.get(idx, 0))
-                    elif auto_regen_retry_attempts > 0 and not (cancel_check and cancel_check()):
+                    elif will_retry_on_error and not (cancel_check and cancel_check()):
                         print(f"Chunk {idx} failed validation in batch; retrying immediately at the front of the queue")
                         retry_start = time.time()
                         retry_success, retry_msg = self.generate_chunk_audio(idx, attempt=1, generation_token=generation_token)
@@ -6227,9 +6578,6 @@ class ProjectManager:
                         print(f"Chunk {idx} failed validation: {result['error']}")
                         if item_callback:
                             item_callback(idx, False, shared_elapsed, word_counts.get(idx, 0), 0)
-
-                    self._cleanup_temp_file(temp_path)
-
                 except Exception as e:
                     print(f"Error processing chunk {idx}: {e}")
                     results["failed"].append((idx, str(e)))
@@ -6268,17 +6616,17 @@ class ProjectManager:
                 print(f"[CANCEL] Stopping after batch {batch_num + 1}")
                 break
 
-        # Reset remaining "generating" chunks to "pending" on cancel or completion
+        # Reset remaining live "generating" chunks to "pending" on cancel or completion.
         done_indices = set(results["completed"]) | {idx for idx, _ in results["failed"]}
-        chunks = self.load_chunks()
-        if chunks:
-            for idx in indices:
-                if idx not in done_indices and 0 <= idx < len(chunks) and chunks[idx].get("status") == "generating":
-                    chunks[idx]["status"] = "pending"
-                    chunks[idx].pop("generation_token", None)
-                    results["cancelled"] += 1
-            if results["cancelled"]:
-                self.save_chunks(chunks)
+        live_chunks = self.load_chunks_view()
+        reset_indices = [
+            idx for idx in indices
+            if idx not in done_indices and 0 <= idx < len(live_chunks) and live_chunks[idx].get("status") == "generating"
+        ]
+        if reset_indices:
+            results["cancelled"] += self.reset_generating_chunks(reset_indices, generation_token=generation_token)
+
+        self.flush_dirty_chunks(force=True)
 
         print(f"Batch generation complete: {len(results['completed'])} succeeded, "
               f"{len(results['failed'])} failed, {results['cancelled']} cancelled")

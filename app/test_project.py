@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import time
+import threading
 import unittest
 import zipfile
 from unittest.mock import patch
@@ -26,9 +27,18 @@ class ReconcileChunkAudioStatesTests(unittest.TestCase):
             json.dump({"entries": [], "dictionary": []}, f)
 
         self.manager = ProjectManager(self.root_dir)
+        self.manager.set_narrator_threshold(0)
 
     def tearDown(self):
+        self.manager.flush_dirty_chunks(force=True)
         self.temp_dir.cleanup()
+
+    def _write_wav(self, relative_path, duration_seconds):
+        full_path = os.path.join(self.root_dir, relative_path)
+        sample_rate = 24000
+        samples = np.zeros(int(sample_rate * duration_seconds), dtype=np.float32)
+        sf.write(full_path, samples, sample_rate)
+        return full_path
 
     def _write_wav(self, relative_path, duration_seconds):
         full_path = os.path.join(self.root_dir, relative_path)
@@ -115,6 +125,212 @@ class ReconcileChunkAudioStatesTests(unittest.TestCase):
         self.assertEqual(merged[0].get("generation_token"), "live-token")
         self.assertEqual(merged[0].get("status"), "generating")
         self.assertTrue((merged[0].get("proofread") or {}).get("checked"))
+
+
+class ChunkRuntimeOverlayTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root_dir = self.temp_dir.name
+        os.makedirs(os.path.join(self.root_dir, "voicelines"), exist_ok=True)
+        os.makedirs(os.path.join(self.root_dir, "app"), exist_ok=True)
+
+        with open(os.path.join(self.root_dir, "annotated_script.json"), "w", encoding="utf-8") as f:
+            json.dump({"entries": [], "dictionary": []}, f)
+
+        self.manager = ProjectManager(self.root_dir)
+        self.manager.set_narrator_threshold(0)
+
+    def tearDown(self):
+        self.manager.flush_dirty_chunks(force=True)
+        self.temp_dir.cleanup()
+
+    def _write_wav(self, relative_path, duration_seconds):
+        full_path = os.path.join(self.root_dir, relative_path)
+        sample_rate = 24000
+        samples = np.zeros(int(sample_rate * duration_seconds), dtype=np.float32)
+        sf.write(full_path, samples, sample_rate)
+        return full_path
+
+    def _make_chunk(self, chunk_id, uid):
+        return {
+            "id": chunk_id,
+            "uid": uid,
+            "speaker": "Narrator",
+            "text": f"Chunk {chunk_id} has enough words for validation to pass cleanly.",
+            "instruct": "",
+            "status": "pending",
+            "audio_path": None,
+            "audio_validation": None,
+            "auto_regen_count": 0,
+        }
+
+    def test_load_chunks_view_reflects_runtime_overlay_before_flush(self):
+        self.manager.save_chunks([self._make_chunk(0, "chunk-1")])
+
+        self.manager.set_chunk_runtime(
+            "chunk-1",
+            status="done",
+            audio_path="voicelines/chunk-1.mp3",
+            audio_validation={"is_valid": True, "file_size_bytes": 42, "actual_duration_sec": 1.0},
+            auto_regen_count=0,
+            generation_token=None,
+        )
+        self.manager.mark_chunks_dirty(["chunk-1"])
+
+        raw_chunks = self.manager.load_chunks_raw()
+        view_chunks = self.manager.load_chunks_view()
+
+        self.assertEqual(raw_chunks[0]["status"], "pending")
+        self.assertIsNone(raw_chunks[0]["audio_path"])
+        self.assertEqual(view_chunks[0]["status"], "done")
+        self.assertEqual(view_chunks[0]["audio_path"], "voicelines/chunk-1.mp3")
+        self.assertTrue(view_chunks[0]["audio_validation"]["is_valid"])
+
+    def test_load_chunks_view_is_not_blocked_by_slow_flush(self):
+        self.manager.save_chunks([self._make_chunk(0, "chunk-1")])
+        self.manager.set_chunk_runtime(
+            "chunk-1",
+            status="done",
+            audio_path="voicelines/chunk-1.mp3",
+            audio_validation={"is_valid": True},
+            auto_regen_count=0,
+            generation_token=None,
+        )
+        self.manager.mark_chunks_dirty(["chunk-1"])
+
+        original_atomic_write = self.manager._atomic_json_write_raw
+        write_started = threading.Event()
+        release_write = threading.Event()
+
+        def slow_atomic_write(data, target_path, max_retries=5):
+            if os.path.abspath(target_path) == os.path.abspath(self.manager.chunks_path):
+                write_started.set()
+                release_write.wait(timeout=1.0)
+            return original_atomic_write(data, target_path, max_retries=max_retries)
+
+        with patch.object(self.manager, "_atomic_json_write_raw", side_effect=slow_atomic_write):
+            flush_thread = threading.Thread(target=self.manager.flush_dirty_chunks, kwargs={"force": True}, daemon=True)
+            flush_thread.start()
+            self.assertTrue(write_started.wait(timeout=1.0))
+
+            start = time.time()
+            view_chunks = self.manager.load_chunks_view()
+            elapsed = time.time() - start
+
+            release_write.set()
+            flush_thread.join(timeout=1.0)
+
+        self.assertLess(elapsed, 0.1)
+        self.assertEqual(view_chunks[0]["status"], "done")
+        self.assertEqual(view_chunks[0]["audio_path"], "voicelines/chunk-1.mp3")
+
+    def test_flush_dirty_chunks_batches_multiple_runtime_updates_into_one_manifest_write(self):
+        self.manager.save_chunks([
+            self._make_chunk(0, "chunk-1"),
+            self._make_chunk(1, "chunk-2"),
+        ])
+
+        self.manager.set_chunk_runtime(
+            "chunk-1",
+            status="done",
+            audio_path="voicelines/chunk-1.mp3",
+            audio_validation={"is_valid": True},
+            auto_regen_count=0,
+            generation_token=None,
+        )
+        self.manager.set_chunk_runtime(
+            "chunk-2",
+            status="error",
+            audio_path="voicelines/chunk-2.mp3",
+            audio_validation={"is_valid": False, "error": "bad clip"},
+            auto_regen_count=1,
+            generation_token=None,
+        )
+        self.manager.mark_chunks_dirty(["chunk-1", "chunk-2"])
+
+        original_atomic_write = self.manager._atomic_json_write_raw
+        manifest_writes = []
+
+        def counting_atomic_write(data, target_path, max_retries=5):
+            if os.path.abspath(target_path) == os.path.abspath(self.manager.chunks_path):
+                manifest_writes.append(target_path)
+            return original_atomic_write(data, target_path, max_retries=max_retries)
+
+        with patch.object(self.manager, "_atomic_json_write_raw", side_effect=counting_atomic_write):
+            flushed = self.manager.flush_dirty_chunks(force=True)
+
+        raw_chunks = self.manager.load_chunks_raw()
+
+        self.assertEqual(flushed, 2)
+        self.assertEqual(len(manifest_writes), 1)
+        self.assertEqual(raw_chunks[0]["status"], "done")
+        self.assertEqual(raw_chunks[1]["status"], "error")
+        self.assertEqual(raw_chunks[1]["audio_validation"]["error"], "bad clip")
+
+    def test_postprocess_workers_can_finish_multiple_tasks_in_parallel(self):
+        self.manager.save_chunks([
+            self._make_chunk(0, "chunk-1"),
+            self._make_chunk(1, "chunk-2"),
+        ])
+        self.manager._claim_chunks_generation([0, 1], generation_token="run-token")
+
+        def fake_finalize(index, speaker, text, temp_path, attempt=0, chunk_uid=None):
+            time.sleep(0.2)
+            return {
+                "status": "done",
+                "audio_path": f"voicelines/{chunk_uid}.mp3",
+                "audio_validation": {"is_valid": True, "file_size_bytes": 10, "actual_duration_sec": 1.0},
+                "error": None,
+            }
+
+        start = time.time()
+        with patch.object(self.manager, "_finalize_generated_audio", side_effect=fake_finalize):
+            future_one = self.manager._enqueue_postprocess(
+                index=0,
+                speaker="Narrator",
+                text="alpha beta gamma",
+                temp_path=os.path.join(self.root_dir, "temp_one.wav"),
+                attempt=0,
+                chunk_uid="chunk-1",
+                generation_token="run-token",
+            )
+            future_two = self.manager._enqueue_postprocess(
+                index=1,
+                speaker="Narrator",
+                text="delta epsilon zeta",
+                temp_path=os.path.join(self.root_dir, "temp_two.wav"),
+                attempt=0,
+                chunk_uid="chunk-2",
+                generation_token="run-token",
+            )
+            result_one = future_one.result(timeout=2.0)
+            result_two = future_two.result(timeout=2.0)
+        elapsed = time.time() - start
+
+        live_chunks = self.manager.load_chunks_view()
+
+        self.assertLess(elapsed, 0.35)
+        self.assertEqual(result_one["status"], "done")
+        self.assertEqual(result_two["status"], "done")
+        self.assertEqual(live_chunks[0]["status"], "done")
+        self.assertEqual(live_chunks[1]["status"], "done")
+        self.assertEqual(live_chunks[0]["audio_path"], "voicelines/chunk-1.mp3")
+        self.assertEqual(live_chunks[1]["audio_path"], "voicelines/chunk-2.mp3")
+
+    def test_reset_generating_chunks_clears_runtime_overlay(self):
+        self.manager.save_chunks([self._make_chunk(0, "chunk-1")])
+        self.manager._claim_chunk_generation(0, generation_token="run-token")
+
+        before_reset = self.manager.load_chunks_view()
+        reset_count = self.manager.reset_generating_chunks([0], generation_token="run-token")
+        after_reset = self.manager.load_chunks_view()
+        raw_chunks = self.manager.load_chunks_raw()
+
+        self.assertEqual(before_reset[0]["status"], "generating")
+        self.assertEqual(reset_count, 1)
+        self.assertEqual(after_reset[0]["status"], "pending")
+        self.assertNotIn("generation_token", after_reset[0])
+        self.assertEqual(raw_chunks[0]["status"], "pending")
 
     def test_groups_indices_by_resolved_speaker(self):
         chunks = [

@@ -6,9 +6,11 @@ import json
 import shutil
 import logging
 import asyncio
+import atexit
+import socket
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 from typing import List, Optional, Dict, Union
@@ -106,6 +108,91 @@ os.makedirs(CLONE_VOICES_DIR, exist_ok=True)
 os.makedirs(LORA_MODELS_DIR, exist_ok=True)
 os.makedirs(LORA_DATASETS_DIR, exist_ok=True)
 os.makedirs(DATASET_BUILDER_DIR, exist_ok=True)
+
+_media_static_server_lock = threading.Lock()
+_media_static_server_process = None
+_media_static_server_origin = None
+
+
+def _find_free_local_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _shutdown_media_static_server():
+    global _media_static_server_process
+    proc = _media_static_server_process
+    if proc is None:
+        return
+    _media_static_server_process = None
+    try:
+        proc.terminate()
+        proc.wait(timeout=2)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _get_media_static_origin():
+    global _media_static_server_process, _media_static_server_origin
+    configured = (os.getenv("THREADSPEAK_MEDIA_STATIC_ORIGIN") or "").strip().rstrip("/")
+    if configured:
+        return configured
+
+    with _media_static_server_lock:
+        proc = _media_static_server_process
+        if proc is not None and proc.poll() is None and _media_static_server_origin:
+            return _media_static_server_origin
+
+        port = _find_free_local_port()
+        command = [
+            sys.executable,
+            "-m",
+            "http.server",
+            str(port),
+            "--bind",
+            "127.0.0.1",
+            "--directory",
+            ROOT_DIR,
+        ]
+        try:
+            proc = subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            logger.warning("Failed to start media static server: %s", exc)
+            _media_static_server_process = None
+            _media_static_server_origin = None
+            return None
+
+        _media_static_server_process = proc
+        _media_static_server_origin = f"http://127.0.0.1:{port}"
+        atexit.register(_shutdown_media_static_server)
+        return _media_static_server_origin
+
+
+class _VoicelinesProxyStatic:
+    def __init__(self, directory):
+        self._fallback = StaticFiles(directory=directory)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            origin = _get_media_static_origin()
+            if origin:
+                path = scope.get("path") or ""
+                query_string = (scope.get("query_string") or b"").decode("utf-8", errors="ignore")
+                target = f"{origin}{path}"
+                if query_string:
+                    target = f"{target}?{query_string}"
+                response = RedirectResponse(target, status_code=307)
+                await response(scope, receive, send)
+                return
+        await self._fallback(scope, receive, send)
 
 
 def _load_manifest(path):
@@ -416,7 +503,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 # Create voicelines directory if it doesn't exist to prevent startup error
 VOICELINES_DIR = os.path.join(ROOT_DIR, "voicelines")
 os.makedirs(VOICELINES_DIR, exist_ok=True)
-app.mount("/voicelines", StaticFiles(directory=VOICELINES_DIR), name="voicelines")
+app.mount("/voicelines", _VoicelinesProxyStatic(directory=VOICELINES_DIR), name="voicelines")
 
 # Designed voices directory for voice designer feature
 app.mount("/designed_voices", StaticFiles(directory=DESIGNED_VOICES_DIR), name="designed_voices")

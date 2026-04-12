@@ -47,7 +47,7 @@ async def get_chunks():
 
 @router.get("/api/chunks/view")
 async def get_chunks_view(chapter: Optional[str] = None):
-    chunks = project_manager.load_chunks()
+    chunks = project_manager.load_chunks_view()
     chapter = (chapter or "").strip()
     if chapter:
         chunks = [chunk for chunk in chunks if (chunk.get("chapter") or "").strip() == chapter]
@@ -56,7 +56,7 @@ async def get_chunks_view(chapter: Optional[str] = None):
 
 @router.get("/api/chunks/{index}")
 async def get_chunk(index: str):
-    chunks = project_manager.load_chunks()
+    chunks = project_manager.load_chunks_view()
     resolved_index = project_manager.resolve_chunk_index(index, chunks)
     if resolved_index is None or not (0 <= resolved_index < len(chunks)):
         raise HTTPException(status_code=404, detail="Invalid chunk id")
@@ -387,12 +387,12 @@ async def generate_chunk_endpoint(index: str, background_tasks: BackgroundTasks)
         raise HTTPException(status_code=404, detail="Invalid chunk id")
     if not chunks[resolved_index].get("text", "").strip():
         raise HTTPException(status_code=400, detail="Cannot generate audio for an empty line")
-
-    def task():
-        project_manager.generate_chunk_audio(resolved_index)
-
-    background_tasks.add_task(task)
-    return {"status": "started"}
+    return _enqueue_audio_job(
+        "parallel",
+        [resolved_index],
+        label=f"Single chunk render ({resolved_index})",
+        scope="single_chunk",
+    )
 
 @router.post("/api/chunks/{index}/regenerate")
 async def regenerate_chunk_endpoint(index: str, background_tasks: BackgroundTasks):
@@ -404,12 +404,12 @@ async def regenerate_chunk_endpoint(index: str, background_tasks: BackgroundTask
     resolved_index = prepared["index"]
     if not chunk.get("text", "").strip():
         raise HTTPException(status_code=400, detail="Cannot generate audio for an empty line")
-
-    def task():
-        project_manager.generate_chunk_audio(resolved_index)
-
-    background_tasks.add_task(task)
-    return {"status": "started"}
+    return _enqueue_audio_job(
+        "parallel",
+        [resolved_index],
+        label=f"Single chunk regenerate ({resolved_index})",
+        scope="single_chunk",
+    )
 
 @router.post("/api/merge")
 async def merge_audio_endpoint(request: Optional[MergeRequest] = None, background_tasks: BackgroundTasks = None):

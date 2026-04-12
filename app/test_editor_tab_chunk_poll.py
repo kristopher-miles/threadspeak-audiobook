@@ -402,6 +402,61 @@ class EditorTabChunkPollTests(unittest.TestCase):
             """
         )
 
+    def test_generate_chunk_prefers_targeted_poll_results_over_stale_broad_state(self):
+        self._run_node_test(
+            """
+            (async () => {
+                const context = createContext();
+                const row = context.__createChunkRow({
+                    id: 6,
+                    speaker: 'Narrator',
+                    text: 'The focused chunk poll should win even if broad state is stale.',
+                    instruct: '',
+                    status: 'pending',
+                    audio_path: null,
+                    audio_validation: null,
+                });
+                context.__rows.set('6', row);
+
+                let loadChunksCalls = 0;
+                context.API.post = async (url, payload) => {
+                    if (url === '/api/chunks/6') {
+                        return { id: 6, speaker: payload.speaker, text: payload.text, instruct: payload.instruct, status: 'pending', audio_path: null, audio_validation: null };
+                    }
+                    if (url === '/api/chunks/6/generate') {
+                        return { status: 'started' };
+                    }
+                    throw new Error(`Unexpected POST ${url}`);
+                };
+                context.API.get = async (url) => {
+                    if (url === '/api/chunks/6') {
+                        return { id: 6, speaker: 'Narrator', text: row.__textArea.value, instruct: '', status: 'done', audio_path: 'voicelines/overlay.mp3', audio_validation: { file_size_bytes: 10, actual_duration_sec: 1.0 } };
+                    }
+                    throw new Error(`Unexpected GET ${url}`);
+                };
+
+                vm.createContext(context);
+                vm.runInContext(source, context);
+                context.__editorTabTestHooks.setCachedChunks([{ id: 6, speaker: 'Narrator', text: row.__textArea.value, instruct: '', status: 'pending', audio_path: null, audio_validation: null }]);
+                context.__editorTabTestHooks.setLoadChunks(async () => {
+                    loadChunksCalls += 1;
+                    context.__editorTabTestHooks.setCachedChunks([{ id: 6, speaker: 'Narrator', text: row.__textArea.value, instruct: '', status: 'pending', audio_path: null, audio_validation: null }]);
+                });
+
+                await context.window.generateChunk('6');
+                await flushTicks();
+
+                assert.strictEqual(loadChunksCalls, 0, 'focused tracking should not fall back to broad reloads');
+                assert.ok(row.classList.contains('status-done'));
+                assert.strictEqual(context.__editorTabTestHooks.getCachedChunks()[0].audio_path, 'voicelines/overlay.mp3');
+                assert.ok(row.__audioContainer.audio, 'audio player should be rendered from the targeted poll result');
+            })().catch((error) => {{
+                console.error(error);
+                process.exit(1);
+            }});
+            """
+        )
+
     def test_generate_chunk_polls_until_error_and_restores_button(self):
         self._run_node_test(
             """
