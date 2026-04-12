@@ -84,6 +84,9 @@
         });
         document.getElementById('btn-create-script-v2').addEventListener('click', async () => {
             await lockGenerationMode('create_script_v2');
+            if (typeof window.flushSetupConfig === 'function') {
+                await window.flushSetupConfig();
+            }
             try {
                 const info = await API.get('/api/script_info');
                 const hasExistingScriptState = (info.entry_count || 0) > 0;
@@ -169,6 +172,9 @@
         document.getElementById('btn-process-script-v2').addEventListener('click', async () => {
             await lockGenerationMode('process_script_v2');
             try {
+                if (typeof window.flushSetupConfig === 'function') {
+                    await window.flushSetupConfig();
+                }
                 const processVoices = document.getElementById('process-voices-toggle-v2')?.checked !== false;
                 const generateAudio = document.getElementById('generate-audio-toggle-v2')?.checked === true;
                 await API.post('/api/new_mode_workflow/start', { process_voices: processVoices, generate_audio: generateAudio });

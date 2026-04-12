@@ -33,6 +33,9 @@
                 statusEl.innerHTML = '<span class="text-danger"><i class="fas fa-exclamation-triangle me-1"></i>Please select a text, EPUB, or DOCX file first using the file picker above.</span>';
                 throw new Error('No input file selected');
             }
+            if (typeof window.flushSetupConfig === 'function') {
+                await window.flushSetupConfig();
+            }
 
             const ingestionDecision = await resolveScriptIngestionDecision({ continueWorkflow: false });
             if (ingestionDecision.skipImport) {
@@ -270,6 +273,9 @@
         document.getElementById('btn-process-script').addEventListener('click', async () => {
             await lockGenerationMode('process_script_legacy');
             try {
+                if (typeof window.flushSetupConfig === 'function') {
+                    await window.flushSetupConfig();
+                }
                 const ingestionDecision = await resolveScriptIngestionDecision({ continueWorkflow: true });
                 await API.post('/api/processing/start', {
                     process_voices: document.getElementById('process-voices-toggle').checked,

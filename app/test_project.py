@@ -267,6 +267,37 @@ class ChunkRuntimeOverlayTests(unittest.TestCase):
         self.assertEqual(raw_chunks[1]["status"], "error")
         self.assertEqual(raw_chunks[1]["audio_validation"]["error"], "bad clip")
 
+    def test_invalidate_chunk_audio_indices_clears_stale_runtime_overlay(self):
+        clip_path = os.path.join(self.root_dir, "voicelines", "chunk-1.mp3")
+        with open(clip_path, "wb") as handle:
+            handle.write(b"stub-audio")
+
+        chunk = self._make_chunk(0, "chunk-1")
+        chunk.update({
+            "status": "done",
+            "audio_path": "voicelines/chunk-1.mp3",
+            "audio_validation": {"file_size_bytes": 10, "actual_duration_sec": 1.0},
+        })
+        self.manager.save_chunks([chunk])
+        self.manager.set_chunk_runtime(
+            "chunk-1",
+            status="done",
+            audio_path="voicelines/chunk-1.mp3",
+            audio_validation={"file_size_bytes": 10, "actual_duration_sec": 1.0},
+            auto_regen_count=0,
+            generation_token=None,
+        )
+
+        result = self.manager.invalidate_chunk_audio_indices([0])
+        raw_chunks = self.manager.load_chunks_raw()
+        view_chunks = self.manager.load_chunks_view()
+
+        self.assertEqual(result["invalidated_clips"], 1)
+        self.assertEqual(raw_chunks[0]["status"], "pending")
+        self.assertIsNone(raw_chunks[0]["audio_path"])
+        self.assertEqual(view_chunks[0]["status"], "pending")
+        self.assertIsNone(view_chunks[0]["audio_path"])
+
     def test_postprocess_workers_can_finish_multiple_tasks_in_parallel(self):
         self.manager.save_chunks([
             self._make_chunk(0, "chunk-1"),

@@ -26,6 +26,8 @@ class EditorTabChunkPollTests(unittest.TestCase):
                 getTrackedChunkPollCount: () => activeChunkStatusPolls.size,
                 setLoadChunks: (fn) => {{ loadChunks = fn; }},
                 setUpdateProofreadRow: (fn) => {{ updateProofreadRow = fn; }},
+                setSelectedEditorChapter: (value) => {{ selectedEditorChapter = value; }},
+                getNarratorSelections: () => getNarratorSelections(),
             }};
             `;
 
@@ -107,15 +109,26 @@ class EditorTabChunkPollTests(unittest.TestCase):
                     dataset: {{
                         audioPath: pathMatch ? pathMatch[1] : '',
                         audioFingerprint: fingerprintMatch ? fingerprintMatch[1] : '',
+                        audioRetryCount: '0',
                     }},
                     src: srcMatch ? srcMatch[1] : '',
                     loadCalls: 0,
+                    paused: true,
                     load() {{
                         this.loadCalls += 1;
+                    }},
+                    pause() {{
+                        this.paused = true;
                     }},
                     getAttribute(name) {{
                         if (name === 'src') return this.src;
                         return null;
+                    }},
+                    setAttribute(name, value) {{
+                        if (name === 'src') this.src = value;
+                    }},
+                    remove() {{
+                        if (this.__container) this.__container.audio = null;
                     }},
                 }};
             }}
@@ -168,6 +181,7 @@ class EditorTabChunkPollTests(unittest.TestCase):
                 container.insertAdjacentHTML = (_position, html) => {{
                     if (html.includes('<audio')) {{
                         container.audio = createAudioNode(html);
+                        container.audio.__container = container;
                     }}
                 }};
                 return container;
@@ -223,6 +237,7 @@ class EditorTabChunkPollTests(unittest.TestCase):
                 const genericElements = new Map();
                 const rows = new Map();
                 const toasts = [];
+                const localStorageStore = new Map();
                 const context = {{
                     console,
                     Promise,
@@ -258,6 +273,17 @@ class EditorTabChunkPollTests(unittest.TestCase):
                     }},
                     Option: function Option(label, value) {{
                         return {{ label, value }};
+                    }},
+                    localStorage: {{
+                        getItem(key) {{
+                            return localStorageStore.has(key) ? localStorageStore.get(key) : null;
+                        }},
+                        setItem(key, value) {{
+                            localStorageStore.set(key, String(value));
+                        }},
+                        removeItem(key) {{
+                            localStorageStore.delete(key);
+                        }},
                     }},
                     document: {{
                         body: createGenericElement(),
@@ -663,6 +689,197 @@ class EditorTabChunkPollTests(unittest.TestCase):
                 assert.deepStrictEqual(proofreadUpdates.slice(-2), ['generating', 'done']);
                 assert.strictEqual(context.__editorTabTestHooks.getCachedChunks()[0].status, 'done');
                 assert.strictEqual(context.__editorTabTestHooks.getTrackedChunkPollCount(), 0);
+            })().catch((error) => {{
+                console.error(error);
+                process.exit(1);
+            }});
+            """
+        )
+
+    def test_update_chunk_row_removes_stale_audio_after_invalidation(self):
+        self._run_node_test(
+            """
+            (async () => {
+                const context = createContext();
+                const row = context.__createChunkRow({
+                    id: 7,
+                    speaker: 'Narrator',
+                    text: 'Invalidated narrator audio should disappear.',
+                    instruct: '',
+                    status: 'done',
+                    audio_path: 'voicelines/stale.mp3',
+                    audio_validation: { file_size_bytes: 10, actual_duration_sec: 1.0 },
+                });
+                row.__audioContainer.audio = createAudioNode('<audio src="/voicelines/stale.mp3?t=old" data-audio-path="voicelines/stale.mp3" data-audio-fingerprint="old"></audio>');
+                row.__audioContainer.audio.__container = row.__audioContainer;
+                context.__rows.set('7', row);
+
+                vm.createContext(context);
+                vm.runInContext(source, context);
+
+                const changed = context.updateChunkRow({
+                    id: 7,
+                    speaker: 'Narrator',
+                    text: 'Invalidated narrator audio should disappear.',
+                    instruct: '',
+                    status: 'pending',
+                    audio_path: null,
+                    audio_validation: null,
+                });
+
+                assert.strictEqual(changed, true);
+                assert.ok(!row.classList.contains('status-done'));
+                assert.ok(!row.classList.contains('status-generating'));
+                assert.strictEqual(row.__audioContainer.audio, null);
+                assert.ok(row.__generateSlot.button, 'generate button should be visible again');
+            })().catch((error) => {{
+                console.error(error);
+                process.exit(1);
+            }});
+            """
+        )
+
+    def test_handle_chunk_audio_error_retries_once_with_fresh_src(self):
+        self._run_node_test(
+            """
+            (async () => {
+                const context = createContext();
+                vm.createContext(context);
+                vm.runInContext(source, context);
+
+                const audio = createAudioNode('<audio src="/voicelines/clip.mp3?t=old" data-audio-path="voicelines/clip.mp3" data-audio-fingerprint="fp"></audio>');
+                const originalSrc = audio.src;
+
+                context.handleChunkAudioError(audio);
+                const retriedSrc = audio.src;
+                context.handleChunkAudioError(audio);
+
+                assert.notStrictEqual(retriedSrc, originalSrc, 'retry should replace the src with a fresh cache token');
+                assert.strictEqual(audio.loadCalls, 1, 'audio reload should only happen once');
+                assert.strictEqual(audio.dataset.audioRetryCount, '1');
+            })().catch((error) => {{
+                console.error(error);
+                process.exit(1);
+            }});
+            """
+        )
+
+    def test_audio_queue_poll_preserves_existing_audio_element_while_generation_runs(self):
+        self._run_node_test(
+            """
+            (async () => {
+                const context = createContext();
+                const initialChunk = {
+                    id: 8,
+                    speaker: 'Narrator',
+                    text: 'Existing audio should remain usable during active generation.',
+                    instruct: '',
+                    status: 'done',
+                    audio_path: 'voicelines/existing.mp3',
+                    audio_validation: { file_size_bytes: 10, actual_duration_sec: 1.0 },
+                };
+                const row = context.__createChunkRow(initialChunk);
+                row.__audioContainer.audio = createAudioNode('<audio src="/voicelines/existing.mp3?t=stable" data-audio-path="voicelines/existing.mp3" data-audio-fingerprint="voicelines/existing.mp3|10|1|done"></audio>');
+                row.__audioContainer.audio.__container = row.__audioContainer;
+                const preservedAudio = row.__audioContainer.audio;
+                context.__rows.set('8', row);
+
+                context.API.get = async (url) => {
+                    if (url === '/api/status/audio') {
+                        return {
+                            running: true,
+                            queue: [],
+                            current_job: { total_chunks: 2 },
+                            metrics: { processed_clips: 1 },
+                        };
+                    }
+                    if (url === '/api/chunks/view') {
+                        return [initialChunk];
+                    }
+                    throw new Error(`Unexpected GET ${url}`);
+                };
+
+                vm.createContext(context);
+                vm.runInContext(source, context);
+                context.__editorTabTestHooks.setCachedChunks([initialChunk]);
+
+                await context.pollAudioQueueOnce();
+                await flushTicks();
+
+                assert.strictEqual(row.__audioContainer.audio, preservedAudio, 'running generation should not replace an unchanged audio element');
+                assert.strictEqual(row.__audioContainer.audio.src, '/voicelines/existing.mp3?t=stable');
+            })().catch((error) => {{
+                console.error(error);
+                process.exit(1);
+            }});
+            """
+        )
+
+    def test_narrator_selection_is_saved_before_reload_and_not_reverted(self):
+        self._run_node_test(
+            """
+            (async () => {
+                const context = createContext();
+                vm.createContext(context);
+                vm.runInContext(source, context);
+
+                context.__editorTabTestHooks.setSelectedEditorChapter('Chapter 1');
+                context.localStorage.setItem('threadspeak-narrator-selection', JSON.stringify({ 'Chapter 1': 'Old Voice' }));
+
+                const select = context.document.getElementById('editor-narrator-select');
+                select.value = 'New Voice';
+
+                context.__editorTabTestHooks.setCachedChunks([
+                    { id: 1, speaker: 'NARRATOR', text: 'Narrator line', chapter: 'Chapter 1', audio_path: 'voicelines/existing.mp3' }
+                ]);
+
+                let selectionSeenDuringReload = null;
+                context.__editorTabTestHooks.setLoadChunks(async () => {
+                    selectionSeenDuringReload = context.__editorTabTestHooks.getNarratorSelections()['Chapter 1'] || null;
+                });
+
+                context.API.post = async (url, payload) => {
+                    assert.strictEqual(url, '/api/narrator_overrides');
+                    assert.strictEqual(payload.chapter, 'Chapter 1');
+                    assert.strictEqual(payload.voice, 'New Voice');
+                    assert.strictEqual(payload.invalidate_audio, true);
+                    return { status: 'saved' };
+                };
+
+                await context.window.onNarratorSelectorChange();
+
+                const finalSelections = context.__editorTabTestHooks.getNarratorSelections();
+                assert.strictEqual(selectionSeenDuringReload, 'New Voice', 'loadChunks should observe the new selection, not the stale one');
+                assert.strictEqual(finalSelections['Chapter 1'], 'New Voice');
+            })().catch((error) => {{
+                console.error(error);
+                process.exit(1);
+            }});
+            """
+        )
+
+    def test_sync_narrator_selections_from_backend_replaces_stale_local_entries(self):
+        self._run_node_test(
+            """
+            (async () => {
+                const context = createContext();
+                vm.createContext(context);
+                vm.runInContext(source, context);
+
+                context.localStorage.setItem('threadspeak-narrator-selection', JSON.stringify({
+                    'Chapter 1': 'Old Voice',
+                    'Chapter 2': 'Another Voice',
+                }));
+
+                context.API.get = async (url) => {
+                    assert.strictEqual(url, '/api/narrator_overrides');
+                    return { 'Chapter 1': 'Fresh Voice' };
+                };
+
+                await context.syncNarratorSelectionsFromBackend();
+
+                const finalSelections = context.__editorTabTestHooks.getNarratorSelections();
+                assert.strictEqual(JSON.stringify(finalSelections), JSON.stringify({ 'Chapter 1': 'Fresh Voice' }));
             })().catch((error) => {{
                 console.error(error);
                 process.exit(1);

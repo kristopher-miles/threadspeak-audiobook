@@ -83,15 +83,47 @@
             ].join('|');
         }
 
-        function buildChunkAudioSrc(chunk, fallbackToken = '') {
-            const rawPath = String(chunk?.audio_path || '').trim();
+        function buildAudioSrcFromPath(audioPath, cacheToken = '') {
+            const rawPath = String(audioPath || '').trim();
             if (!rawPath) return '';
             if (/^https?:\/\//i.test(rawPath)) {
                 return rawPath;
             }
             const normalizedPath = rawPath.startsWith('/') ? rawPath : `/${rawPath}`;
+            const token = cacheToken || Date.now().toString();
+            return `${normalizedPath}?t=${encodeURIComponent(String(token))}`;
+        }
+
+        function buildChunkAudioSrc(chunk, fallbackToken = '') {
             const fingerprint = getChunkAudioFingerprint(chunk) || fallbackToken || Date.now().toString();
-            return `${normalizedPath}?t=${encodeURIComponent(String(fingerprint))}`;
+            return buildAudioSrcFromPath(chunk?.audio_path || '', fingerprint);
+        }
+
+        function buildAudioPlayerHtml({ chunkRef = '', audioPath = '', fingerprint = '', src = '', width = 200, stopOthersId = null } = {}) {
+            if (!src) return '';
+            const onPlayAttr = stopOthersId == null
+                ? ''
+                : ` onplay='stopOthers(${JSON.stringify(stopOthersId)})'`;
+            return `<audio class="chunk-audio" data-id="${escapeHtml(chunkRef)}" data-audio-path="${escapeHtml(audioPath)}" data-audio-fingerprint="${escapeHtml(fingerprint)}" data-audio-retry-count="0" controls preload="none" src="${src}" style="width: ${width}px; height: 30px;" onerror='handleChunkAudioError(this)'${onPlayAttr}></audio>`;
+        }
+
+        window.handleChunkAudioError = (audioEl) => {
+            if (!audioEl) return;
+            const audioPath = String(audioEl.dataset?.audioPath || '').trim();
+            if (!audioPath) return;
+
+            const retryCount = Number.parseInt(audioEl.dataset.audioRetryCount || '0', 10) || 0;
+            if (retryCount >= 1) return;
+
+            audioEl.dataset.audioRetryCount = String(retryCount + 1);
+            const retryToken = `${audioEl.dataset.audioFingerprint || audioPath}|retry|${Date.now()}`;
+            const nextSrc = buildAudioSrcFromPath(audioPath, retryToken);
+            if (!nextSrc) return;
+
+            audioEl.src = nextSrc;
+            if (typeof audioEl.load === 'function') {
+                audioEl.load();
+            }
         }
 
         function updateCachedChunk(updatedChunk) {
@@ -357,13 +389,21 @@
                     const nextFingerprint = getChunkAudioFingerprint(chunk);
 
                     if (!existingAudio) {
-                        const audioHtml = `<audio class="chunk-audio" data-id="${escapeHtml(chunkRef)}" data-audio-path="${escapeHtml(chunk.audio_path)}" data-audio-fingerprint="${escapeHtml(nextFingerprint)}" controls preload="none" src="${newSrc}" style="width: 200px; height: 30px;" onplay='stopOthers(${JSON.stringify(chunkRef)})'></audio>`;
+                        const audioHtml = buildAudioPlayerHtml({
+                            chunkRef,
+                            audioPath: chunk.audio_path,
+                            fingerprint: nextFingerprint,
+                            src: newSrc,
+                            width: 200,
+                            stopOthersId: chunkRef,
+                        });
                         audioSlot.insertAdjacentHTML('beforeend', audioHtml);
                     } else if (existingAudio) {
                         const currentFingerprint = existingAudio.dataset.audioFingerprint || '';
                         if (currentFingerprint !== nextFingerprint || existingAudio.dataset.audioPath !== chunk.audio_path) {
                             existingAudio.dataset.audioPath = chunk.audio_path;
                             existingAudio.dataset.audioFingerprint = nextFingerprint;
+                            existingAudio.dataset.audioRetryCount = '0';
                             existingAudio.src = newSrc;
                             existingAudio.load();
                         }
@@ -400,7 +440,8 @@
         }
 
         function getChunkRef(chunk) {
-            return String(chunk?.uid || chunk?.id || '');
+            const ref = chunk?.uid ?? chunk?.id ?? '';
+            return String(ref);
         }
 
         function formatDuration(seconds) {
@@ -456,6 +497,35 @@
             });
 
             return merged;
+        }
+
+        function mergeChapterScopedSnapshots(existingChunks, freshChapterChunks, chapterName) {
+            const targetChapter = String(chapterName || '');
+            const source = Array.isArray(existingChunks) ? existingChunks : [];
+            const fresh = Array.isArray(freshChapterChunks) ? freshChapterChunks : [];
+            const firstTargetIndex = source.findIndex(
+                chunk => getChunkChapterName(chunk) === targetChapter
+            );
+            const retained = source.filter(
+                chunk => getChunkChapterName(chunk) !== targetChapter
+            );
+
+            // Keep chapter ordering stable: replace the chapter's slice in-place
+            // instead of appending it to the end of the project snapshot.
+            if (firstTargetIndex < 0) {
+                return [...retained, ...fresh];
+            }
+
+            const insertAt = source
+                .slice(0, firstTargetIndex)
+                .filter(chunk => getChunkChapterName(chunk) !== targetChapter)
+                .length;
+
+            return [
+                ...retained.slice(0, insertAt),
+                ...fresh,
+                ...retained.slice(insertAt),
+            ];
         }
 
         function syncProofreadChapterState(chunks) {
@@ -676,7 +746,13 @@
                 const existingSrc = existingAudio ? existingAudio.getAttribute('src') : null;
                 if (existingSrc !== newAudioSrc) {
                     const audioHtml = newAudioSrc
-                        ? `<audio controls preload="none" src="${newAudioSrc}" style="width: 210px; height: 30px;"></audio>`
+                        ? buildAudioPlayerHtml({
+                            chunkRef,
+                            audioPath: chunk.audio_path,
+                            fingerprint: getChunkAudioFingerprint(chunk),
+                            src: newAudioSrc,
+                            width: 210,
+                        })
                         : '<span class="text-muted small">No audio</span>';
                     audioCell.innerHTML = `${audioHtml}<div></div>`;
                 }
@@ -735,7 +811,13 @@
                     ? `<div class="small text-muted mt-1">Duration ${_actual}s vs expected ${_expected}s</div>`
                     : '';
                 const audioHtml = chunk.audio_path
-                    ? `<audio controls preload="none" src="${buildChunkAudioSrc(chunk, Date.now().toString())}" style="width: 210px; height: 30px;"></audio>`
+                    ? buildAudioPlayerHtml({
+                        chunkRef,
+                        audioPath: chunk.audio_path,
+                        fingerprint: getChunkAudioFingerprint(chunk),
+                        src: buildChunkAudioSrc(chunk, Date.now().toString()),
+                        width: 210,
+                    })
                     : '<span class="text-muted small">No audio</span>';
                 const regenButton = getProofreadGenerateButtonHtml(chunk, chunkRef);
                 const compareButton = shouldShowProofreadCompare(chunk)
@@ -1272,12 +1354,34 @@
             catch { return {}; }
         }
 
+        function saveNarratorSelections(selections) {
+            localStorage.setItem(NARRATOR_SELECTION_KEY, JSON.stringify(selections || {}));
+        }
+
+        function setNarratorSelectionForChapter(chapterName, voiceName) {
+            const selections = getNarratorSelections();
+            const chapter = String(chapterName || '').trim();
+            const voice = String(voiceName || '').trim();
+            if (!chapter) return selections;
+
+            // Mirror backend semantics: selecting the default narrator clears the
+            // per-chapter override instead of persisting a redundant local value.
+            if (!voice || voice.toUpperCase() === 'NARRATOR') {
+                delete selections[chapter];
+            } else {
+                selections[chapter] = voice;
+            }
+            saveNarratorSelections(selections);
+            return selections;
+        }
+
         window.onNarratorSelectorChange = async () => {
             const select = document.getElementById('editor-narrator-select');
             if (!select || selectedEditorChapter === WHOLE_PROJECT_CHAPTER_ID) return;
 
             const newValue = select.value;
-            const oldValue = getNarratorSelections()[selectedEditorChapter] || null;
+            const previousSelections = getNarratorSelections();
+            const oldValue = previousSelections[selectedEditorChapter] || null;
             if (newValue === oldValue) return;
 
             // Check for existing NARRATOR audio in this chapter
@@ -1296,32 +1400,39 @@
                     select.value = oldValue || 'NARRATOR';
                     return;
                 }
-                await API.post('/api/narrator_overrides', {
-                    chapter: selectedEditorChapter,
-                    voice: newValue,
-                    invalidate_audio: true,
-                });
-                await loadChunks(true);
-            } else {
-                await API.post('/api/narrator_overrides', {
-                    chapter: selectedEditorChapter,
-                    voice: newValue,
-                    invalidate_audio: false,
-                });
             }
 
-            const selections = getNarratorSelections();
-            selections[selectedEditorChapter] = newValue;
-            localStorage.setItem(NARRATOR_SELECTION_KEY, JSON.stringify(selections));
+            // Persist locally before any awaited refresh so UI redraws during the
+            // invalidation flow pick the newly selected narrator, not the stale one.
+            setNarratorSelectionForChapter(selectedEditorChapter, newValue);
+
+            try {
+                await API.post('/api/narrator_overrides', {
+                    chapter: selectedEditorChapter,
+                    voice: newValue,
+                    invalidate_audio: withAudio.length > 0,
+                });
+                if (withAudio.length > 0) {
+                    await loadChunks(true);
+                }
+            } catch (e) {
+                saveNarratorSelections(previousSelections);
+                select.value = oldValue || 'NARRATOR';
+                throw e;
+            }
         };
 
         async function syncNarratorSelectionsFromBackend() {
             try {
                 const overrides = await API.get('/api/narrator_overrides');
-                const selections = getNarratorSelections();
-                // Backend is authoritative — merge, backend wins on conflict
-                Object.assign(selections, overrides);
-                localStorage.setItem(NARRATOR_SELECTION_KEY, JSON.stringify(selections));
+                const authoritativeSelections = {};
+                Object.entries(overrides || {}).forEach(([chapter, voice]) => {
+                    const chapterName = String(chapter || '').trim();
+                    const voiceName = String(voice || '').trim();
+                    if (!chapterName || !voiceName || voiceName.toUpperCase() === 'NARRATOR') return;
+                    authoritativeSelections[chapterName] = voiceName;
+                });
+                saveNarratorSelections(authoritativeSelections);
             } catch (e) {
                 // Non-fatal; localStorage remains as fallback
             }
@@ -1548,7 +1659,14 @@
             const rowStatusClass = getEditorRowStatusClass(chunk);
 
             const audioPlayer = chunk.audio_path
-                ? `<audio class="chunk-audio" data-id="${escapeHtml(chunkRef)}" data-audio-path="${escapeHtml(chunk.audio_path)}" data-audio-fingerprint="${escapeHtml(audioFingerprint)}" controls preload="none" src="${buildChunkAudioSrc(chunk, Date.now().toString())}" style="width: 200px; height: 30px;" onplay='stopOthers(${quotedChunkRef})'></audio>`
+                ? buildAudioPlayerHtml({
+                    chunkRef,
+                    audioPath: chunk.audio_path,
+                    fingerprint: audioFingerprint,
+                    src: buildChunkAudioSrc(chunk, Date.now().toString()),
+                    width: 200,
+                    stopOthersId: chunkRef,
+                })
                 : '';
 
             const actionArea = chunk.status === 'generating' ?
@@ -1591,7 +1709,9 @@
                         ? `/api/chunks/view?chapter=${encodeURIComponent(selectedEditorChapter)}`
                         : '/api/chunks/view'
                 );
-                const rawMerged = useChapterScope ? mergeChunkSnapshots(cachedChunks, chunks) : chunks;
+                const rawMerged = useChapterScope
+                    ? mergeChapterScopedSnapshots(cachedChunks, chunks, selectedEditorChapter)
+                    : chunks;
                 // Filter out any UIDs still being deleted (guards against polling race)
                 const mergedChunks = pendingDeleteRefs.size > 0
                     ? rawMerged.filter(c => !pendingDeleteRefs.has(getChunkRef(c)))

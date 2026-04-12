@@ -1,4 +1,5 @@
 from fastapi import APIRouter
+import urllib.parse
 from .. import shared as _shared
 from pydub import AudioSegment
 
@@ -361,9 +362,24 @@ async def insert_silence_chunk(index: str):
 @router.delete("/api/chunks/{index}")
 async def delete_chunk(index: str):
     """Delete a chunk at the given index."""
-    result = project_manager.delete_chunk(index)
+    normalized_index = urllib.parse.unquote(index or "")
+    result = project_manager.delete_chunk(normalized_index)
     if result is None:
-        raise HTTPException(status_code=400, detail="Cannot delete chunk (invalid index or last remaining chunk)")
+        # Fallback: resolve against live view and retry by concrete index.
+        # This protects delete flow when a stale/encoded UID is visible in UI
+        # but direct UID resolution path fails.
+        chunks = project_manager.load_chunks_view()
+        resolved = project_manager.resolve_chunk_index(normalized_index, chunks)
+        if resolved is not None and len(chunks) > 1:
+            result = project_manager.delete_chunk(str(resolved))
+    if result is None:
+        chunks = project_manager.load_chunks_view()
+        if len(chunks) <= 1:
+            detail = "Cannot delete chunk: project has only one remaining line."
+        else:
+            resolved = project_manager.resolve_chunk_index(normalized_index, chunks)
+            detail = f"Cannot delete chunk: unresolved chunk id '{normalized_index}' (resolved={resolved})."
+        raise HTTPException(status_code=400, detail=detail)
     deleted, chunks, restore_after_uid = result
     return {"status": "ok", "deleted": deleted, "total": len(chunks), "restore_after_uid": restore_after_uid}
 
@@ -1072,10 +1088,11 @@ async def cancel_audio():
     """Cancel immediately: hard-wipe current job, queue, and persisted queue state."""
     global audio_recovery_request
     with audio_queue_condition:
+        had_active_or_queued = bool(audio_current_job is not None or audio_queue)
         _append_audio_log_locked(
             f"[CANCEL] /api/cancel_audio invoked (current_job={'yes' if audio_current_job is not None else 'no'}, queued={len(audio_queue)})"
         )
         wipe = _hard_wipe_audio_runtime_locked("User requested cancellation via /api/cancel_audio")
-        return {"status": "cancelled", **wipe}
+        return {"status": "cancelling" if had_active_or_queued else "not_running", **wipe}
 
 ## ── Saved Scripts ──────────────────────────────────────────────

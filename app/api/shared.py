@@ -22,6 +22,8 @@ import tempfile
 import subprocess
 import aiofiles
 import uuid
+import urllib.request
+import urllib.error
 from openai import OpenAI
 
 # Import ProjectManager
@@ -112,6 +114,9 @@ os.makedirs(DATASET_BUILDER_DIR, exist_ok=True)
 _media_static_server_lock = threading.Lock()
 _media_static_server_process = None
 _media_static_server_origin = None
+_media_static_server_shutdown_registered = False
+_MEDIA_STATIC_READY_TIMEOUT_SECONDS = 3.0
+_MEDIA_STATIC_READY_POLL_SECONDS = 0.05
 
 
 def _find_free_local_port():
@@ -121,11 +126,12 @@ def _find_free_local_port():
 
 
 def _shutdown_media_static_server():
-    global _media_static_server_process
+    global _media_static_server_process, _media_static_server_origin
     proc = _media_static_server_process
+    _media_static_server_process = None
+    _media_static_server_origin = None
     if proc is None:
         return
-    _media_static_server_process = None
     try:
         proc.terminate()
         proc.wait(timeout=2)
@@ -136,8 +142,35 @@ def _shutdown_media_static_server():
             pass
 
 
+def _probe_media_static_origin(origin, timeout=0.25):
+    health_url = f"{origin}/__health"
+    try:
+        with urllib.request.urlopen(health_url, timeout=timeout) as response:
+            return 200 <= int(getattr(response, "status", 0) or 0) < 300
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, ValueError):
+        return False
+
+
+def _media_static_server_command(port):
+    return [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "api.media_static_server:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--log-level",
+        "warning",
+        "--no-access-log",
+        "--app-dir",
+        BASE_DIR,
+    ]
+
+
 def _get_media_static_origin():
-    global _media_static_server_process, _media_static_server_origin
+    global _media_static_server_process, _media_static_server_origin, _media_static_server_shutdown_registered
     configured = (os.getenv("THREADSPEAK_MEDIA_STATIC_ORIGIN") or "").strip().rstrip("/")
     if configured:
         return configured
@@ -148,21 +181,13 @@ def _get_media_static_origin():
             return _media_static_server_origin
 
         port = _find_free_local_port()
-        command = [
-            sys.executable,
-            "-m",
-            "http.server",
-            str(port),
-            "--bind",
-            "127.0.0.1",
-            "--directory",
-            ROOT_DIR,
-        ]
+        command = _media_static_server_command(port)
         try:
             proc = subprocess.Popen(
                 command,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                cwd=BASE_DIR,
             )
         except Exception as exc:
             logger.warning("Failed to start media static server: %s", exc)
@@ -172,8 +197,21 @@ def _get_media_static_origin():
 
         _media_static_server_process = proc
         _media_static_server_origin = f"http://127.0.0.1:{port}"
-        atexit.register(_shutdown_media_static_server)
-        return _media_static_server_origin
+        if not _media_static_server_shutdown_registered:
+            atexit.register(_shutdown_media_static_server)
+            _media_static_server_shutdown_registered = True
+
+        deadline = time.time() + _MEDIA_STATIC_READY_TIMEOUT_SECONDS
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                break
+            if _probe_media_static_origin(_media_static_server_origin):
+                return _media_static_server_origin
+            time.sleep(_MEDIA_STATIC_READY_POLL_SECONDS)
+
+        logger.warning("Media static server failed readiness probe: %s", _media_static_server_origin)
+        _shutdown_media_static_server()
+        return None
 
 
 class _VoicelinesProxyStatic:
@@ -2134,6 +2172,14 @@ def _restore_project_archive_zip(zip_path: str):
 
 
 def _persist_audio_queue_state_locked():
+    if not audio_queue and audio_current_job is None and not process_state["audio"].get("merge_running", False):
+        if os.path.exists(AUDIO_QUEUE_STATE_PATH):
+            try:
+                os.remove(AUDIO_QUEUE_STATE_PATH)
+            except OSError as exc:
+                logger.warning(f"Failed to clear idle audio queue state: {exc}")
+        return
+
     payload = {
         "job_counter": audio_job_counter,
         "queue": [_serialize_audio_job(job) | {"word_counts": job.get("word_counts", {})} for job in audio_queue],
