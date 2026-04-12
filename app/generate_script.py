@@ -20,6 +20,8 @@ configure_utf8_stdio()
 CHECKPOINT_PATH = os.path.join(os.path.dirname(__file__), "..", "script_generation_checkpoint.json")
 OUTPUT_PATH = os.path.join("..", "annotated_script.json")
 CHUNKS_PATH = os.path.join("..", "chunks.json")
+CHUNKS_DB_PATH = os.path.join("..", "chunks.sqlite3")
+CHUNKS_QUEUE_LOG_PATH = os.path.join("..", "chunks.queue.log")
 
 def clean_json_string(text):
     """Clean and extract valid JSON array from LLM response."""
@@ -509,6 +511,11 @@ def main():
     if os.path.exists(CHUNKS_PATH):
         os.remove(CHUNKS_PATH)
         print("Cleared old chunks.json")
+    if os.path.exists(CHUNKS_DB_PATH):
+        os.remove(CHUNKS_DB_PATH)
+        print("Cleared old chunks.sqlite3")
+    if os.path.exists(CHUNKS_QUEUE_LOG_PATH):
+        os.remove(CHUNKS_QUEUE_LOG_PATH)
 
     # Create OpenAI client with custom base URL
     client = OpenAI(

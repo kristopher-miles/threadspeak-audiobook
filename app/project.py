@@ -36,6 +36,7 @@ from script_store import (
     load_script_document,
 )
 from source_document import load_source_document, iter_document_paragraphs
+from script_provider import create_script_store
 
 from project_core.constants import (
     MAX_CHUNK_CHARS,
@@ -94,6 +95,8 @@ class ProjectManager(
         self.root_dir = root_dir
         self.script_path = os.path.join(root_dir, "annotated_script.json")
         self.chunks_path = os.path.join(root_dir, "chunks.json")
+        self.chunks_db_path = os.path.join(root_dir, "chunks.sqlite3")
+        self.chunks_queue_log_path = os.path.join(root_dir, "chunks.queue.log")
         self.backups_dir = os.path.join(root_dir, "backups")
         self.chunks_backups_dir = os.path.join(self.backups_dir, "chunks")
         self.chunks_latest_backup_path = os.path.join(self.chunks_backups_dir, "chunks.latest.json")
@@ -126,6 +129,8 @@ class ProjectManager(
         self._chunk_state_flush_batch_size = runtime_settings["chunk_state_flush_batch_size"]
         self._postprocess_queue: queue.Queue = queue.Queue(maxsize=self._postprocess_workers * 2)
         self._postprocess_threads = []
+        self.script_store = None
+        self._init_script_store()
         self._chunks_flush_thread = threading.Thread(
             target=self._chunks_flush_loop,
             daemon=True,
@@ -141,3 +146,30 @@ class ProjectManager(
             thread.start()
             self._postprocess_threads.append(thread)
         atexit.register(self.flush_dirty_chunks, True)
+        atexit.register(self.shutdown_script_store)
+
+    def _init_script_store(self):
+        self.script_store = create_script_store(
+            root_dir=self.root_dir,
+            db_path=self.chunks_db_path,
+            queue_log_path=self.chunks_queue_log_path,
+            script_path=self.script_path,
+            legacy_chunks_path=self.chunks_path,
+            archive_dir=self.chunks_backups_dir,
+        )
+        self.script_store.start()
+
+    def shutdown_script_store(self, flush=True):
+        if self.script_store is None:
+            return
+        self.script_store.stop(flush=flush)
+
+    def reload_script_store(self, clear_runtime=True):
+        self.shutdown_script_store(flush=True)
+        if clear_runtime:
+            with self._chunks_snapshot_lock:
+                self._chunks_snapshot = None
+            with self._chunk_runtime_lock:
+                self._chunk_runtime = {}
+                self._dirty_chunk_uids.clear()
+        self._init_script_store()

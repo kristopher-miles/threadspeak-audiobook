@@ -39,6 +39,9 @@ EXPECTED_PROJECT_MANAGER_METHODS = {
     "resolve_chunk_index",
     "is_render_prep_complete",
     "set_render_prep_complete",
+    "_init_script_store",
+    "shutdown_script_store",
+    "reload_script_store",
     "_escape_concat_path",
     "_write_concat_line",
     "_resolve_trim_config",
@@ -129,6 +132,8 @@ EXPECTED_PROJECT_MANAGER_METHODS = {
     "load_chunks_raw",
     "load_chunks_view",
     "load_chunks",
+    "get_chunk_view",
+    "get_chunk_view_by_index",
     "_chunk_has_generated_work",
     "_script_sync_match_key",
     "_preserve_chunk_state_for_script_sync",
@@ -136,6 +141,10 @@ EXPECTED_PROJECT_MANAGER_METHODS = {
     "reconcile_chunk_audio_states",
     "_validate_chunk_audio",
     "_validate_audio_path_for_chunk",
+    "get_chunk_chapter_summary",
+    "has_generated_chunk_audio",
+    "export_chunks_to_path",
+    "has_substantive_chunks",
     "_parse_chunk_audio_candidate_name",
     "_discarded_voicelines_dir",
     "_collect_repair_candidates_from_dir_locked",
@@ -238,7 +247,7 @@ EXPECTED_PROJECT_EXPORTS = {
 
 EXPECTED_SIGNATURES = {
     "resolve_chunk_index": "(self, chunk_ref, chunks=None)",
-    "load_chunks_view": "(self)",
+    "load_chunks_view": "(self, chapter=None)",
     "save_chunks": "(self, chunks)",
     "update_chunk": "(self, chunk_ref, data)",
     "prepare_chunk_for_regeneration": "(self, chunk_ref)",
@@ -288,3 +297,29 @@ class ProjectManagerContractTests(unittest.TestCase):
                 self.assertTrue(callable(getattr(manager, "_validate_chunk_audio")))
             finally:
                 manager.flush_dirty_chunks(force=True)
+                manager.shutdown_script_store(flush=True)
+
+    def test_chunks_json_direct_access_is_limited(self):
+        repo_root = os.path.dirname(__file__)
+        allowed = {
+            os.path.join(repo_root, "script_provider.py"),
+            os.path.join(repo_root, "create_script.py"),
+            os.path.join(repo_root, "generate_script.py"),
+            os.path.join(repo_root, "test_project_archive.py"),
+            os.path.join(repo_root, "test_workflow_entrypoints.py"),
+        }
+        forbidden_hits = []
+
+        for current_root, _, filenames in os.walk(repo_root):
+            for filename in filenames:
+                if not filename.endswith(".py"):
+                    continue
+                path = os.path.join(current_root, filename)
+                if path in allowed or path == __file__:
+                    continue
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                if "with open(self.chunks_path" in content or "with open(CHUNKS_PATH" in content:
+                    forbidden_hits.append(os.path.relpath(path, repo_root))
+
+        self.assertEqual(forbidden_hits, [])

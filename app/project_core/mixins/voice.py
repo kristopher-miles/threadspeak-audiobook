@@ -563,11 +563,9 @@ class ProjectVoiceMixin:
             cleared_uids = set()
 
             with self._chunks_lock:
-                if not os.path.exists(self.chunks_path):
+                chunks = self.load_chunks_raw()
+                if not chunks:
                     return {"invalidated_clips": 0, "deleted_files": 0}
-
-                with open(self.chunks_path, "r", encoding="utf-8") as f:
-                    chunks = json.load(f)
 
                 for index in sorted(target_indices):
                     if not (0 <= index < len(chunks)):

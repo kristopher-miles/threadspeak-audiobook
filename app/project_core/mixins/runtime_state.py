@@ -257,10 +257,7 @@ class ProjectRuntimeStateMixin:
             """
             reset_count = 0
             with self._chunks_lock:
-                if not os.path.exists(self.chunks_path):
-                    return reset_count
-                with open(self.chunks_path, "r", encoding="utf-8") as f:
-                    chunks = json.load(f)
+                chunks = self.load_chunks_raw()
                 for index in indices:
                     if not (0 <= index < len(chunks)):
                         continue
@@ -378,11 +375,6 @@ class ProjectRuntimeStateMixin:
 
                 self._atomic_json_write_raw(chunks, self.chunks_path)
                 self._set_chunks_snapshot(chunks)
-                self._atomic_json_write_raw(chunks, self.chunks_latest_backup_path)
-                current_audio_count = self._count_audio_linked_chunks(chunks)
-                best_audio_count = self._load_chunk_backup_audio_count(self.chunks_best_backup_path)
-                if current_audio_count > best_audio_count:
-                    self._atomic_json_write_raw(chunks, self.chunks_best_backup_path)
 
                 flushed_count = len(runtime_snapshot)
                 with self._chunk_runtime_lock:

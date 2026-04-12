@@ -250,9 +250,9 @@ async def get_config():
     config_changed = False
     default_config = {
         "llm": {
-            "base_url": "http://localhost:11434/v1",
+            "base_url": "",
             "api_key": "local",
-            "model_name": "richardyoung/qwen3-14b-abliterated:Q8_0",
+            "model_name": "",
             "llm_workers": 1
         },
         "tts": {

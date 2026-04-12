@@ -1526,44 +1526,57 @@ def _derived_processing_completed_stages(options=None):
         if stage_name == "voices" and markers.get(stage_name) and os.path.exists(VOICE_CONFIG_PATH):
             completed.append(stage_name)
             continue
-        if stage_name == "audio" and markers.get(stage_name) and os.path.exists(CHUNKS_PATH):
+        if stage_name == "audio" and markers.get(stage_name) and bool(_load_compat_chunks_snapshot()):
             completed.append(stage_name)
 
     return completed
 
 
 def _chunk_chapter_summary():
-    if not os.path.exists(CHUNKS_PATH):
-        return {
-            "chunk_count": 0,
-            "chapter_count": 0,
-            "last_chapter": None,
-        }
     try:
-        with open(CHUNKS_PATH, "r", encoding="utf-8") as f:
-            chunks = json.load(f)
-    except (OSError, json.JSONDecodeError, ValueError):
+        chunks = _load_compat_chunks_snapshot()
+        ordered_chapters = []
+        last_seen = None
+        for chunk in chunks:
+            chapter = str((chunk or {}).get("chapter") or "").strip()
+            if not chapter:
+                continue
+            if chapter != last_seen:
+                ordered_chapters.append(chapter)
+                last_seen = chapter
+        return {
+            "chunk_count": len(chunks),
+            "chapter_count": len(ordered_chapters),
+            "last_chapter": ordered_chapters[-1] if ordered_chapters else None,
+        }
+    except Exception:
         return {
             "chunk_count": 0,
             "chapter_count": 0,
-            "last_chapter": None,
+        "last_chapter": None,
         }
 
-    ordered_chapters = []
-    last_seen = None
-    for chunk in chunks if isinstance(chunks, list) else []:
-        chapter = str((chunk or {}).get("chapter") or "").strip()
-        if not chapter:
-            continue
-        if chapter != last_seen:
-            ordered_chapters.append(chapter)
-            last_seen = chapter
 
-    return {
-        "chunk_count": len(chunks) if isinstance(chunks, list) else 0,
-        "chapter_count": len(ordered_chapters),
-        "last_chapter": ordered_chapters[-1] if ordered_chapters else None,
-    }
+def _load_compat_chunks_snapshot():
+    manager_root = os.path.abspath(getattr(project_manager, "root_dir", ROOT_DIR))
+    current_root = os.path.abspath(ROOT_DIR)
+    if manager_root == current_root and hasattr(project_manager, "load_chunks"):
+        try:
+            chunks = project_manager.load_chunks()
+            if isinstance(chunks, list):
+                return chunks
+        except Exception:
+            pass
+
+    if not os.path.exists(CHUNKS_PATH):
+        return []
+    try:
+        chunks_path = CHUNKS_PATH
+        with open(chunks_path, "r", encoding="utf-8", errors="ignore") as f:
+            payload = json.load(f)
+        return payload if isinstance(payload, list) else []
+    except (OSError, json.JSONDecodeError, ValueError):
+        return []
 
 
 def _script_ingestion_preflight_summary():
@@ -1654,6 +1667,8 @@ def _clear_project_derived_state(preserve_input_file=True):
         VOICES_PATH,
         VOICE_CONFIG_PATH,
         CHUNKS_PATH,
+        project_manager.chunks_db_path,
+        project_manager.chunks_queue_log_path,
         project_manager.transcription_cache_path,
         AUDIOBOOK_PATH,
         M4B_PATH,
@@ -1685,6 +1700,7 @@ def _clear_project_derived_state(preserve_input_file=True):
         project_manager._transcription_cache = None
     project_manager.engine = None
     project_manager.asr_engine = None
+    project_manager.reload_script_store()
 
 
 def _persist_processing_workflow_state_locked():
@@ -1901,7 +1917,7 @@ def _project_archive_entries():
         if os.path.exists(absolute_path):
             entries[normalized] = absolute_path
 
-    for relative_path in sorted(PROJECT_ARCHIVE_ALLOWED_FILES):
+    for relative_path in sorted(PROJECT_ARCHIVE_ALLOWED_FILES - {"chunks.json"}):
         add_relative_path(relative_path)
 
     state = _archive_state_with_relative_paths()
@@ -1909,13 +1925,10 @@ def _project_archive_entries():
     if input_file_path:
         add_relative_path(input_file_path)
 
-    chunks = []
-    if os.path.exists(CHUNKS_PATH):
-        try:
-            with open(CHUNKS_PATH, "r", encoding="utf-8") as f:
-                chunks = json.load(f)
-        except (json.JSONDecodeError, ValueError, OSError):
-            chunks = []
+    chunks = _load_compat_chunks_snapshot()
+
+    if chunks:
+        entries["chunks.json"] = None
 
     for chunk in chunks:
         audio_path = (chunk.get("audio_path") or "").strip()
@@ -1978,14 +1991,9 @@ def _saved_project_archive_path(name: str) -> str:
 
 
 def _project_has_generated_audio() -> bool:
-    if not os.path.exists(CHUNKS_PATH):
-        return False
     try:
-        with open(CHUNKS_PATH, "r", encoding="utf-8") as f:
-            chunks = json.load(f)
-    except (json.JSONDecodeError, ValueError, OSError):
-        return False
-    if not isinstance(chunks, list):
+        chunks = _load_compat_chunks_snapshot()
+    except Exception:
         return False
 
     root = os.path.abspath(ROOT_DIR)
@@ -2024,6 +2032,8 @@ def _write_project_archive(zip_path: str):
             for relative_path, absolute_path in entries:
                 if relative_path == "state.json":
                     zf.writestr(relative_path, json.dumps(_archive_state_with_relative_paths(), indent=2, ensure_ascii=False))
+                elif relative_path == "chunks.json":
+                    zf.writestr(relative_path, json.dumps(_load_compat_chunks_snapshot(), indent=2, ensure_ascii=False))
                 else:
                     zf.write(absolute_path, arcname=relative_path)
         os.replace(temp_zip_path, zip_path)
@@ -2039,6 +2049,8 @@ def _clear_project_archive_targets():
         "voice_config.json",
         "voices.json",
         "chunks.json",
+        "chunks.sqlite3",
+        "chunks.queue.log",
         "script_sanity_check.json",
         "state.json",
         "transcription_cache.json",
@@ -2129,6 +2141,8 @@ def _restore_project_archive(extracted_dir: str):
             shutil.rmtree(target_dir)
         shutil.copytree(source_dir, target_dir)
 
+    if hasattr(project_manager, "reload_script_store"):
+        project_manager.reload_script_store()
     _reset_runtime_state_after_project_load()
 
 
@@ -3450,13 +3464,15 @@ def _run_create_script_task(run_id: str, paragraphs_path: str, voice_config_path
         )
 
     # ── Build the script ──────────────────────────────────────────────────────
-    run_process(
+    success = run_process(
         [sys.executable, "-u", "create_script.py",
          paragraphs_path, voice_config_path, script_output_path, chunks_output_path,
          "--max-length", str(script_max_length)],
         "create_script",
         run_id,
     )
+    if success:
+        project_manager.reload_script_store()
 
 
 def _load_script_max_length() -> int:
@@ -3485,6 +3501,7 @@ def _run_generate_script_task(run_id: str):
     _clear_processing_stage_and_downstream("script")
     success = run_process([sys.executable, "-u", "generate_script.py", input_file], "script", run_id)
     if success:
+        project_manager.reload_script_store()
         _mark_processing_stage_completed_marker("script")
     return success
 
@@ -3858,31 +3875,24 @@ def _derived_new_mode_completed_stages_from_files(options=None) -> list:
 def _project_script_complete_detected() -> bool:
     """Return True when a generated script project already exists on disk.
 
-    This is intentionally conservative: if both annotated_script.json and
-    chunks.json exist and chunks contain at least one substantive entry, the
-    Script tab workflow should be treated as complete after restart instead of
-    attempting to resume.
+    This is intentionally conservative: if annotated_script.json exists and the
+    script store already contains substantive chunk data, the Script tab workflow
+    should be treated as complete after restart instead of attempting to resume.
     """
-    if not (os.path.exists(SCRIPT_PATH) and os.path.exists(CHUNKS_PATH)):
+    if not os.path.exists(SCRIPT_PATH):
         return False
 
     try:
-        with open(CHUNKS_PATH, "r", encoding="utf-8") as f:
-            chunks = json.load(f)
-    except (OSError, json.JSONDecodeError, ValueError):
+        for chunk in _load_compat_chunks_snapshot():
+            if not isinstance(chunk, dict):
+                continue
+            has_text = bool(str(chunk.get("text") or "").strip())
+            has_speaker = bool(str(chunk.get("speaker") or "").strip())
+            if has_text and has_speaker:
+                return True
         return False
-
-    if not isinstance(chunks, list) or not chunks:
+    except Exception:
         return False
-
-    for chunk in chunks:
-        if not isinstance(chunk, dict):
-            continue
-        has_text = bool(str(chunk.get("text") or "").strip())
-        has_speaker = bool(str(chunk.get("speaker") or "").strip())
-        if has_text and has_speaker:
-            return True
-    return False
 
 
 def _initialize_new_mode_stage_markers(options=None, legacy_completed_stages=None):

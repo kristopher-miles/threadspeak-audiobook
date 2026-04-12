@@ -495,7 +495,7 @@ class ProjectAudioRepairMixin:
                 if progress_callback:
                     progress_callback(payload)
 
-            if not os.path.exists(self.chunks_path):
+            if not self.load_chunks_raw():
                 return {
                     "relinked": 0,
                     "preserved": 0,
@@ -508,8 +508,7 @@ class ProjectAudioRepairMixin:
                 }
 
             with self._chunks_lock:
-                with open(self.chunks_path, "r", encoding="utf-8") as f:
-                    chunks = json.load(f)
+                chunks = self.load_chunks_raw()
 
                 repair_started_at = time.time()
                 dictionary_entries = self.load_dictionary_entries()

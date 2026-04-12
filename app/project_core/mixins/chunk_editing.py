@@ -131,10 +131,9 @@ class ProjectChunkEditingMixin:
         def insert_chunk(self, after_ref):
             """Insert an empty chunk after the given index. Returns the new chunk list."""
             with self._chunks_lock:
-                if not os.path.exists(self.chunks_path):
+                chunks = self.load_chunks_raw()
+                if not chunks:
                     return None
-                with open(self.chunks_path, "r", encoding="utf-8") as f:
-                    chunks = json.load(f)
                 after_index = self.resolve_chunk_index(after_ref, chunks)
                 if after_index is None or not (0 <= after_index < len(chunks)):
                     return None
@@ -166,10 +165,9 @@ class ProjectChunkEditingMixin:
         def insert_silence_chunk(self, after_ref, duration_s=1.0):
             """Insert a silence block after the given chunk. Returns (new_chunk, chunks) or None."""
             with self._chunks_lock:
-                if not os.path.exists(self.chunks_path):
+                chunks = self.load_chunks_raw()
+                if not chunks:
                     return None
-                with open(self.chunks_path, "r", encoding="utf-8") as f:
-                    chunks = json.load(f)
                 after_index = self.resolve_chunk_index(after_ref, chunks)
                 if after_index is None or not (0 <= after_index < len(chunks)):
                     return None
@@ -219,10 +217,9 @@ class ProjectChunkEditingMixin:
                 return None
             chapter_name = chapter_name.strip()
             with self._chunks_lock:
-                if not os.path.exists(self.chunks_path):
+                chunks = self.load_chunks_raw()
+                if not chunks:
                     return None
-                with open(self.chunks_path, "r", encoding="utf-8") as f:
-                    chunks = json.load(f)
 
                 deleted = [c for c in chunks if c.get("chapter") == chapter_name]
                 if not deleted:
@@ -250,10 +247,9 @@ class ProjectChunkEditingMixin:
         def restore_chunk(self, at_index, chunk_data, after_uid=None):
             """Re-insert a chunk at a specific index. Returns the updated chunk list."""
             with self._chunks_lock:
-                if not os.path.exists(self.chunks_path):
+                chunks = self.load_chunks_raw()
+                if chunks is None:
                     return None
-                with open(self.chunks_path, "r", encoding="utf-8") as f:
-                    chunks = json.load(f)
 
                 if after_uid:
                     resolved = self.resolve_chunk_index(after_uid, chunks)
@@ -321,11 +317,9 @@ class ProjectChunkEditingMixin:
             cleared back to pending so they can be regenerated safely.
             """
             with self._chunks_lock:
-                if not os.path.exists(self.chunks_path):
+                chunks = self.load_chunks_raw()
+                if not chunks:
                     return {"invalidated": 0, "duplicate_groups": 0, "kept": 0, "examples": []}
-
-                with open(self.chunks_path, "r", encoding="utf-8") as f:
-                    chunks = json.load(f)
 
                 owners = defaultdict(list)
                 for index, chunk in enumerate(chunks):
@@ -388,7 +382,8 @@ class ProjectChunkEditingMixin:
 
         def decompose_long_segments(self, chapter=None, max_words=25):
             with self._chunks_lock:
-                if not os.path.exists(self.chunks_path):
+                chunks = self.load_chunks_raw()
+                if not chunks:
                     return {
                         "changed": 0,
                         "total_chunks": 0,
@@ -396,9 +391,6 @@ class ProjectChunkEditingMixin:
                         "chapter": chapter,
                         "max_words": max_words,
                     }
-
-                with open(self.chunks_path, "r", encoding="utf-8") as f:
-                    chunks = json.load(f)
 
                 changed = 0
 
@@ -433,6 +425,7 @@ class ProjectChunkEditingMixin:
 
                         left_chunk = copy.deepcopy(base_chunk)
                         left_chunk["text"] = left_text
+                        left_chunk["uid"] = left_chunk.get("uid") or self._new_chunk_uid()
                         left_chunk["status"] = "pending"
                         left_chunk["audio_path"] = None
                         left_chunk["audio_validation"] = None
@@ -442,6 +435,7 @@ class ProjectChunkEditingMixin:
 
                         right_chunk = copy.deepcopy(base_chunk)
                         right_chunk["text"] = right_text
+                        right_chunk["uid"] = self._new_chunk_uid()
                         right_chunk["status"] = "pending"
                         right_chunk["audio_path"] = None
                         right_chunk["audio_validation"] = None
@@ -479,7 +473,8 @@ class ProjectChunkEditingMixin:
 
         def merge_orphan_segments(self, chapter=None, min_words=10):
             with self._chunks_lock:
-                if not os.path.exists(self.chunks_path):
+                chunks = self.load_chunks_raw()
+                if not chunks:
                     return {
                         "changed": 0,
                         "total_chunks": 0,
@@ -487,9 +482,6 @@ class ProjectChunkEditingMixin:
                         "chapter": chapter,
                         "min_words": min_words,
                     }
-
-                with open(self.chunks_path, "r", encoding="utf-8") as f:
-                    chunks = json.load(f)
 
                 chapter_chunk_counts = {}
                 for chunk in chunks:
@@ -574,10 +566,9 @@ class ProjectChunkEditingMixin:
             # Hold the lock for the entire read-modify-write cycle so editor saves
             # cannot overwrite in-flight generation tokens from audio workers.
             with self._chunks_lock:
-                if not os.path.exists(self.chunks_path):
+                chunks = self.load_chunks_raw()
+                if not chunks:
                     return None
-                with open(self.chunks_path, "r", encoding="utf-8") as f:
-                    chunks = json.load(f)
 
                 index = self.resolve_chunk_index(chunk_ref, chunks)
                 if index is None or not (0 <= index < len(chunks)):
@@ -612,10 +603,9 @@ class ProjectChunkEditingMixin:
 
         def prepare_chunk_for_regeneration(self, chunk_ref):
             with self._chunks_lock:
-                if not os.path.exists(self.chunks_path):
+                chunks = self.load_chunks_raw()
+                if not chunks:
                     return None
-                with open(self.chunks_path, "r", encoding="utf-8") as f:
-                    chunks = json.load(f)
                 index = self.resolve_chunk_index(chunk_ref, chunks)
                 if index is None or not (0 <= index < len(chunks)):
                     return None

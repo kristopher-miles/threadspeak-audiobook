@@ -48,12 +48,51 @@ class _StubProjectManager:
         self.asr_engine = object()
         self._transcription_cache_lock = app_module.threading.Lock()
         self._transcription_cache = {"stale": True}
+        self.chunks_db_path = os.path.join(app_module.ROOT_DIR, "chunks.sqlite3")
+        self.chunks_queue_log_path = os.path.join(app_module.ROOT_DIR, "chunks.queue.log")
 
     def recover_interrupted_generating_chunks(self):
         pass
 
     def reconcile_chunk_audio_states(self):
         pass
+
+    def reload_script_store(self):
+        return None
+
+    def load_chunks(self):
+        try:
+            with open(app_module.CHUNKS_PATH, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return []
+        return payload if isinstance(payload, list) else []
+
+    def get_chunk_chapter_summary(self):
+        chunks = self.load_chunks()
+        ordered = []
+        last_seen = None
+        for chunk in chunks:
+            chapter = str((chunk or {}).get("chapter") or "").strip()
+            if not chapter:
+                continue
+            if chapter != last_seen:
+                ordered.append(chapter)
+                last_seen = chapter
+        return {
+            "chunk_count": len(chunks),
+            "chapter_count": len(ordered),
+            "last_chapter": ordered[-1] if ordered else None,
+        }
+
+    def has_generated_chunk_audio(self):
+        return any(str((chunk or {}).get("audio_path") or "").strip() for chunk in self.load_chunks())
+
+    def has_substantive_chunks(self):
+        return any(
+            str((chunk or {}).get("text") or "").strip() and str((chunk or {}).get("speaker") or "").strip()
+            for chunk in self.load_chunks()
+        )
 
 
 class _TempProjectRuntime:

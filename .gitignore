@@ -90,3 +90,7 @@ dataset_builder/
 *_sanity*_normalized.wav
 *_system_prompt.txt
 audio_cancel_tombstone.json
+chunks.queue.log
+chunks.sqlite3
+chunks.sqlite3-shm
+chunks.sqlite3-wal

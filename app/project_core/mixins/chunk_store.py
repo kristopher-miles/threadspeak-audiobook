@@ -136,52 +136,16 @@ class ProjectChunkStoreMixin:
             return state["render_prep_complete"]
 
         def _load_chunks_from_disk_locked(self):
-            if os.path.exists(self.chunks_path):
-                try:
-                    with open(self.chunks_path, "r", encoding="utf-8") as f:
-                        chunks = json.load(f)
-                    if self._ensure_chunk_uids(chunks):
-                        self._atomic_json_write(chunks, self.chunks_path)
-                    return chunks
-                except (json.JSONDecodeError, ValueError) as e:
-                    backup_path = f"{self.chunks_path}.corrupt-{int(time.time())}"
-                    try:
-                        shutil.copy2(self.chunks_path, backup_path)
-                    except OSError as backup_error:
-                        print(f"WARNING: Failed to back up corrupted chunks.json: {backup_error}")
-                        backup_path = None
-                    raise RuntimeError(
-                        f"chunks.json is corrupted ({e})."
-                        + (f" Preserved a backup at {backup_path}." if backup_path else "")
-                    ) from e
-
-            if os.path.exists(self.script_path):
-                script = load_script_document(self.script_path)["entries"]
-                chunks = script_entries_to_chunks(script)
-                for i, chunk in enumerate(chunks):
-                    chunk["id"] = i
-                    chunk["uid"] = chunk.get("uid") or self._new_chunk_uid()
-                    chunk["status"] = "pending"
-                    chunk["audio_path"] = None
-                    chunk["audio_validation"] = None
-                    chunk["auto_regen_count"] = 0
-                self._atomic_json_write(chunks, self.chunks_path)
-                return chunks
-
-            return []
+            chunks = self.script_store.load_chunks()
+            if self._ensure_chunk_uids(chunks):
+                self.save_chunks(chunks)
+            return chunks
 
         def load_chunks_raw(self, chapter=None):
-            snapshot = self._copy_chunks_snapshot(chapter=chapter)
-            if snapshot is not None:
-                return snapshot
-
             with self._chunks_lock:
-                snapshot = self._copy_chunks_snapshot(chapter=chapter)
-                if snapshot is None:
-                    full_snapshot = self._load_chunks_from_disk_locked()
-                    self._set_chunks_snapshot(full_snapshot)
-                    snapshot = self._copy_chunks_snapshot(chapter=chapter)
-                return snapshot
+                full_snapshot = self._load_chunks_from_disk_locked()
+                self._set_chunks_snapshot(full_snapshot)
+                return self._copy_chunks_snapshot(chapter=chapter) or []
 
         def load_chunks_view(self, chapter=None):
             chunks = self.load_chunks_raw(chapter=chapter)
@@ -202,15 +166,10 @@ class ProjectChunkStoreMixin:
                 if resolved_index is not None and 0 <= resolved_index < len(chunks):
                     raw_chunk = copy.deepcopy(chunks[resolved_index])
             else:
-                raw_chunk = self._copy_chunks_snapshot(chunk_ref=chunk_ref)
-                if raw_chunk is None:
-                    with self._chunks_lock:
-                        with self._chunks_snapshot_lock:
-                            snapshot_missing = self._chunks_snapshot is None
-                        if snapshot_missing:
-                            snapshot = self._load_chunks_from_disk_locked()
-                            self._set_chunks_snapshot(snapshot)
-                    raw_chunk = self._copy_chunks_snapshot(chunk_ref=chunk_ref)
+                chunks = self.load_chunks_raw()
+                resolved_index = self.resolve_chunk_index(chunk_ref, chunks)
+                if resolved_index is not None and 0 <= resolved_index < len(chunks):
+                    raw_chunk = copy.deepcopy(chunks[resolved_index])
 
             if raw_chunk is None:
                 return None
@@ -220,15 +179,8 @@ class ProjectChunkStoreMixin:
             return self._merge_runtime_chunk(raw_chunk, runtime_chunk)
 
         def get_chunk_view_by_index(self, index):
-            raw_chunk = self._copy_chunks_snapshot(index=index)
-            if raw_chunk is None:
-                with self._chunks_lock:
-                    with self._chunks_snapshot_lock:
-                        snapshot_missing = self._chunks_snapshot is None
-                    if snapshot_missing:
-                        snapshot = self._load_chunks_from_disk_locked()
-                        self._set_chunks_snapshot(snapshot)
-                raw_chunk = self._copy_chunks_snapshot(index=index)
+            chunks = self.load_chunks_raw()
+            raw_chunk = copy.deepcopy(chunks[index]) if 0 <= index < len(chunks) else None
             if raw_chunk is None:
                 return None
             uid = raw_chunk.get("uid")
@@ -319,12 +271,12 @@ class ProjectChunkStoreMixin:
             if not os.path.exists(self.script_path):
                 return {"synced": False, "reason": "no_script"}
 
-            if not os.path.exists(self.chunks_path):
+            if not self.load_chunks():
                 chunks = self.load_chunks()
                 return {"synced": True, "reason": "missing_chunks", "chunk_count": len(chunks)}
 
             script_mtime = os.path.getmtime(self.script_path)
-            chunks_mtime = os.path.getmtime(self.chunks_path)
+            chunks_mtime = os.path.getmtime(self.chunks_db_path) if os.path.exists(self.chunks_db_path) else 0
             if script_mtime <= chunks_mtime:
                 return {"synced": False, "reason": "chunks_current"}
 
@@ -364,12 +316,8 @@ class ProjectChunkStoreMixin:
             generations, where a chunk may still be marked as error even though its
             audio file exists and now passes the duration sanity check.
             """
-            if not os.path.exists(self.chunks_path):
-                return self.load_chunks()
-
             with self._chunks_lock:
-                with open(self.chunks_path, "r", encoding="utf-8") as f:
-                    chunks = json.load(f)
+                chunks = self.load_chunks_raw()
                 if self._ensure_chunk_uids(chunks):
                     self._atomic_json_write(chunks, self.chunks_path)
 
@@ -454,11 +402,9 @@ class ProjectChunkStoreMixin:
             outcome = {"recovered": 0, "reset": 0}
 
             with self._chunks_lock:
-                if not os.path.exists(self.chunks_path):
+                chunks = self.load_chunks_raw()
+                if not chunks:
                     return outcome
-
-                with open(self.chunks_path, "r", encoding="utf-8") as f:
-                    chunks = json.load(f)
 
                 if indices is None:
                     index_iter = range(len(chunks))
@@ -534,6 +480,11 @@ class ProjectChunkStoreMixin:
 
         def _atomic_json_write_raw(self, data, target_path, max_retries=5):
             """Atomically write JSON data with retry logic for Windows file locking."""
+            if os.path.abspath(target_path) == os.path.abspath(self.chunks_path):
+                self.script_store.replace_chunks(data, reason="atomic_json_write_raw", wait=True)
+                self._set_chunks_snapshot(data)
+                self._update_chunks_backups(data)
+                return
             for attempt in range(max_retries):
                 tmp_path = None
                 try:
@@ -567,7 +518,6 @@ class ProjectChunkStoreMixin:
             self._atomic_json_write_raw(data, target_path, max_retries=max_retries)
             if os.path.abspath(target_path) == os.path.abspath(self.chunks_path):
                 self._set_chunks_snapshot(data)
-                self._update_chunks_backups(data)
 
         def save_chunks(self, chunks):
             with self._chunks_lock:
@@ -588,10 +538,7 @@ class ProjectChunkStoreMixin:
             overwriting each other's updates.
             """
             with self._chunks_lock:
-                if not os.path.exists(self.chunks_path):
-                    return None
-                with open(self.chunks_path, "r", encoding="utf-8") as f:
-                    chunks = json.load(f)
+                chunks = self.load_chunks_raw()
                 if not (0 <= index < len(chunks)):
                     return None
                 chunks[index].update(fields)
@@ -599,3 +546,15 @@ class ProjectChunkStoreMixin:
                     self._clear_proofread_state(chunks[index])
                 self._atomic_json_write(chunks, self.chunks_path)
                 return chunks[index]
+
+        def get_chunk_chapter_summary(self):
+            return self.script_store.chapter_summary()
+
+        def has_generated_chunk_audio(self):
+            return self.script_store.has_generated_audio()
+
+        def export_chunks_to_path(self, target_path):
+            return self.script_store.export_chunks(target_path)
+
+        def has_substantive_chunks(self):
+            return self.script_store.has_substantive_chunks()

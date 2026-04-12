@@ -249,14 +249,12 @@ class ProjectProofreadASRMixin:
             # Proofread can run in a separate process; never write an old snapshot
             # back wholesale, or we can clobber in-flight generation_token/status.
             latest = chunks
-            if os.path.exists(self.chunks_path):
-                try:
-                    with open(self.chunks_path, "r", encoding="utf-8") as f:
-                        latest_loaded = json.load(f)
-                    if isinstance(latest_loaded, list):
-                        latest = latest_loaded
-                except (OSError, ValueError, json.JSONDecodeError):
-                    latest = chunks
+            try:
+                latest_loaded = self.load_chunks_raw()
+                if isinstance(latest_loaded, list):
+                    latest = latest_loaded
+            except Exception:
+                latest = chunks
 
             if 0 <= index < len(latest):
                 latest[index]["proofread"] = proofread_result
@@ -272,14 +270,12 @@ class ProjectProofreadASRMixin:
             # Proofread can run in a separate process; merge into freshest chunks
             # to avoid dropping live generation state written by the audio worker.
             latest = chunks
-            if os.path.exists(self.chunks_path):
-                try:
-                    with open(self.chunks_path, "r", encoding="utf-8") as f:
-                        latest_loaded = json.load(f)
-                    if isinstance(latest_loaded, list):
-                        latest = latest_loaded
-                except (OSError, ValueError, json.JSONDecodeError):
-                    latest = chunks
+            try:
+                latest_loaded = self.load_chunks_raw()
+                if isinstance(latest_loaded, list):
+                    latest = latest_loaded
+            except Exception:
+                latest = chunks
 
             for index, proofread_result in pending_results.items():
                 if 0 <= index < len(latest):
@@ -350,11 +346,9 @@ class ProjectProofreadASRMixin:
         ):
             """Shared core for validate (accept=True) and reject (accept=False)."""
             with self._chunks_lock:
-                if not os.path.exists(self.chunks_path):
+                chunks = self.load_chunks_raw()
+                if not chunks:
                     return None
-
-                with open(self.chunks_path, "r", encoding="utf-8") as f:
-                    chunks = json.load(f)
 
                 index = self.resolve_chunk_index(chunk_ref, chunks)
                 if index is None or not (0 <= index < len(chunks)):
@@ -431,11 +425,9 @@ class ProjectProofreadASRMixin:
 
         def compare_proofread_clip(self, chunk_ref, threshold=1.0):
             with self._chunks_lock:
-                if not os.path.exists(self.chunks_path):
+                chunks = self.load_chunks_raw()
+                if not chunks:
                     return None
-
-                with open(self.chunks_path, "r", encoding="utf-8") as f:
-                    chunks = json.load(f)
 
                 index = self.resolve_chunk_index(chunk_ref, chunks)
                 if index is None or not (0 <= index < len(chunks)):
@@ -465,16 +457,14 @@ class ProjectProofreadASRMixin:
 
         def discard_proofread_selection(self, chapter=None):
             with self._chunks_lock:
-                if not os.path.exists(self.chunks_path):
+                chunks = self.load_chunks_raw()
+                if not chunks:
                     return {
                         "discarded": 0,
                         "preserved_transcripts": 0,
                         "cleared_transcripts": 0,
                         "chapter": chapter,
                     }
-
-                with open(self.chunks_path, "r", encoding="utf-8") as f:
-                    chunks = json.load(f)
 
                 discarded = 0
                 preserved_transcripts = 0
@@ -640,7 +630,8 @@ class ProjectProofreadASRMixin:
                     progress_callback(payload)
 
             with self._chunks_lock:
-                if not os.path.exists(self.chunks_path):
+                chunks = self.load_chunks_raw()
+                if not chunks:
                     return {
                         "processed": 0,
                         "skipped": 0,
@@ -650,9 +641,6 @@ class ProjectProofreadASRMixin:
                         "chapter": chapter,
                         "threshold": float(threshold),
                     }
-
-                with open(self.chunks_path, "r", encoding="utf-8") as f:
-                    chunks = json.load(f)
 
                 started_at = time.time()
                 dictionary_entries = self.load_dictionary_entries()
@@ -899,7 +887,8 @@ class ProjectProofreadASRMixin:
 
         def clear_proofread_failures(self, chapter=None, threshold=1.0):
             with self._chunks_lock:
-                if not os.path.exists(self.chunks_path):
+                chunks = self.load_chunks_raw()
+                if not chunks:
                     return {
                         "cleared": 0,
                         "failed_candidates": 0,
@@ -907,9 +896,6 @@ class ProjectProofreadASRMixin:
                         "chapter": chapter,
                         "threshold": float(threshold),
                     }
-
-                with open(self.chunks_path, "r", encoding="utf-8") as f:
-                    chunks = json.load(f)
 
                 cleared = 0
                 failed_candidates = 0

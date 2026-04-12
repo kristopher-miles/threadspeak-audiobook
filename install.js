@@ -3,8 +3,12 @@ const basePackages = [
   "uv pip install -r requirements.txt",
 ]
 
+const coreRuntimePackages = [
+  "uv pip install fastapi uvicorn pydantic openai python-docx pytest numpy pydub soundfile librosa requests aiofiles python-multipart",
+]
+
 const verifyTestEnv = [
-  "python -c \"import fastapi, openai, pytest, uvicorn, pydantic, docx; print('Dependency check OK')\"",
+  "python -c \"import fastapi, openai, pytest, uvicorn, pydantic, docx, numpy, pydub, soundfile, librosa; print('Dependency check OK')\"",
 ]
 
 module.exports = {
@@ -45,6 +49,7 @@ module.exports = {
       path: "app",
       message: [
         ...basePackages,
+        ...coreRuntimePackages,
         "uv pip uninstall qwen-tts",
         "uv pip install mlx-audio==0.4.2",
         "uv pip install sentencepiece tiktoken",
@@ -59,6 +64,7 @@ module.exports = {
       path: "app",
       message: [
         ...basePackages,
+        ...coreRuntimePackages,
         "uv pip install qwen-tts==0.1.1",
         ...verifyTestEnv,
       ]

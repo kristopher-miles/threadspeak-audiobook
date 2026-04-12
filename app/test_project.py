@@ -560,7 +560,7 @@ class ChunkRuntimeOverlayTests(unittest.TestCase):
             "chapter": "Old Chapter",
         }]
         self.manager.save_chunks(stale_chunks)
-        os.utime(self.manager.chunks_path, (time.time() - 10, time.time() - 10))
+        os.utime(self.manager.chunks_db_path, (time.time() - 10, time.time() - 10))
         os.utime(self.manager.script_path, None)
 
         result = self.manager.sync_chunks_from_script_if_stale()
@@ -597,7 +597,7 @@ class ChunkRuntimeOverlayTests(unittest.TestCase):
         }]
         self.manager.save_chunks(current_chunks)
         os.utime(self.manager.script_path, (time.time() - 10, time.time() - 10))
-        os.utime(self.manager.chunks_path, None)
+        os.utime(self.manager.chunks_db_path, None)
 
         result = self.manager.sync_chunks_from_script_if_stale()
         synced = self.manager.load_chunks()
@@ -630,7 +630,7 @@ class ChunkRuntimeOverlayTests(unittest.TestCase):
             "chapter": "Chapter 1",
         }]
         self.manager.save_chunks(current_chunks)
-        os.utime(self.manager.chunks_path, (time.time() - 10, time.time() - 10))
+        os.utime(self.manager.chunks_db_path, (time.time() - 10, time.time() - 10))
         os.utime(self.manager.script_path, None)
 
         result = self.manager.sync_chunks_from_script_if_stale()
@@ -671,7 +671,7 @@ class ChunkRuntimeOverlayTests(unittest.TestCase):
             "paragraph_id": "p_0001",
         }]
         self.manager.save_chunks(current_chunks)
-        os.utime(self.manager.chunks_path, (time.time() - 10, time.time() - 10))
+        os.utime(self.manager.chunks_db_path, (time.time() - 10, time.time() - 10))
         os.utime(self.manager.script_path, None)
 
         result = self.manager.sync_chunks_from_script_if_stale()
@@ -719,7 +719,7 @@ class ChunkRuntimeOverlayTests(unittest.TestCase):
             "chapter": "Old Chapter",
         }]
         self.manager.save_chunks(stale_chunks)
-        os.utime(self.manager.chunks_path, (time.time() - 10, time.time() - 10))
+        os.utime(self.manager.chunks_db_path, (time.time() - 10, time.time() - 10))
         os.utime(self.manager.script_path, None)
 
         result = self.manager.sync_chunks_from_script_if_stale()
