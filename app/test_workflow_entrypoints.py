@@ -345,6 +345,66 @@ class WorkflowEntrypointAccessibilityTests(unittest.TestCase):
                 app_module.NEW_MODE_WORKFLOW_STATE_PATH = original_new_mode_path
                 app_module._start_new_mode_workflow_thread_locked = original_starter
 
+    def test_restore_new_mode_workflow_forces_complete_when_script_project_exists(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            with open(os.path.join(temp_root, "state.json"), "w", encoding="utf-8") as f:
+                json.dump({}, f)
+            with open(os.path.join(temp_root, "annotated_script.json"), "w", encoding="utf-8") as f:
+                json.dump({"entries": [{"speaker": "Narrator", "text": "Hello world."}], "dictionary": []}, f)
+            with open(os.path.join(temp_root, "chunks.json"), "w", encoding="utf-8") as f:
+                json.dump(
+                    [{"id": 0, "speaker": "Narrator", "text": "Hello world.", "status": "pending"}],
+                    f,
+                )
+
+            workflow_state_path = os.path.join(temp_root, "new_mode_workflow_state.json")
+            with open(workflow_state_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "running": True,
+                        "paused": False,
+                        "options": {"process_voices": True, "generate_audio": True},
+                        "completed_stages": [],
+                    },
+                    f,
+                )
+
+            original_root = app_module.ROOT_DIR
+            original_script = app_module.SCRIPT_PATH
+            original_chunks = app_module.CHUNKS_PATH
+            original_new_mode_path = app_module.NEW_MODE_WORKFLOW_STATE_PATH
+            original_starter = app_module._start_new_mode_workflow_thread_locked
+            started = {"count": 0}
+            try:
+                app_module.ROOT_DIR = temp_root
+                app_module.SCRIPT_PATH = os.path.join(temp_root, "annotated_script.json")
+                app_module.CHUNKS_PATH = os.path.join(temp_root, "chunks.json")
+                app_module.NEW_MODE_WORKFLOW_STATE_PATH = workflow_state_path
+                app_module._start_new_mode_workflow_thread_locked = lambda: started.__setitem__("count", started["count"] + 1)
+                app_module._restore_new_mode_workflow_state()
+                state = app_module.process_state["new_mode_workflow"]
+                self.assertEqual(started["count"], 0)
+                self.assertFalse(state["running"])
+                self.assertFalse(state["paused"])
+                self.assertEqual(
+                    state["completed_stages"],
+                    ["process_paragraphs", "assign_dialogue", "extract_temperament", "create_script"],
+                )
+                self.assertEqual(state["options"], {"process_voices": False, "generate_audio": False})
+                self.assertTrue(
+                    any(
+                        "Project script complete, Reset Project if you wish to begin generation from the beginning."
+                        in entry
+                        for entry in state.get("logs", [])
+                    )
+                )
+            finally:
+                app_module.ROOT_DIR = original_root
+                app_module.SCRIPT_PATH = original_script
+                app_module.CHUNKS_PATH = original_chunks
+                app_module.NEW_MODE_WORKFLOW_STATE_PATH = original_new_mode_path
+                app_module._start_new_mode_workflow_thread_locked = original_starter
+
     def test_start_new_mode_workflow_uses_stage_markers_to_skip_script_pipeline(self):
         with tempfile.TemporaryDirectory() as temp_root:
             with open(os.path.join(temp_root, "state.json"), "w", encoding="utf-8") as f:

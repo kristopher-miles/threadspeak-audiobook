@@ -3809,6 +3809,36 @@ def _derived_new_mode_completed_stages_from_files(options=None) -> list:
     return [stage for stage in completed if stage in allowed]
 
 
+def _project_script_complete_detected() -> bool:
+    """Return True when a generated script project already exists on disk.
+
+    This is intentionally conservative: if both annotated_script.json and
+    chunks.json exist and chunks contain at least one substantive entry, the
+    Script tab workflow should be treated as complete after restart instead of
+    attempting to resume.
+    """
+    if not (os.path.exists(SCRIPT_PATH) and os.path.exists(CHUNKS_PATH)):
+        return False
+
+    try:
+        with open(CHUNKS_PATH, "r", encoding="utf-8") as f:
+            chunks = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+
+    if not isinstance(chunks, list) or not chunks:
+        return False
+
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            continue
+        has_text = bool(str(chunk.get("text") or "").strip())
+        has_speaker = bool(str(chunk.get("speaker") or "").strip())
+        if has_text and has_speaker:
+            return True
+    return False
+
+
 def _initialize_new_mode_stage_markers(options=None, legacy_completed_stages=None):
     options = options or {}
     markers = _load_new_mode_stage_markers()
@@ -4070,6 +4100,29 @@ def _restore_new_mode_workflow_state():
         options=options,
         legacy_completed_stages=restored.get("completed_stages") or [],
     )
+    if _project_script_complete_detected():
+        script_complete_stages = ["process_paragraphs", "assign_dialogue", "extract_temperament", "create_script"]
+        markers = _load_new_mode_stage_markers()
+        now = time.time()
+        for stage in script_complete_stages:
+            markers.setdefault(stage, {"completed_at": now})
+        _save_new_mode_stage_markers(markers)
+
+        restored["options"] = {"process_voices": False, "generate_audio": False}
+        restored["completed_stages"] = script_complete_stages
+        restored["running"] = False
+        restored["paused"] = False
+        restored["pause_requested"] = False
+        restored["current_stage"] = None
+        restored["last_error"] = None
+        restored["completed_at"] = restored.get("completed_at") or now
+        process_state["new_mode_workflow"] = restored
+        message = "Project script complete, Reset Project if you wish to begin generation from the beginning."
+        logger.info(message)
+        with new_mode_workflow_lock:
+            _append_new_mode_workflow_log_locked(message)
+        return
+
     restored["completed_stages"] = _derived_new_mode_completed_stages(options)
     process_state["new_mode_workflow"] = restored
     if restored.get("running") and not restored.get("paused"):
