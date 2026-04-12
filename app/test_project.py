@@ -577,6 +577,81 @@ class ChunkRuntimeOverlayTests(unittest.TestCase):
 
         self.assertEqual(resolved, "Alice")
 
+    def test_preview_voice_config_invalidation_resolves_once_per_generated_speaker(self):
+        chunks = [
+            {
+                "id": 0,
+                "uid": "a0",
+                "speaker": "Bake",
+                "text": "Bake line one.",
+                "instruct": "",
+                "chapter": "Chapter 1",
+                "status": "done",
+                "audio_path": "voicelines/a0.wav",
+                "audio_validation": {"is_valid": True},
+                "auto_regen_count": 0,
+            },
+            {
+                "id": 1,
+                "uid": "a1",
+                "speaker": "Bake",
+                "text": "Bake line two.",
+                "instruct": "",
+                "chapter": "Chapter 1",
+                "status": "done",
+                "audio_path": "voicelines/a1.wav",
+                "audio_validation": {"is_valid": True},
+                "auto_regen_count": 0,
+            },
+            {
+                "id": 2,
+                "uid": "b0",
+                "speaker": "Blake",
+                "text": "Blake line.",
+                "instruct": "",
+                "chapter": "Chapter 1",
+                "status": "done",
+                "audio_path": "voicelines/b0.wav",
+                "audio_validation": {"is_valid": True},
+                "auto_regen_count": 0,
+            },
+        ]
+        self.manager.save_chunks(chunks)
+
+        old_config = {
+            "Bake": {"alias": ""},
+            "Blake": {"alias": ""},
+        }
+        new_config = {
+            "Bake": {"alias": "Blake"},
+            "Blake": {"alias": ""},
+        }
+
+        original_resolve = self.manager.resolve_voice_speaker
+        calls = []
+
+        def tracked_resolve(speaker, voice_config, chunks=None, speaker_line_counts=None, narrator_name=None, auto_narrator_aliases=None):
+            calls.append((speaker, tuple(sorted((voice_config or {}).keys()))))
+            return original_resolve(
+                speaker,
+                voice_config,
+                chunks=chunks,
+                speaker_line_counts=speaker_line_counts,
+                narrator_name=narrator_name,
+                auto_narrator_aliases=auto_narrator_aliases,
+            )
+
+        self.manager.resolve_voice_speaker = tracked_resolve
+        try:
+            result = self.manager.preview_voice_config_invalidation(old_config, new_config)
+        finally:
+            self.manager.resolve_voice_speaker = original_resolve
+
+        self.assertEqual(result["invalidated_clips"], 2)
+        self.assertEqual(result["affected_indices"], [0, 1])
+        self.assertEqual(result["affected_speakers"], ["Bake"])
+        self.assertEqual(len(calls), 4)
+
     def test_generate_chunk_audio_uses_stored_auto_narrator_aliases(self):
         self.manager.set_narrator_threshold(10)
         self.manager.set_narrator_override("Chapter 1", "Alice")

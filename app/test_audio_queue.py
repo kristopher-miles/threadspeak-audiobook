@@ -32,11 +32,11 @@ class AudioQueueMetricsTests(unittest.TestCase):
                 "status": "running",
                 "label": "Test job",
                 "scope": "custom",
-                "indices": [3],
+                "uids": ["u3"],
                 "total_chunks": 1,
                 "total_words": 6,
                 "remaining_words": 6,
-                "pending_indices": [3],
+                "pending_uids": ["u3"],
                 "processed_clips": 0,
                 "error_clips": 0,
                 "queued_at": 0.0,
@@ -51,14 +51,14 @@ class AudioQueueMetricsTests(unittest.TestCase):
             app_module._refresh_audio_process_state_locked(persist=False)
 
             job = app_module.audio_current_job
-            app_module._record_audio_sample_locked(job, 3, 2.0, 6, 6, True)
+            app_module._record_audio_sample_locked(job, "u3", 2.0, 6, 6, True)
 
             metrics = app_module.process_state["audio"]["metrics"]
             self.assertEqual(metrics["processed_clips"], 1)
             self.assertEqual(metrics["successful_clips"], 1)
             self.assertEqual(metrics["error_clips"], 0)
             self.assertEqual(len(metrics["samples"]), 1)
-            self.assertEqual(job["pending_indices"], [])
+            self.assertEqual(job["pending_uids"], [])
             self.assertEqual(job["remaining_words"], 0)
             self.assertGreater(metrics["words_per_minute"], 0)
             self.assertEqual(metrics["estimated_remaining_seconds"], 0.0)
@@ -84,8 +84,8 @@ class AudioQueueMetricsTests(unittest.TestCase):
                     "status": "running",
                     "label": "Test job",
                     "scope": "custom",
-                    "indices": [10, 11, 12],
-                    "pending_indices": [10, 11, 12],
+                    "uids": ["u10", "u11", "u12"],
+                    "pending_uids": ["u10", "u11", "u12"],
                     "total_chunks": 3,
                     "total_words": 30,
                     "remaining_words": 30,
@@ -114,7 +114,7 @@ class AudioQueueMetricsTests(unittest.TestCase):
                 self.assertIsNone(app_module.audio_current_job)
                 self.assertFalse(app_module.process_state["audio"]["cancel"])
                 self.assertEqual(len(reset_calls), 1)
-                self.assertEqual(reset_calls[0]["indices"], [10, 11, 12])
+                self.assertEqual(reset_calls[0]["indices"], ["u10", "u11", "u12"])
                 self.assertEqual(reset_calls[0]["generation_token"], "run-123")
                 self.assertEqual(app_module.process_state["audio"]["recent_jobs"][0]["status"], "cancelled")
                 self.assertIn("reset 3 generating chunk(s)", app_module.process_state["audio"]["logs"][-1])
@@ -138,8 +138,8 @@ class AudioQueueMetricsTests(unittest.TestCase):
             "id": 42,
             "corr_id": "audio-00042-test",
             "kind": "batch_fast",
-            "indices": [0, 1, 2, 3],
-            "pending_indices": [2, 3],
+            "uids": ["u0", "u1", "u2", "u3"],
+            "pending_uids": ["u2", "u3"],
             "total_chunks": 4,
             "total_words": 40,
             "remaining_words": 20,
@@ -149,6 +149,7 @@ class AudioQueueMetricsTests(unittest.TestCase):
             "label": "Restored job",
             "scope": "custom",
             "run_token": "run-restored",
+            "queued_at": 0.0,
         }
         result_holder = {}
 
@@ -172,7 +173,7 @@ class AudioQueueMetricsTests(unittest.TestCase):
             )
 
             self.assertTrue(done_event.is_set())
-            self.assertEqual(captured["indices"], [2, 3])
+            self.assertEqual(captured["indices"], ["u2", "u3"])
             self.assertEqual(captured["generation_token"], "run-restored")
         finally:
             app_module.project_manager.generate_chunks_batch = original_generate

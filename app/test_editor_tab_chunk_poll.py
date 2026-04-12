@@ -245,6 +245,18 @@ class EditorTabChunkPollTests(unittest.TestCase):
                 const rows = new Map();
                 const toasts = [];
                 const localStorageStore = new Map();
+                class FakeURLSearchParams {{
+                    constructor() {{
+                        this._pairs = [];
+                    }}
+                    set(key, value) {{
+                        this._pairs = this._pairs.filter(([existing]) => existing !== key);
+                        this._pairs.push([key, value]);
+                    }}
+                    toString() {{
+                        return this._pairs.map(([key, value]) => `${{encodeURIComponent(key)}}=${{encodeURIComponent(value)}}`).join('&');
+                    }}
+                }}
                 const context = {{
                     console,
                     Promise,
@@ -254,6 +266,13 @@ class EditorTabChunkPollTests(unittest.TestCase):
                     clearInterval: (id) => global.clearInterval(id),
                     requestAnimationFrame: (fn) => global.setTimeout(fn, 0),
                     window: null,
+                    URLSearchParams: FakeURLSearchParams,
+                    EventSource: function EventSource(url) {{
+                        this.url = url;
+                        this.addEventListener = () => {{}};
+                        this.close = () => {{}};
+                        this.onerror = null;
+                    }},
                     API: {{
                         get: async () => [],
                         post: async () => ({{ status: 'ok' }}),
@@ -922,6 +941,9 @@ class EditorTabChunkPollTests(unittest.TestCase):
                 const requestedUrls = [];
                 context.API.get = async (url) => {
                     requestedUrls.push(url);
+                    if (url === '/api/chunks/chapters') {
+                        return { chapters: [{ chapter: 'Chapter 1', count: 1 }, { chapter: 'Chapter 2', count: 1 }] };
+                    }
                     if (url === '/api/chunks/view?chapter=Chapter%201') {
                         return [
                             { id: 1, uid: 'chunk-1', speaker: 'Narrator', chapter: 'Chapter 1', text: 'one', instruct: '', status: 'done', audio_path: 'voicelines/one.mp3', audio_validation: { file_size_bytes: 10, actual_duration_sec: 1.0 } },
@@ -936,7 +958,8 @@ class EditorTabChunkPollTests(unittest.TestCase):
                 await context.loadChunks(true);
                 await flushTicks();
 
-                assert.strictEqual(requestedUrls[0], '/api/chunks/view?chapter=Chapter%201');
+                assert.ok(requestedUrls.includes('/api/chunks/chapters'));
+                assert.ok(requestedUrls.includes('/api/chunks/view?chapter=Chapter%201'));
             })().catch((error) => {{
                 console.error(error);
                 process.exit(1);

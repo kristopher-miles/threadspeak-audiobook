@@ -190,6 +190,8 @@ def _save_current_script_snapshot(name: str, *, purge_existing: bool = False):
 
     shutil.copy2(SCRIPT_PATH, dest)
 
+    if hasattr(project_manager, "export_voice_config_compat"):
+        project_manager.export_voice_config_compat(VOICE_CONFIG_PATH)
     if os.path.exists(VOICE_CONFIG_PATH):
         shutil.copy2(VOICE_CONFIG_PATH, os.path.join(SCRIPTS_DIR, f"{safe_name}.voice_config.json"))
 
@@ -365,6 +367,11 @@ async def load_script(request: ScriptLoadRequest):
         "create_script": {"completed_at": time.time()},
     }
     _save_project_state_payload(state)
+
+    if hasattr(project_manager, "reload_script_store"):
+        project_manager.reload_script_store()
+    if hasattr(project_manager, "import_voice_compat"):
+        project_manager.import_voice_compat(VOICE_CONFIG_PATH, os.path.join(ROOT_DIR, "state.json"))
 
     logger.info("Project script snapshot '%s' loaded", safe_name)
     return {"status": "loaded", "name": safe_name, "kind": "script"}

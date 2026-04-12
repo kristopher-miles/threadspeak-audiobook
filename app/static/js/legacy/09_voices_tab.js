@@ -13,9 +13,12 @@
         let _voiceAliasesPrimedForScript = false;
         let _voiceSaveFlushPromise = null;
         let _voiceSavePending = false;
+        let _dirtyVoiceNames = new Set();
         let _voiceSavePendingOptions = {
             promptConfirmation: false,
             retryOnNetworkFailure: false,
+            includeAll: false,
+            speakerNames: [],
         };
 
         function isVoiceSaveNetworkError(error) {
@@ -183,6 +186,7 @@
                     if (!aliasInput || aliasInput.value.trim()) continue; // already set
 
                     aliasInput.value = targetName;
+                    markVoiceDirty(card);
                     anySet = true;
                 }
             }
@@ -481,8 +485,8 @@
                 return;
             }
             container.innerHTML = voices.map((v, i) => createVoiceCard(v, i)).join('');
+            _dirtyVoiceNames.clear();
             updateVoiceAliasStates();
-            const suggestedAliases = suggestVoiceAliases(voices);
             layoutVoicesListContainer();
 
             let filledMissingDesignSample = false;
@@ -499,19 +503,15 @@
                 }
             });
 
-            // If any voice has no saved config, or aliases were auto-suggested, save immediately
-            if (suggestedAliases || filledMissingDesignSample || voices.some(v => !v.config || Object.keys(v.config).length === 0)) {
-                clearTimeout(_voiceSaveTimer);
-                saveVoicesNow({ promptConfirmation: false, retryOnNetworkFailure: true }).catch(() => {});
-            }
         }
 
-        function collectVoiceConfig() {
-            const cards = document.querySelectorAll('.voice-card');
+        function collectVoiceConfig(cardsInput = null) {
+            const cards = cardsInput || document.querySelectorAll('.voice-card');
             const config = {};
 
             cards.forEach(card => {
                 const name = card.dataset.voice;
+                if (!name) return;
                 const type = card.querySelector('.voice-type:checked').value;
                 const alias = (card.querySelector('.voice-alias-input')?.value || '').trim();
                 const narratesEl = card.querySelector('.voice-narrates');
@@ -576,13 +576,49 @@
             return config;
         }
 
+        function getVoiceCardName(card) {
+            return (card?.dataset?.voice || '').trim();
+        }
+
+        function markVoiceDirty(cardOrName) {
+            const name = typeof cardOrName === 'string'
+                ? cardOrName.trim()
+                : getVoiceCardName(cardOrName);
+            if (!name) return;
+            _dirtyVoiceNames.add(name);
+        }
+
+        function getVoiceCardsForSave(options = {}) {
+            if (options.includeAll) {
+                return Array.from(document.querySelectorAll('.voice-card'));
+            }
+            const requested = new Set(
+                Array.from(options.speakerNames || [])
+                    .map(name => String(name || '').trim())
+                    .filter(Boolean)
+            );
+            const effectiveNames = requested.size > 0 ? requested : _dirtyVoiceNames;
+            if (effectiveNames.size === 0) {
+                return Array.from(document.querySelectorAll('.voice-card'));
+            }
+            return Array.from(document.querySelectorAll('.voice-card'))
+                .filter(card => effectiveNames.has(getVoiceCardName(card)));
+        }
+
         let _voiceSaveTimer = null;
         let _voiceSaveInFlight = null;
 
         function mergeVoiceSaveOptions(options = {}) {
+            const speakerNames = Array.from(new Set(
+                Array.from(options.speakerNames || [])
+                    .map(name => String(name || '').trim())
+                    .filter(Boolean)
+            ));
             return {
                 promptConfirmation: Boolean(options.promptConfirmation),
                 retryOnNetworkFailure: Boolean(options.retryOnNetworkFailure),
+                includeAll: Boolean(options.includeAll),
+                speakerNames,
             };
         }
 
@@ -592,28 +628,34 @@
             _voiceSavePendingOptions = {
                 promptConfirmation: _voiceSavePendingOptions.promptConfirmation || merged.promptConfirmation,
                 retryOnNetworkFailure: _voiceSavePendingOptions.retryOnNetworkFailure || merged.retryOnNetworkFailure,
+                includeAll: _voiceSavePendingOptions.includeAll || merged.includeAll,
+                speakerNames: Array.from(new Set([
+                    ...(_voiceSavePendingOptions.includeAll ? [] : _voiceSavePendingOptions.speakerNames),
+                    ...(merged.includeAll ? [] : merged.speakerNames),
+                ])),
             };
         }
 
         async function performVoiceSave(options = {}) {
             const { promptConfirmation = false, retryOnNetworkFailure = false } = options;
-            const cards = document.querySelectorAll('.voice-card');
+            const cards = getVoiceCardsForSave(options);
             if (cards.length === 0) return;
 
             const statusEl = document.getElementById('voice-save-status');
             statusEl.innerHTML = '<i class="fas fa-circle text-warning" style="font-size:0.5em;"></i> unsaved';
+            const savedNames = cards.map(getVoiceCardName).filter(Boolean);
 
             _voiceSaveInFlight = (async () => {
                 try {
-                    const config = collectVoiceConfig();
-                    let result = await API.post('/api/voices/save_config', {
+                    const config = collectVoiceConfig(cards);
+                    let result = await API.post('/api/voices/batch', {
                         config,
                         confirm_invalidation: false,
                     });
 
                     if (result.status === 'confirmation_required' && (result.invalidated_clips || 0) > 0) {
                         if (!promptConfirmation) {
-                            statusEl.innerHTML = '<i class="fas fa-times text-danger me-1"></i>save cancelled';
+                            statusEl.innerHTML = '<i class="fas fa-circle text-warning" style="font-size:0.5em;"></i> unsaved';
                             throw new Error('Voice change cancelled');
                         }
 
@@ -627,7 +669,7 @@
                             throw new Error('Voice change cancelled');
                         }
 
-                        result = await API.post('/api/voices/save_config', {
+                        result = await API.post('/api/voices/batch', {
                             config,
                             confirm_invalidation: true,
                         });
@@ -642,6 +684,7 @@
                         }
                     }
 
+                    savedNames.forEach(name => _dirtyVoiceNames.delete(name));
                     statusEl.innerHTML = '<i class="fas fa-check text-success me-1"></i>saved';
                     setTimeout(() => { statusEl.innerHTML = ''; }, 2000);
                     window._narratingVoicesCache = null; // force refresh on next editor use
@@ -684,6 +727,8 @@
                         _voiceSavePendingOptions = {
                             promptConfirmation: false,
                             retryOnNetworkFailure: false,
+                            includeAll: false,
+                            speakerNames: [],
                         };
                         await performVoiceSave(nextOptions);
                     }
@@ -695,10 +740,14 @@
             return _voiceSaveFlushPromise;
         }
 
-        function debouncedSaveVoices() {
+        function debouncedSaveVoices(options = {}) {
             clearTimeout(_voiceSaveTimer);
+            queueVoiceSaveOptions({
+                ...options,
+                retryOnNetworkFailure: true,
+            });
             _voiceSaveTimer = setTimeout(() => {
-                saveVoicesNow({ retryOnNetworkFailure: true }).catch(() => {});
+                saveVoicesNow().catch(() => {});
             }, 800);
         }
 
@@ -738,14 +787,31 @@
 
         // Auto-save on any change inside the voices list
         document.getElementById('voices-list').addEventListener('change', (event) => {
+            const voiceCard = event.target.closest('.voice-card');
+            if (voiceCard) {
+                markVoiceDirty(voiceCard);
+            }
             if (event.target.classList.contains('voice-alias-input')) {
                 updateVoiceAliasStates();
+                debouncedSaveVoices({
+                    promptConfirmation: true,
+                    speakerNames: voiceCard ? [getVoiceCardName(voiceCard)] : [],
+                });
+                return;
             }
             debouncedSaveVoices();
         });
         document.getElementById('voices-list').addEventListener('input', (event) => {
+            const voiceCard = event.target.closest('.voice-card');
+            if (voiceCard) {
+                markVoiceDirty(voiceCard);
+            }
             if (event.target.classList.contains('voice-alias-input')) {
                 updateVoiceAliasStates();
+                debouncedSaveVoices({
+                    promptConfirmation: true,
+                    speakerNames: voiceCard ? [getVoiceCardName(voiceCard)] : [],
+                });
                 return;
             }
             if (event.target.classList.contains('ref-audio')) {
@@ -812,7 +878,7 @@
                     }
                     sampleTextInput.value = sampleText;
                 }
-                await saveVoicesNow();
+                await saveVoicesNow({ promptConfirmation: true, speakerNames: [speaker] });
 
                 const refreshedVoiceCard = getVoiceCardByName(speaker);
                 const refreshedCard = refreshedVoiceCard?.querySelector('.card-body');
@@ -830,7 +896,8 @@
                 }
                 syncDesignVoiceRow(activeCard, { loaded: true, refAudio: result.ref_audio, generatedRefText: result.generated_ref_text || '' });
                 window._cloneVoicesCache = await API.get('/api/clone_voices/list');
-                await saveVoicesNow();
+                markVoiceDirty(activeCard.closest('.voice-card') || speaker);
+                await saveVoicesNow({ promptConfirmation: true, speakerNames: [speaker] });
                 showToast(`Generated voice for ${speaker}.`, 'success');
             } catch (e) {
                 if (!String(e?.message || '').toLowerCase().includes('cancelled')) {
@@ -864,6 +931,7 @@
             try {
                 const result = await API.post('/api/voices/suggest_description', { speaker });
                 descriptionInput.value = result.voice || '';
+                markVoiceDirty(voiceCard);
                 debouncedSaveVoices();
                 showToast(`Suggested voice prompt for ${speaker}.`, 'success');
                 return descriptionInput.value.trim();
@@ -899,7 +967,17 @@
             });
 
             if (results.length > 0) {
-                await saveVoicesNow({ promptConfirmation: false, retryOnNetworkFailure: true });
+                results.forEach(item => {
+                    const voiceCard = getVoiceCardByName(item?.speaker);
+                    if (voiceCard) {
+                        markVoiceDirty(voiceCard);
+                    }
+                });
+                await saveVoicesNow({
+                    promptConfirmation: false,
+                    retryOnNetworkFailure: true,
+                    speakerNames: results.map(item => item?.speaker).filter(Boolean),
+                });
             }
 
             return { results, failures };
@@ -994,7 +1072,7 @@
                         continue;
                     }
 
-                    generationQueue.push({ speaker, voiceCard, card, descriptionInput, sampleInput, generateButton });
+                    generationQueue.push({ speaker });
                 }
 
                 const suggestionQueue = generationQueue.filter(item => !item.descriptionInput?.value.trim());
@@ -1016,11 +1094,24 @@
                 }
 
                 for (let i = 0; i < generationQueue.length; i += 1) {
-                    const { speaker, voiceCard, card, descriptionInput, sampleInput, generateButton } = generationQueue[i];
+                    const { speaker } = generationQueue[i];
                     try {
+                        const voiceCard = getVoiceCardByName(speaker);
+                        if (!voiceCard || voiceCard.classList.contains('alias-active') || voiceCard.classList.contains('narrator-threshold-active')) {
+                            if (!failedSpeakers.has(speaker)) {
+                                failedSpeakers.set(speaker, `${speaker} (no longer eligible)`);
+                            }
+                            continue;
+                        }
+
+                        const card = voiceCard.querySelector('.card-body');
+                        const descriptionInput = card?.querySelector('.design-description');
+                        const sampleInput = card?.querySelector('.design-sample-text');
+                        const generateButton = card?.querySelector('.design-generate-btn');
                         if (sampleInput && !sampleInput.value.trim()) {
                             sampleInput.value = voiceCard.dataset.suggestedSample || '';
                             if (sampleInput.value.trim()) {
+                                markVoiceDirty(voiceCard);
                                 debouncedSaveVoices();
                             }
                         }
@@ -1106,14 +1197,57 @@
             });
         }
 
+        function flushPendingVoiceSavesOnUnload() {
+            clearTimeout(_voiceSaveTimer);
+            const pendingSpeakerNames = Array.from(new Set([
+                ...Array.from(_dirtyVoiceNames),
+                ...Array.from(_voiceSavePendingOptions.speakerNames || []),
+            ]));
+            const includeAll = Boolean(_voiceSavePendingOptions.includeAll);
+            const promptConfirmation = Boolean(_voiceSavePendingOptions.promptConfirmation);
+            if (!includeAll && pendingSpeakerNames.length === 0) {
+                return;
+            }
+            const cards = getVoiceCardsForSave({
+                includeAll,
+                speakerNames: pendingSpeakerNames,
+            });
+            if (cards.length === 0) {
+                return;
+            }
+            const payload = JSON.stringify({
+                config: collectVoiceConfig(cards),
+                confirm_invalidation: promptConfirmation,
+            });
+            try {
+                if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
+                    const blob = new Blob([payload], { type: 'application/json' });
+                    navigator.sendBeacon('/api/voices/batch', blob);
+                    return;
+                }
+            } catch (_e) {
+                // Fall back to keepalive fetch below.
+            }
+            try {
+                fetch('/api/voices/batch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: payload,
+                    keepalive: true,
+                });
+            } catch (_e) {
+                // Ignore unload-time network failures.
+            }
+        }
+
         if (!_voicesListResizeBound) {
             window.addEventListener('resize', () => {
                 layoutVoicesListContainer();
             });
             window.addEventListener('beforeunload', () => {
                 _voicePageUnloading = true;
-                clearTimeout(_voiceSaveTimer);
                 clearTimeout(_voiceSaveRetryTimer);
+                flushPendingVoiceSavesOnUnload();
             });
             window.addEventListener('pageshow', () => {
                 _voicePageUnloading = false;

@@ -12,7 +12,7 @@ from project_core.chunking import script_entries_to_chunks
 from script_store import load_script_document
 
 
-SCRIPT_STORE_SCHEMA_VERSION = 1
+SCRIPT_STORE_SCHEMA_VERSION = 2
 
 
 class ScriptStore(ABC):
@@ -116,6 +116,86 @@ class ScriptStore(ABC):
     def clear(self):
         raise NotImplementedError
 
+    @abstractmethod
+    def load_voice_config(self):
+        raise NotImplementedError
+
+    @abstractmethod
+    def has_voice_profiles(self):
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_voice_rows(self):
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_voice_profile(self, speaker_ref):
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_voice_profiles(self, speaker_refs):
+        raise NotImplementedError
+
+    @abstractmethod
+    def replace_voice_profiles(self, rows, *, reason="replace_voice_profiles", wait=True):
+        raise NotImplementedError
+
+    @abstractmethod
+    def upsert_voice_profiles(self, rows, *, reason="upsert_voice_profiles", wait=True):
+        raise NotImplementedError
+
+    @abstractmethod
+    def patch_voice_profile(self, speaker_ref, fields=None, clear_fields=(), *, reason="patch_voice_profile", wait=True):
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_voice_settings(self):
+        raise NotImplementedError
+
+    @abstractmethod
+    def set_voice_setting(self, key, value, *, reason="set_voice_setting", wait=True):
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_narrator_overrides(self):
+        raise NotImplementedError
+
+    @abstractmethod
+    def set_narrator_override(self, chapter, voice, *, reason="set_narrator_override", wait=True):
+        raise NotImplementedError
+
+    @abstractmethod
+    def replace_narrator_overrides(self, rows, *, reason="replace_narrator_overrides", wait=True):
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_auto_narrator_aliases(self):
+        raise NotImplementedError
+
+    @abstractmethod
+    def replace_auto_narrator_aliases(self, rows, *, reason="replace_auto_narrator_aliases", wait=True):
+        raise NotImplementedError
+
+    @abstractmethod
+    def refresh_auto_narrator_aliases_from_chunks(self, *, narrator_threshold=0, narrator_name="", reason="refresh_auto_narrator_aliases_from_chunks", wait=True):
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_voice_summary(self):
+        raise NotImplementedError
+
+    @abstractmethod
+    def resolve_voice_for_chunk(self, uid):
+        raise NotImplementedError
+
+    @abstractmethod
+    def export_voice_config(self, target_path):
+        raise NotImplementedError
+
+    @abstractmethod
+    def export_voice_state(self, target_path):
+        raise NotImplementedError
+
 
 class SQLiteScriptStore(ScriptStore):
     _RESERVED_FIELDS = {
@@ -144,6 +224,8 @@ class SQLiteScriptStore(ScriptStore):
         queue_log_path,
         script_path,
         legacy_chunks_path,
+        voice_config_path=None,
+        state_path=None,
         archive_dir=None,
     ):
         self.root_dir = root_dir
@@ -151,6 +233,8 @@ class SQLiteScriptStore(ScriptStore):
         self.queue_log_path = queue_log_path
         self.script_path = script_path
         self.legacy_chunks_path = legacy_chunks_path
+        self.voice_config_path = voice_config_path or os.path.join(root_dir, "voice_config.json")
+        self.state_path = state_path or os.path.join(root_dir, "state.json")
         self.archive_dir = archive_dir or os.path.join(root_dir, "backups", "chunks")
         self._command_queue = queue.Queue()
         self._writer_thread = None
@@ -168,6 +252,7 @@ class SQLiteScriptStore(ScriptStore):
             pass
         self._initialize_db()
         self._bootstrap_if_needed()
+        self._bootstrap_voice_state_if_needed()
         self._writer_thread = threading.Thread(
             target=self._writer_loop,
             daemon=True,
@@ -460,6 +545,310 @@ class SQLiteScriptStore(ScriptStore):
             ).fetchone()
         return row is not None
 
+    def load_voice_config(self):
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT speaker_key, display_name, voice_type, voice_name, character_style,
+                       default_style, alias, seed, ref_audio, ref_text, generated_ref_text,
+                       adapter_id, adapter_path, description, narrates, extra_json
+                FROM voice_profiles
+                ORDER BY display_name COLLATE NOCASE ASC
+                """
+            ).fetchall()
+        config = {}
+        for row in rows:
+            profile = self._row_to_voice_profile(row)
+            config[profile["display_name"]] = profile["config"]
+        return config
+
+    def has_voice_profiles(self):
+        with self._connect() as conn:
+            row = conn.execute("SELECT 1 FROM voice_profiles LIMIT 1").fetchone()
+        return row is not None
+
+    def list_voice_rows(self):
+        summary = self.get_voice_summary()
+        line_counts = summary.get("line_counts", {})
+        profiles = self.load_voice_config()
+        all_names = {}
+        for name in profiles.keys():
+            key = self._speaker_key(name)
+            if key:
+                all_names[key] = name
+        for name in line_counts.keys():
+            key = self._speaker_key(name)
+            if key and key not in all_names:
+                all_names[key] = name
+        auto_aliases = self.get_auto_narrator_aliases()
+        rows = []
+        for speaker_key, display_name in sorted(all_names.items(), key=lambda item: item[1].casefold()):
+            config = dict(profiles.get(display_name) or {})
+            if not config:
+                config = self._default_voice_config()
+            ref_audio = str(config.get("ref_audio") or "").strip()
+            rows.append({
+                "name": display_name,
+                "speaker_key": speaker_key,
+                "config": config,
+                "line_count": int(line_counts.get(display_name, 0) or 0),
+                "auto_alias_target": str(auto_aliases.get(display_name) or ""),
+                "auto_narrator_alias": bool(auto_aliases.get(display_name)),
+                "has_ref_audio": bool(ref_audio),
+            })
+        return rows
+
+    def get_voice_profile(self, speaker_ref):
+        target = self._speaker_key(speaker_ref)
+        if not target:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT speaker_key, display_name, voice_type, voice_name, character_style,
+                       default_style, alias, seed, ref_audio, ref_text, generated_ref_text,
+                       adapter_id, adapter_path, description, narrates, extra_json
+                FROM voice_profiles
+                WHERE speaker_key = ?
+                """,
+                (target,),
+            ).fetchone()
+        return self._row_to_voice_profile(row) if row is not None else None
+
+    def get_voice_profiles(self, speaker_refs):
+        targets = [self._speaker_key(value) for value in (speaker_refs or [])]
+        normalized = [value for value in targets if value]
+        if not normalized:
+            return {}
+        placeholders = ",".join("?" for _ in normalized)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT speaker_key, display_name, voice_type, voice_name, character_style,
+                       default_style, alias, seed, ref_audio, ref_text, generated_ref_text,
+                       adapter_id, adapter_path, description, narrates, extra_json
+                FROM voice_profiles
+                WHERE speaker_key IN ({placeholders})
+                """,
+                normalized,
+            ).fetchall()
+        return {
+            row_profile["display_name"]: row_profile["config"]
+            for row_profile in (self._row_to_voice_profile(row) for row in rows)
+        }
+
+    def replace_voice_profiles(self, rows, *, reason="replace_voice_profiles", wait=True):
+        normalized = self._dedupe_voice_profile_rows(rows)
+        return self._submit_command(
+            "replace_voice_profiles",
+            {"rows": normalized, "reason": reason},
+            wait=wait,
+        )
+
+    def upsert_voice_profiles(self, rows, *, reason="upsert_voice_profiles", wait=True):
+        normalized = self._dedupe_voice_profile_rows(rows)
+        if not normalized:
+            return []
+        return self._submit_command(
+            "upsert_voice_profiles",
+            {"rows": normalized, "reason": reason},
+            wait=wait,
+        )
+
+    def patch_voice_profile(self, speaker_ref, fields=None, clear_fields=(), *, reason="patch_voice_profile", wait=True):
+        normalized = self._speaker_key(speaker_ref)
+        if not normalized:
+            return None
+        return self._submit_command(
+            "patch_voice_profile",
+            {
+                "speaker_key": normalized,
+                "display_name": self._speaker_display_name(speaker_ref),
+                "fields": dict(fields or {}),
+                "clear_fields": list(clear_fields or ()),
+                "reason": reason,
+            },
+            wait=wait,
+        )
+
+    def get_voice_settings(self):
+        with self._connect() as conn:
+            rows = conn.execute("SELECT key, value FROM voice_settings").fetchall()
+        settings = {row["key"]: row["value"] for row in rows}
+        if "narrator_threshold" not in settings:
+            settings["narrator_threshold"] = "10"
+        return settings
+
+    def set_voice_setting(self, key, value, *, reason="set_voice_setting", wait=True):
+        normalized_key = str(key or "").strip()
+        if not normalized_key:
+            return None
+        return self._submit_command(
+            "set_voice_setting",
+            {"key": normalized_key, "value": "" if value is None else str(value), "reason": reason},
+            wait=wait,
+        )
+
+    def get_narrator_overrides(self):
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT chapter, voice_name FROM chapter_narrator_overrides ORDER BY chapter COLLATE NOCASE ASC"
+            ).fetchall()
+        return {
+            str(row["chapter"] or "").strip(): str(row["voice_name"] or "").strip()
+            for row in rows
+            if str(row["chapter"] or "").strip()
+        }
+
+    def set_narrator_override(self, chapter, voice, *, reason="set_narrator_override", wait=True):
+        normalized_chapter = str(chapter or "").strip()
+        if not normalized_chapter:
+            return None
+        return self._submit_command(
+            "set_narrator_override",
+            {
+                "chapter": normalized_chapter,
+                "voice_key": self._speaker_key(voice),
+                "voice_name": self._speaker_display_name(voice),
+                "reason": reason,
+            },
+            wait=wait,
+        )
+
+    def replace_narrator_overrides(self, rows, *, reason="replace_narrator_overrides", wait=True):
+        normalized = []
+        for row in (rows or []):
+            chapter = str((row or {}).get("chapter") or "").strip()
+            if not chapter:
+                continue
+            voice_name = self._speaker_display_name((row or {}).get("voice"))
+            normalized.append({
+                "chapter": chapter,
+                "voice_key": self._speaker_key(voice_name),
+                "voice_name": voice_name,
+            })
+        return self._submit_command(
+            "replace_narrator_overrides",
+            {"rows": normalized, "reason": reason},
+            wait=wait,
+        )
+
+    def get_auto_narrator_aliases(self):
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT speaker_name, target_name FROM voice_auto_aliases ORDER BY speaker_name COLLATE NOCASE ASC"
+            ).fetchall()
+        return {
+            str(row["speaker_name"] or "").strip(): str(row["target_name"] or "").strip()
+            for row in rows
+            if str(row["speaker_name"] or "").strip() and str(row["target_name"] or "").strip()
+        }
+
+    def replace_auto_narrator_aliases(self, rows, *, reason="replace_auto_narrator_aliases", wait=True):
+        normalized = []
+        for row in (rows or []):
+            speaker_name = self._speaker_display_name((row or {}).get("speaker"))
+            target_name = self._speaker_display_name((row or {}).get("target"))
+            speaker_key = self._speaker_key(speaker_name)
+            target_key = self._speaker_key(target_name)
+            if not speaker_key or not target_key:
+                continue
+            normalized.append({
+                "speaker_key": speaker_key,
+                "speaker_name": speaker_name,
+                "target_key": target_key,
+                "target_name": target_name,
+            })
+        return self._submit_command(
+            "replace_auto_narrator_aliases",
+            {"rows": normalized, "reason": reason},
+            wait=wait,
+        )
+
+    def refresh_auto_narrator_aliases_from_chunks(self, *, narrator_threshold=0, narrator_name="", reason="refresh_auto_narrator_aliases_from_chunks", wait=True):
+        return self._submit_command(
+            "refresh_auto_narrator_aliases_from_chunks",
+            {
+                "narrator_threshold": int(narrator_threshold or 0),
+                "narrator_name": self._speaker_display_name(narrator_name),
+                "reason": reason,
+            },
+            wait=wait,
+        )
+
+    def get_voice_summary(self):
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT LOWER(TRIM(COALESCE(speaker, ''))) AS speaker_key,
+                       MIN(COALESCE(speaker, '')) AS display_name,
+                       COUNT(*) AS line_count,
+                       MIN(ordinal) AS first_ordinal
+                FROM chunks
+                WHERE TRIM(COALESCE(speaker, '')) != ''
+                GROUP BY LOWER(TRIM(COALESCE(speaker, '')))
+                ORDER BY first_ordinal ASC
+                """
+            ).fetchall()
+        line_counts = {}
+        ordered_names = []
+        for row in rows:
+            display_name = self._speaker_display_name(row["display_name"])
+            if not display_name:
+                continue
+            ordered_names.append(display_name)
+            line_counts[display_name] = int(row["line_count"] or 0)
+        return {"voices": ordered_names, "line_counts": line_counts}
+
+    def resolve_voice_for_chunk(self, uid):
+        chunk = self.get_chunk(uid)
+        if chunk is None:
+            return None
+        voice_config = self.load_voice_config()
+        narrator_overrides = self.get_narrator_overrides()
+        auto_narrator_aliases = self.get_auto_narrator_aliases()
+        resolved_speaker = self._resolve_voice_speaker_for_store(
+            str(chunk.get("speaker") or ""),
+            chapter=str(chunk.get("chapter") or ""),
+            voice_config=voice_config,
+            narrator_overrides=narrator_overrides,
+            auto_narrator_aliases=auto_narrator_aliases,
+        )
+        return {
+            "uid": chunk.get("uid"),
+            "speaker": chunk.get("speaker"),
+            "chapter": chunk.get("chapter"),
+            "resolved_speaker": resolved_speaker,
+            "voice_profile": dict(voice_config.get(resolved_speaker) or {}),
+        }
+
+    def export_voice_config(self, target_path):
+        config = self.load_voice_config()
+        os.makedirs(os.path.dirname(target_path) or ".", exist_ok=True)
+        tmp_path = f"{target_path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, target_path)
+        return target_path
+
+    def export_voice_state(self, target_path):
+        settings = self.get_voice_settings()
+        try:
+            narrator_threshold = int(settings.get("narrator_threshold", "10") or 10)
+        except (TypeError, ValueError):
+            narrator_threshold = 10
+        payload = {
+            "narrator_threshold": narrator_threshold,
+            "narrator_overrides": self.get_narrator_overrides(),
+            "auto_narrator_aliases": self.get_auto_narrator_aliases(),
+        }
+        os.makedirs(os.path.dirname(target_path) or ".", exist_ok=True)
+        tmp_path = f"{target_path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, target_path)
+        return target_path
+
     def export_chunks(self, target_path):
         chunks = self.load_chunks()
         os.makedirs(os.path.dirname(target_path) or ".", exist_ok=True)
@@ -500,6 +889,55 @@ class SQLiteScriptStore(ScriptStore):
                     auto_regen_count INTEGER NOT NULL DEFAULT 0,
                     generation_token TEXT,
                     extra_json TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS voice_profiles (
+                    speaker_key TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    voice_type TEXT,
+                    voice_name TEXT,
+                    character_style TEXT,
+                    default_style TEXT,
+                    alias TEXT,
+                    seed TEXT,
+                    ref_audio TEXT,
+                    ref_text TEXT,
+                    generated_ref_text TEXT,
+                    adapter_id TEXT,
+                    adapter_path TEXT,
+                    description TEXT,
+                    narrates INTEGER,
+                    extra_json TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS voice_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chapter_narrator_overrides (
+                    chapter TEXT PRIMARY KEY,
+                    voice_key TEXT,
+                    voice_name TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS voice_auto_aliases (
+                    speaker_key TEXT PRIMARY KEY,
+                    speaker_name TEXT,
+                    target_key TEXT,
+                    target_name TEXT
                 )
                 """
             )
@@ -567,6 +1005,93 @@ class SQLiteScriptStore(ScriptStore):
         except OSError:
             pass
 
+    def _bootstrap_voice_state_if_needed(self):
+        with self._connect() as conn:
+            voice_profile_count = int(conn.execute("SELECT COUNT(*) AS count FROM voice_profiles").fetchone()["count"] or 0)
+            settings_count = int(conn.execute("SELECT COUNT(*) AS count FROM voice_settings").fetchone()["count"] or 0)
+            override_count = int(conn.execute("SELECT COUNT(*) AS count FROM chapter_narrator_overrides").fetchone()["count"] or 0)
+            auto_alias_count = int(conn.execute("SELECT COUNT(*) AS count FROM voice_auto_aliases").fetchone()["count"] or 0)
+
+        legacy_voice_config = self._load_legacy_voice_config() if voice_profile_count <= 0 else {}
+        legacy_state = self._load_legacy_voice_state() if (settings_count <= 0 or override_count <= 0 or auto_alias_count <= 0) else {}
+
+        with self._connect() as conn:
+            with conn:
+                if voice_profile_count <= 0 and legacy_voice_config:
+                    self._replace_voice_profiles_tx(
+                        conn,
+                        [
+                            self._normalize_voice_profile_row({"speaker": speaker, "config": config})
+                            for speaker, config in legacy_voice_config.items()
+                        ],
+                    )
+
+                if settings_count <= 0:
+                    narrator_threshold = legacy_state.get("narrator_threshold", 10)
+                    conn.execute(
+                        "INSERT OR REPLACE INTO voice_settings(key, value) VALUES(?, ?)",
+                        ("narrator_threshold", str(int(narrator_threshold or 0))),
+                    )
+
+                if override_count <= 0 and isinstance(legacy_state.get("narrator_overrides"), dict):
+                    rows = [
+                        {
+                            "chapter": str(chapter or "").strip(),
+                            "voice_key": self._speaker_key(voice),
+                            "voice_name": self._speaker_display_name(voice),
+                        }
+                        for chapter, voice in legacy_state.get("narrator_overrides", {}).items()
+                        if str(chapter or "").strip()
+                    ]
+                    self._replace_narrator_overrides_tx(conn, rows)
+
+                if auto_alias_count <= 0 and isinstance(legacy_state.get("auto_narrator_aliases"), dict):
+                    rows = [
+                        {
+                            "speaker_key": self._speaker_key(speaker),
+                            "speaker_name": self._speaker_display_name(speaker),
+                            "target_key": self._speaker_key(target),
+                            "target_name": self._speaker_display_name(target),
+                        }
+                        for speaker, target in legacy_state.get("auto_narrator_aliases", {}).items()
+                        if self._speaker_key(speaker) and self._speaker_key(target)
+                    ]
+                    self._replace_auto_narrator_aliases_tx(conn, rows)
+
+                seeded_rows = []
+                if int(conn.execute("SELECT COUNT(*) AS count FROM voice_profiles").fetchone()["count"] or 0) <= 0:
+                    seeded_rows = [
+                        self._normalize_voice_profile_row({"speaker": speaker, "config": self._default_voice_config()})
+                        for speaker in self.get_voice_summary().get("voices", [])
+                    ]
+                    self._replace_voice_profiles_tx(conn, seeded_rows)
+
+                if legacy_voice_config or legacy_state or seeded_rows:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO metadata(key, value) VALUES('last_voice_bootstrap_at', ?)",
+                        (str(time.time()),),
+                    )
+
+    def _load_legacy_voice_config(self):
+        if not os.path.exists(self.voice_config_path):
+            return {}
+        try:
+            with open(self.voice_config_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _load_legacy_voice_state(self):
+        if not os.path.exists(self.state_path):
+            return {}
+        try:
+            with open(self.state_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
     def _submit_command(self, name, payload, *, wait, timeout=None):
         event = threading.Event() if wait else None
         envelope = {
@@ -626,6 +1151,32 @@ class SQLiteScriptStore(ScriptStore):
             return self._delete_chunk_tx(conn, payload.get("uid"))
         if name == "delete_chapter":
             return self._delete_chapter_tx(conn, payload.get("chapter"))
+        if name == "replace_voice_profiles":
+            return self._replace_voice_profiles_tx(conn, payload.get("rows") or [])
+        if name == "upsert_voice_profiles":
+            return self._upsert_voice_profiles_tx(conn, payload.get("rows") or [])
+        if name == "patch_voice_profile":
+            return self._patch_voice_profile_tx(
+                conn,
+                payload.get("speaker_key"),
+                payload.get("display_name"),
+                payload.get("fields") or {},
+                payload.get("clear_fields") or (),
+            )
+        if name == "set_voice_setting":
+            return self._set_voice_setting_tx(conn, payload.get("key"), payload.get("value"))
+        if name == "set_narrator_override":
+            return self._set_narrator_override_tx(conn, payload.get("chapter"), payload.get("voice_key"), payload.get("voice_name"))
+        if name == "replace_narrator_overrides":
+            return self._replace_narrator_overrides_tx(conn, payload.get("rows") or [])
+        if name == "replace_auto_narrator_aliases":
+            return self._replace_auto_narrator_aliases_tx(conn, payload.get("rows") or [])
+        if name == "refresh_auto_narrator_aliases_from_chunks":
+            return self._refresh_auto_narrator_aliases_from_chunks_tx(
+                conn,
+                int(payload.get("narrator_threshold") or 0),
+                payload.get("narrator_name") or "",
+            )
         if name == "barrier":
             return True
         raise ValueError(f"Unsupported script store command: {name}")
@@ -961,6 +1512,232 @@ class SQLiteScriptStore(ScriptStore):
             "total": len(keep),
         }
 
+    def _replace_voice_profiles_tx(self, conn, rows):
+        normalized = [row for row in (rows or []) if row]
+        with conn:
+            conn.execute("DELETE FROM voice_profiles")
+            for row in normalized:
+                conn.execute(
+                    """
+                    INSERT INTO voice_profiles(
+                        speaker_key, display_name, voice_type, voice_name, character_style,
+                        default_style, alias, seed, ref_audio, ref_text, generated_ref_text,
+                        adapter_id, adapter_path, description, narrates, extra_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    self._voice_profile_to_params(row),
+                )
+            conn.execute(
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES('last_write_at', ?)",
+                (str(time.time()),),
+            )
+        return len(normalized)
+
+    def _upsert_voice_profiles_tx(self, conn, rows):
+        updated = []
+        with conn:
+            for row in (rows or []):
+                if not row:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO voice_profiles(
+                        speaker_key, display_name, voice_type, voice_name, character_style,
+                        default_style, alias, seed, ref_audio, ref_text, generated_ref_text,
+                        adapter_id, adapter_path, description, narrates, extra_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(speaker_key) DO UPDATE SET
+                        display_name = excluded.display_name,
+                        voice_type = excluded.voice_type,
+                        voice_name = excluded.voice_name,
+                        character_style = excluded.character_style,
+                        default_style = excluded.default_style,
+                        alias = excluded.alias,
+                        seed = excluded.seed,
+                        ref_audio = excluded.ref_audio,
+                        ref_text = excluded.ref_text,
+                        generated_ref_text = excluded.generated_ref_text,
+                        adapter_id = excluded.adapter_id,
+                        adapter_path = excluded.adapter_path,
+                        description = excluded.description,
+                        narrates = excluded.narrates,
+                        extra_json = excluded.extra_json
+                    """,
+                    self._voice_profile_to_params(row),
+                )
+                updated.append(row)
+            if updated:
+                conn.execute(
+                    "INSERT OR REPLACE INTO metadata(key, value) VALUES('last_write_at', ?)",
+                    (str(time.time()),),
+                )
+        return updated
+
+    def _patch_voice_profile_tx(self, conn, speaker_key, display_name, fields, clear_fields):
+        target_key = self._speaker_key(speaker_key)
+        if not target_key:
+            return None
+        row = conn.execute(
+            """
+            SELECT speaker_key, display_name, voice_type, voice_name, character_style,
+                   default_style, alias, seed, ref_audio, ref_text, generated_ref_text,
+                   adapter_id, adapter_path, description, narrates, extra_json
+            FROM voice_profiles
+            WHERE speaker_key = ?
+            """,
+            (target_key,),
+        ).fetchone()
+        profile = self._row_to_voice_profile(row)["config"] if row is not None else self._default_voice_config()
+        current_name = self._row_to_voice_profile(row)["display_name"] if row is not None else self._speaker_display_name(display_name or speaker_key)
+        for field in (clear_fields or ()):
+            profile.pop(field, None)
+        profile.update(dict(fields or {}))
+        normalized = self._normalize_voice_profile_row({"speaker": current_name, "config": profile})
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO voice_profiles(
+                    speaker_key, display_name, voice_type, voice_name, character_style,
+                    default_style, alias, seed, ref_audio, ref_text, generated_ref_text,
+                    adapter_id, adapter_path, description, narrates, extra_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(speaker_key) DO UPDATE SET
+                    display_name = excluded.display_name,
+                    voice_type = excluded.voice_type,
+                    voice_name = excluded.voice_name,
+                    character_style = excluded.character_style,
+                    default_style = excluded.default_style,
+                    alias = excluded.alias,
+                    seed = excluded.seed,
+                    ref_audio = excluded.ref_audio,
+                    ref_text = excluded.ref_text,
+                    generated_ref_text = excluded.generated_ref_text,
+                    adapter_id = excluded.adapter_id,
+                    adapter_path = excluded.adapter_path,
+                    description = excluded.description,
+                    narrates = excluded.narrates,
+                    extra_json = excluded.extra_json
+                """,
+                self._voice_profile_to_params(normalized),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES('last_write_at', ?)",
+                (str(time.time()),),
+            )
+        return normalized
+
+    def _set_voice_setting_tx(self, conn, key, value):
+        normalized_key = str(key or "").strip()
+        if not normalized_key:
+            return None
+        normalized_value = "" if value is None else str(value)
+        with conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO voice_settings(key, value) VALUES(?, ?)",
+                (normalized_key, normalized_value),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES('last_write_at', ?)",
+                (str(time.time()),),
+            )
+        return normalized_value
+
+    def _set_narrator_override_tx(self, conn, chapter, voice_key, voice_name):
+        normalized_chapter = str(chapter or "").strip()
+        if not normalized_chapter:
+            return None
+        with conn:
+            if voice_name and self._speaker_key(voice_name) != self._speaker_key("NARRATOR"):
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO chapter_narrator_overrides(chapter, voice_key, voice_name)
+                    VALUES (?, ?, ?)
+                    """,
+                    (normalized_chapter, self._speaker_key(voice_key or voice_name), self._speaker_display_name(voice_name)),
+                )
+            else:
+                conn.execute("DELETE FROM chapter_narrator_overrides WHERE chapter = ?", (normalized_chapter,))
+            conn.execute(
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES('last_write_at', ?)",
+                (str(time.time()),),
+            )
+        return self.get_narrator_overrides()
+
+    def _replace_narrator_overrides_tx(self, conn, rows):
+        normalized = [row for row in (rows or []) if str((row or {}).get("chapter") or "").strip()]
+        with conn:
+            conn.execute("DELETE FROM chapter_narrator_overrides")
+            for row in normalized:
+                conn.execute(
+                    """
+                    INSERT INTO chapter_narrator_overrides(chapter, voice_key, voice_name)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        str(row.get("chapter") or "").strip(),
+                        self._speaker_key(row.get("voice_key") or row.get("voice_name")),
+                        self._speaker_display_name(row.get("voice_name")),
+                    ),
+                )
+            conn.execute(
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES('last_write_at', ?)",
+                (str(time.time()),),
+            )
+        return len(normalized)
+
+    def _replace_auto_narrator_aliases_tx(self, conn, rows):
+        normalized = [row for row in (rows or []) if row and row.get("speaker_key") and row.get("target_key")]
+        with conn:
+            conn.execute("DELETE FROM voice_auto_aliases")
+            for row in normalized:
+                conn.execute(
+                    """
+                    INSERT INTO voice_auto_aliases(speaker_key, speaker_name, target_key, target_name)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        row.get("speaker_key"),
+                        self._speaker_display_name(row.get("speaker_name")),
+                        row.get("target_key"),
+                        self._speaker_display_name(row.get("target_name")),
+                    ),
+                )
+            conn.execute(
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES('last_write_at', ?)",
+                (str(time.time()),),
+            )
+        return len(normalized)
+
+    def _refresh_auto_narrator_aliases_from_chunks_tx(self, conn, narrator_threshold, narrator_name):
+        threshold = max(0, int(narrator_threshold or 0))
+        narrator_display = self._speaker_display_name(narrator_name)
+        if threshold <= 0 or not narrator_display:
+            return self._replace_auto_narrator_aliases_tx(conn, [])
+
+        voice_config = self.load_voice_config()
+        line_counts = self.get_voice_summary().get("line_counts", {})
+        rows = []
+        narrator_key = self._speaker_key("NARRATOR")
+        for speaker_name, count in line_counts.items():
+            speaker_key = self._speaker_key(speaker_name)
+            if not speaker_key or speaker_key == narrator_key:
+                continue
+            config = dict(voice_config.get(speaker_name) or {})
+            if str(config.get("alias") or "").strip():
+                continue
+            try:
+                parsed_count = int(count or 0)
+            except (TypeError, ValueError):
+                parsed_count = 0
+            if parsed_count < threshold:
+                rows.append({
+                    "speaker_key": speaker_key,
+                    "speaker_name": self._speaker_display_name(speaker_name),
+                    "target_key": self._speaker_key(narrator_display),
+                    "target_name": narrator_display,
+                })
+        return self._replace_auto_narrator_aliases_tx(conn, rows)
+
     def _chunk_to_params(self, chunk):
         return (
             chunk["uid"],
@@ -1039,6 +1816,186 @@ class SQLiteScriptStore(ScriptStore):
             str(validation.get("actual_duration_sec") or 0),
             str((chunk or {}).get("status") or ""),
         ])
+
+    @staticmethod
+    def _default_voice_config():
+        return {
+            "type": "design",
+            "voice": "Ryan",
+            "character_style": "",
+            "default_style": "",
+            "alias": "",
+            "seed": "-1",
+            "ref_audio": None,
+            "ref_text": None,
+            "generated_ref_text": None,
+            "adapter_id": None,
+            "adapter_path": None,
+            "description": "",
+            "narrates": False,
+        }
+
+    @staticmethod
+    def _normalize_whitespace(value):
+        return " ".join(str(value or "").strip().split())
+
+    @classmethod
+    def _speaker_key(cls, value):
+        return cls._normalize_whitespace(value).casefold()
+
+    @classmethod
+    def _speaker_display_name(cls, value):
+        display = cls._normalize_whitespace(value)
+        if cls._speaker_key(display) == cls._speaker_key("NARRATOR"):
+            return "NARRATOR"
+        return display
+
+    def _normalize_voice_profile_row(self, row):
+        payload = dict(row or {})
+        speaker = payload.get("speaker") or payload.get("display_name") or payload.get("name")
+        config = dict(payload.get("config") or {})
+        display_name = self._speaker_display_name(speaker)
+        speaker_key = self._speaker_key(display_name)
+        if not speaker_key:
+            return None
+        normalized = self._default_voice_config()
+        normalized.update(config)
+        if "narrates" in normalized:
+            normalized["narrates"] = bool(normalized.get("narrates"))
+        return {
+            "speaker_key": speaker_key,
+            "display_name": display_name,
+            "config": normalized,
+        }
+
+    def _dedupe_voice_profile_rows(self, rows):
+        deduped = {}
+        for row in (rows or []):
+            normalized = self._normalize_voice_profile_row(row)
+            if not normalized:
+                continue
+            deduped[normalized["speaker_key"]] = normalized
+        return list(deduped.values())
+
+    def _voice_profile_to_params(self, row):
+        config = dict((row or {}).get("config") or {})
+        return (
+            row.get("speaker_key"),
+            row.get("display_name"),
+            config.get("type"),
+            config.get("voice"),
+            config.get("character_style"),
+            config.get("default_style"),
+            config.get("alias"),
+            config.get("seed"),
+            config.get("ref_audio"),
+            config.get("ref_text"),
+            config.get("generated_ref_text"),
+            config.get("adapter_id"),
+            config.get("adapter_path"),
+            config.get("description"),
+            1 if bool(config.get("narrates")) else 0,
+            self._encode_voice_extra_json(config),
+        )
+
+    def _row_to_voice_profile(self, row):
+        if row is None:
+            return None
+        config = self._default_voice_config()
+        config.update({
+            "type": row["voice_type"] or config.get("type"),
+            "voice": row["voice_name"] if row["voice_name"] is not None else config.get("voice"),
+            "character_style": row["character_style"] if row["character_style"] is not None else config.get("character_style"),
+            "default_style": row["default_style"] if row["default_style"] is not None else config.get("default_style"),
+            "alias": row["alias"] if row["alias"] is not None else config.get("alias"),
+            "seed": row["seed"] if row["seed"] is not None else config.get("seed"),
+            "ref_audio": row["ref_audio"],
+            "ref_text": row["ref_text"],
+            "generated_ref_text": row["generated_ref_text"],
+            "adapter_id": row["adapter_id"],
+            "adapter_path": row["adapter_path"],
+            "description": row["description"] if row["description"] is not None else config.get("description"),
+            "narrates": bool(row["narrates"]) if row["narrates"] is not None else False,
+        })
+        if row["extra_json"]:
+            config.update(json.loads(row["extra_json"]))
+        return {
+            "speaker_key": row["speaker_key"],
+            "display_name": row["display_name"],
+            "config": config,
+        }
+
+    @staticmethod
+    def _encode_voice_extra_json(config):
+        reserved = {
+            "type",
+            "voice",
+            "character_style",
+            "default_style",
+            "alias",
+            "seed",
+            "ref_audio",
+            "ref_text",
+            "generated_ref_text",
+            "adapter_id",
+            "adapter_path",
+            "description",
+            "narrates",
+        }
+        extra = {
+            key: value
+            for key, value in (config or {}).items()
+            if key not in reserved
+        }
+        if not extra:
+            return None
+        return json.dumps(extra, ensure_ascii=False)
+
+    def _resolve_voice_speaker_for_store(self, speaker, *, chapter="", voice_config=None, narrator_overrides=None, auto_narrator_aliases=None):
+        voice_config = voice_config if isinstance(voice_config, dict) else self.load_voice_config()
+        narrator_overrides = narrator_overrides if isinstance(narrator_overrides, dict) else self.get_narrator_overrides()
+        auto_narrator_aliases = auto_narrator_aliases if isinstance(auto_narrator_aliases, dict) else self.get_auto_narrator_aliases()
+        lookup = {}
+        for name in voice_config.keys():
+            key = self._speaker_key(name)
+            if key and key not in lookup:
+                lookup[key] = name
+        original = self._speaker_display_name(speaker)
+        if not original:
+            return ""
+        current = lookup.get(self._speaker_key(original), original)
+        seen = {self._speaker_key(current)}
+        manual_alias_used = False
+        while current:
+            voice_data = dict(voice_config.get(current) or {})
+            alias = self._speaker_display_name(voice_data.get("alias"))
+            if not alias:
+                break
+            target = lookup.get(self._speaker_key(alias), alias)
+            if not target or self._speaker_key(target) == self._speaker_key(current):
+                break
+            manual_alias_used = True
+            target_key = self._speaker_key(target)
+            if target_key in seen:
+                return original
+            seen.add(target_key)
+            current = target
+
+        resolved = current or original
+        if not manual_alias_used:
+            stored_target = ""
+            for raw_speaker, raw_target in (auto_narrator_aliases or {}).items():
+                if self._speaker_key(raw_speaker) == self._speaker_key(resolved):
+                    stored_target = self._speaker_display_name(raw_target)
+                    break
+            if stored_target and self._speaker_key(stored_target) != self._speaker_key(resolved):
+                resolved = stored_target
+
+        if self._speaker_key(resolved) == self._speaker_key("NARRATOR"):
+            override = self._speaker_display_name((narrator_overrides or {}).get(str(chapter or "").strip()))
+            if override and self._speaker_key(override) != self._speaker_key("NARRATOR"):
+                return override
+        return resolved
 
     def _resolve_chunk_ref(self, chunk_ref):
         base_ref = "" if chunk_ref is None else str(chunk_ref).strip()

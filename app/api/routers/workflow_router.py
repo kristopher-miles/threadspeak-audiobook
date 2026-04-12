@@ -239,17 +239,22 @@ async def start_extract_temperament(background_tasks: BackgroundTasks):
 async def get_script_info():
     """Return a lightweight summary of the current script state."""
     script_path = os.path.join(ROOT_DIR, "annotated_script.json")
-    voice_count = 0
-    has_voice_config = False
-    if os.path.exists(VOICE_CONFIG_PATH):
+    if str(getattr(project_manager, "root_dir", "") or "").strip() == str(ROOT_DIR or "").strip():
+        try:
+            voice_config = project_manager._load_voice_config()
+        except Exception:
+            voice_config = {}
+    elif os.path.exists(VOICE_CONFIG_PATH):
         try:
             with open(VOICE_CONFIG_PATH, "r", encoding="utf-8") as f:
-                voice_config = json.load(f)
-            if isinstance(voice_config, dict):
-                voice_count = len(voice_config)
-                has_voice_config = voice_count > 0
+                payload = json.load(f)
+            voice_config = payload if isinstance(payload, dict) else {}
         except Exception:
-            pass
+            voice_config = {}
+    else:
+        voice_config = {}
+    voice_count = len(voice_config) if isinstance(voice_config, dict) else 0
+    has_voice_config = voice_count > 0
 
     has_voicelines = False
     if os.path.isdir(VOICELINES_DIR):
@@ -415,6 +420,16 @@ async def reset_new_mode(request: ResetNewModeRequest = ResetNewModeRequest()):
             os.remove(path)
             removed.append(os.path.basename(path))
 
+    if not request.preserve_voices:
+        try:
+            project_manager._save_voice_config({})
+            project_manager.set_narrator_threshold(project_manager.DEFAULT_NARRATOR_THRESHOLD)
+            if getattr(project_manager, "script_store", None) is not None:
+                project_manager.script_store.replace_narrator_overrides([], reason="reset_new_mode", wait=True)
+                project_manager.script_store.replace_auto_narrator_aliases([], reason="reset_new_mode", wait=True)
+        except Exception:
+            pass
+
     _clear_directory_contents(VOICELINES_DIR)
     removed.append("voicelines/*")
 
@@ -461,6 +476,11 @@ async def start_create_script(background_tasks: BackgroundTasks):
             status_code=400,
             detail="Paragraph data is empty or corrupt. Re-run 'Process Paragraphs'.",
         )
+
+    if hasattr(project_manager, "export_voice_config_compat"):
+        project_manager.export_voice_config_compat(voice_config_path)
+    if hasattr(project_manager, "export_voice_state_compat"):
+        project_manager.export_voice_state_compat(os.path.join(ROOT_DIR, "state.json"))
 
     run_id = _start_task_run("create_script")
     background_tasks.add_task(

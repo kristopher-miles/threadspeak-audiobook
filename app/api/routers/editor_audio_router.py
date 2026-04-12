@@ -131,7 +131,10 @@ async def get_chunk_audio(index: str):
 async def editor_events(chapter: Optional[str] = None, scope_mode: Optional[str] = None):
     normalized_scope = _normalize_editor_scope_mode(scope_mode)
     chapter_filter = (chapter or "").strip() if normalized_scope == "chapter" else None
-    subscriber = chunk_event_broker.subscribe(chapter=chapter_filter)
+    subscriber_id, subscriber_queue = chunk_event_broker.subscribe(
+        chapter=chapter_filter,
+        scope_mode=normalized_scope,
+    )
 
     async def stream():
         try:
@@ -139,12 +142,17 @@ async def editor_events(chapter: Optional[str] = None, scope_mode: Optional[str]
             yield _sse_frame("audio_status", _audio_status_payload())
             while True:
                 try:
-                    event, payload = await asyncio.to_thread(subscriber.get, True, 15.0)
+                    encoded = await asyncio.to_thread(subscriber_queue.get, True, 15.0)
+                    message = json.loads(encoded) if isinstance(encoded, str) else dict(encoded or {})
+                    event = str(message.get("type") or "").strip()
+                    payload = message.get("data") or {}
+                    if not event:
+                        continue
                     yield _sse_frame(event, payload)
                 except stdlib_queue.Empty:
                     yield ": keepalive\n\n"
         finally:
-            chunk_event_broker.unsubscribe(subscriber)
+            chunk_event_broker.unsubscribe(subscriber_id)
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 

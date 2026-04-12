@@ -50,6 +50,25 @@ from project_core.chunking import _coerce_bool, get_speaker, _is_structural_text
 
 class ProjectVoiceMixin:
         """Resolve speaker-to-voice mapping and manage voice-driven invalidation."""
+        def _chunk_voice_line_counts(self, chunks=None):
+            counts = Counter()
+            canonical_names = {}
+            if chunks is None and getattr(self, "script_store", None) is not None:
+                summary = self.script_store.get_voice_summary()
+                return Counter(summary.get("line_counts", {}))
+            chunk_rows = chunks if chunks is not None else self.load_chunks()
+            for chunk in chunk_rows or []:
+                speaker = (chunk.get("speaker") or "").strip()
+                normalized = self._normalize_speaker_name(speaker)
+                if not normalized:
+                    continue
+                canonical_name = canonical_names.get(normalized)
+                if not canonical_name:
+                    canonical_name = speaker
+                    canonical_names[normalized] = canonical_name
+                counts[canonical_name] += 1
+            return counts
+
         def _script_voice_line_counts(self, script_entries=None):
             counts = Counter()
             voices_map = {}
@@ -374,9 +393,100 @@ class ProjectVoiceMixin:
         def _normalize_speaker_name(name):
             return re.sub(r"\s+", " ", (name or "").strip()).casefold()
 
-        def get_narrator_threshold(self):
+        def has_voice_config(self):
+            script_store = getattr(self, "script_store", None)
+            if script_store is not None:
+                return script_store.has_voice_profiles()
+            voice_config = self._load_voice_config()
+            return bool(voice_config)
+
+        def export_voice_config_compat(self, target_path=None):
+            destination = target_path or self.voice_config_path
+            script_store = getattr(self, "script_store", None)
+            if script_store is not None:
+                return script_store.export_voice_config(destination)
+            self._save_voice_config(self._load_voice_config())
+            return destination
+
+        def export_voice_state_compat(self, target_path=None):
+            destination = target_path or os.path.join(self.root_dir, "state.json")
+            script_store = getattr(self, "script_store", None)
+            if script_store is not None:
+                export_path = script_store.export_voice_state(destination)
+                payload = {}
+                if os.path.exists(export_path):
+                    try:
+                        with open(export_path, "r", encoding="utf-8") as f:
+                            payload = json.load(f)
+                    except (OSError, ValueError, json.JSONDecodeError):
+                        payload = {}
+                state = self._load_state()
+                state.update(payload)
+                self._save_state(state)
+                return destination
             state = self._load_state()
-            raw = state.get("narrator_threshold", self.DEFAULT_NARRATOR_THRESHOLD)
+            state["narrator_threshold"] = self.get_narrator_threshold()
+            state["narrator_overrides"] = self.get_narrator_overrides()
+            state["auto_narrator_aliases"] = self.get_auto_narrator_aliases()
+            self._save_state(state)
+            return destination
+
+        def import_voice_compat(self, voice_config_path=None, state_path=None, replace=False):
+            voice_config_path = voice_config_path or self.voice_config_path
+            state_path = state_path or os.path.join(self.root_dir, "state.json")
+
+            imported_config = {}
+            if os.path.exists(voice_config_path):
+                try:
+                    with open(voice_config_path, "r", encoding="utf-8") as f:
+                        payload = json.load(f)
+                    if isinstance(payload, dict):
+                        imported_config = payload
+                except (OSError, ValueError, json.JSONDecodeError):
+                    imported_config = {}
+
+            imported_state = {}
+            if os.path.exists(state_path):
+                try:
+                    with open(state_path, "r", encoding="utf-8") as f:
+                        payload = json.load(f)
+                    if isinstance(payload, dict):
+                        imported_state = payload
+                except (OSError, ValueError, json.JSONDecodeError):
+                    imported_state = {}
+
+            existing_config = {} if replace else dict(self._load_voice_config() or {})
+            merged_config = dict(existing_config)
+            for speaker, config in imported_config.items():
+                merged_config[speaker] = dict(config or {})
+            self._save_voice_config(merged_config)
+
+            if "narrator_threshold" in imported_state:
+                self.set_narrator_threshold(imported_state.get("narrator_threshold"))
+            if replace and hasattr(self, "script_store") and self.script_store is not None:
+                self.script_store.replace_narrator_overrides([], reason="import_voice_compat_clear_overrides", wait=True)
+                self.script_store.replace_auto_narrator_aliases([], reason="import_voice_compat_clear_auto_aliases", wait=True)
+            if isinstance(imported_state.get("narrator_overrides"), dict):
+                for chapter, voice in imported_state.get("narrator_overrides", {}).items():
+                    self.set_narrator_override(chapter, voice)
+            if isinstance(imported_state.get("auto_narrator_aliases"), dict):
+                if hasattr(self, "script_store") and self.script_store is not None:
+                    self.script_store.replace_auto_narrator_aliases(
+                        [
+                            {"speaker": speaker, "target": target}
+                            for speaker, target in imported_state.get("auto_narrator_aliases", {}).items()
+                        ],
+                        reason="import_voice_compat_auto_aliases",
+                        wait=True,
+                    )
+
+        def get_narrator_threshold(self):
+            script_store = getattr(self, "script_store", None)
+            raw = self.DEFAULT_NARRATOR_THRESHOLD
+            if script_store is not None:
+                raw = script_store.get_voice_settings().get("narrator_threshold", self.DEFAULT_NARRATOR_THRESHOLD)
+            else:
+                raw = self._load_state().get("narrator_threshold", self.DEFAULT_NARRATOR_THRESHOLD)
             try:
                 value = int(raw)
             except (TypeError, ValueError):
@@ -389,14 +499,21 @@ class ProjectVoiceMixin:
             except (TypeError, ValueError):
                 parsed = self.DEFAULT_NARRATOR_THRESHOLD
             parsed = max(0, parsed)
-            state = self._load_state()
-            state["narrator_threshold"] = parsed
-            self._save_state(state)
+            script_store = getattr(self, "script_store", None)
+            if script_store is not None:
+                script_store.set_voice_setting("narrator_threshold", parsed, reason="set_narrator_threshold", wait=True)
+            else:
+                state = self._load_state()
+                state["narrator_threshold"] = parsed
+                self._save_state(state)
             self.refresh_auto_narrator_aliases()
             return parsed
 
         def get_narrator_overrides(self):
             """Return dict of chapter_name -> voice_name for narrator substitution."""
+            script_store = getattr(self, "script_store", None)
+            if script_store is not None:
+                return script_store.get_narrator_overrides()
             return self._load_state().get("narrator_overrides", {})
 
         def _apply_narrator_override(self, speaker, chapter, narrator_overrides):
@@ -409,6 +526,10 @@ class ProjectVoiceMixin:
 
         def set_narrator_override(self, chapter: str, voice: str):
             """Set or clear the narrator voice for a specific chapter."""
+            script_store = getattr(self, "script_store", None)
+            if script_store is not None:
+                script_store.set_narrator_override(chapter, voice, reason="set_narrator_override", wait=True)
+                return
             state = self._load_state()
             overrides = state.get("narrator_overrides", {})
             if voice and self._normalize_speaker_name(voice) != self._normalize_speaker_name("NARRATOR"):
@@ -419,6 +540,10 @@ class ProjectVoiceMixin:
             self._save_state(state)
 
         def get_auto_narrator_aliases(self):
+            script_store = getattr(self, "script_store", None)
+            if script_store is not None:
+                aliases = script_store.get_auto_narrator_aliases()
+                return aliases if isinstance(aliases, dict) else {}
             state = self._load_state()
             aliases = state.get("auto_narrator_aliases", {})
             return aliases if isinstance(aliases, dict) else {}
@@ -432,7 +557,8 @@ class ProjectVoiceMixin:
         ):
             voice_config = voice_config if isinstance(voice_config, dict) else self._load_voice_config()
             if line_counts is None:
-                line_counts = self._script_voice_line_counts(script_entries)
+                chunk_counts = self._chunk_voice_line_counts()
+                line_counts = chunk_counts or self._script_voice_line_counts(script_entries)
 
             threshold = self.get_narrator_threshold()
             if threshold <= 0:
@@ -480,9 +606,20 @@ class ProjectVoiceMixin:
                 line_counts=line_counts,
                 narrator_name=narrator_name,
             )
-            state = self._load_state()
-            state["auto_narrator_aliases"] = aliases
-            self._save_state(state)
+            script_store = getattr(self, "script_store", None)
+            if script_store is not None:
+                script_store.replace_auto_narrator_aliases(
+                    [
+                        {"speaker": speaker, "target": target}
+                        for speaker, target in aliases.items()
+                    ],
+                    reason="refresh_auto_narrator_aliases",
+                    wait=True,
+                )
+            else:
+                state = self._load_state()
+                state["auto_narrator_aliases"] = aliases
+                self._save_state(state)
             return aliases
 
         @staticmethod
@@ -635,6 +772,7 @@ class ProjectVoiceMixin:
             affected_indices = []
             affected_speakers = set()
             changed_reasons = Counter()
+            generated_indices_by_speaker = {}
 
             for index, chunk in enumerate(chunks):
                 audio_path = str((chunk or {}).get("audio_path") or "").strip()
@@ -645,6 +783,14 @@ class ProjectVoiceMixin:
                 if not speaker:
                     continue
 
+                normalized = self._normalize_speaker_name(speaker)
+                if not normalized:
+                    continue
+                generated_indices_by_speaker.setdefault(normalized, {"speaker": speaker, "indices": []})
+                generated_indices_by_speaker[normalized]["indices"].append(index)
+
+            for speaker_group in generated_indices_by_speaker.values():
+                speaker = speaker_group["speaker"]
                 old_resolved = self.resolve_voice_speaker(speaker, old_config, chunks=chunks)
                 new_resolved = self.resolve_voice_speaker(speaker, new_config, chunks=chunks)
 
@@ -656,16 +802,16 @@ class ProjectVoiceMixin:
                 if not (alias_changed or ref_audio_changed):
                     continue
 
-                affected_indices.append(index)
+                affected_indices.extend(speaker_group["indices"])
                 affected_speakers.add(speaker)
                 if alias_changed:
-                    changed_reasons["alias"] += 1
+                    changed_reasons["alias"] += len(speaker_group["indices"])
                 if ref_audio_changed:
-                    changed_reasons["ref_audio"] += 1
+                    changed_reasons["ref_audio"] += len(speaker_group["indices"])
 
             return {
                 "invalidated_clips": len(affected_indices),
-                "affected_indices": affected_indices,
+                "affected_indices": sorted(affected_indices),
                 "affected_speakers": sorted(affected_speakers),
                 "reason_counts": dict(changed_reasons),
             }

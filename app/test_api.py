@@ -756,6 +756,65 @@ def test_get_voices():
         raise TestFailure(f"Expected list, got {type(data).__name__}")
 
 
+def test_get_voices_reflects_chunk_store_speaker_updates():
+    from project import ProjectManager
+
+    manager = ProjectManager(REPO_DIR)
+    script_path = os.path.join(REPO_DIR, "annotated_script.json")
+    original_chunks = manager.load_chunks()
+    original_script = None
+    if os.path.exists(script_path):
+        with open(script_path, "r", encoding="utf-8") as f:
+            original_script = f.read()
+
+    try:
+        with open(script_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "entries": [
+                    {"speaker": f"{TEST_PREFIX}Original", "text": "Original script speaker line."},
+                ],
+                "dictionary": [],
+            }, f)
+
+        manager.save_chunks([
+            {
+                "id": 0,
+                "uid": f"{TEST_PREFIX}uid-0",
+                "speaker": f"{TEST_PREFIX}Edited",
+                "text": "Edited chunk speaker line.",
+                "instruct": "",
+                "chapter": "Chapter 1",
+                "status": "pending",
+                "audio_path": None,
+                "audio_validation": None,
+                "auto_regen_count": 0,
+            }
+        ])
+
+        r = get("/api/voices")
+        assert_status(r, 200)
+        data = r.json()
+
+        by_name = {item.get("name"): item for item in data if isinstance(item, dict)}
+        if f"{TEST_PREFIX}Edited" not in by_name:
+            raise TestFailure(f"Expected edited chunk speaker in voices list, got {sorted(by_name.keys())}")
+        if f"{TEST_PREFIX}Original" in by_name:
+            raise TestFailure("Voices endpoint still reflected annotated_script.json instead of chunk-store state")
+        if int(by_name[f"{TEST_PREFIX}Edited"].get("line_count") or 0) != 1:
+            raise TestFailure(f"Expected edited speaker line_count=1, got {by_name[f'{TEST_PREFIX}Edited']}")
+    finally:
+        manager.save_chunks(original_chunks)
+        if original_script is None:
+            try:
+                os.remove(script_path)
+            except FileNotFoundError:
+                pass
+        else:
+            with open(script_path, "w", encoding="utf-8") as f:
+                f.write(original_script)
+        manager.shutdown_script_store(flush=True)
+
+
 def test_save_voice_config():
     r = post("/api/save_voice_config", json={
         f"{TEST_PREFIX}voice": {

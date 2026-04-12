@@ -547,8 +547,8 @@ class SavedVoiceReuseTests(unittest.TestCase):
                 app_module.SCRIPT_PATH = script_path
                 app_module.VOICE_CONFIG_PATH = voice_config_path
                 app_module.awaitable_get_voices_sync = lambda: [
-                    {"name": "Queen Novo", "config": {"alias": ""}, "suggested_sample_text": "queen sample"},
-                    {"name": "Novo", "config": {"alias": "Queen Novo"}, "suggested_sample_text": "novo sample"},
+                    {"name": "Queen Novo", "config": {"alias": ""}, "suggested_sample_text": "queen sample", "line_count": 22, "paragraph_count": 0},
+                    {"name": "Novo", "config": {"alias": ""}, "suggested_sample_text": "novo sample", "line_count": 13, "paragraph_count": 0},
                 ]
                 app_module._task_is_current = lambda task_name, run_id: True
                 app_module._append_task_log = lambda task_name, run_id, message: logs.append(message)
@@ -580,6 +580,7 @@ class SavedVoiceReuseTests(unittest.TestCase):
                 success = app_module.run_voice_processing_task("run-1")
                 self.assertTrue(success)
                 self.assertEqual(calls, ["Queen Novo"])
+                self.assertTrue(any("Auto-aliased Novo to Queen Novo." in message for message in logs))
                 self.assertTrue(any("Skipping Novo: aliased to Queen Novo." in message for message in logs))
                 with open(voice_config_path, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
@@ -684,7 +685,7 @@ class SavedVoiceReuseTests(unittest.TestCase):
                 app_module.VOICE_CONFIG_PATH = original_voice_config_path
                 app_module.VOICES_PATH = original_voices_path
 
-    def test_get_voices_infers_contained_name_alias_from_line_counts(self):
+    def test_get_voices_does_not_infer_contained_name_alias_on_page_load(self):
         with tempfile.TemporaryDirectory() as temp_root:
             script_path = os.path.join(temp_root, "annotated_script.json")
             voice_config_path = os.path.join(temp_root, "voice_config.json")
@@ -739,7 +740,7 @@ class SavedVoiceReuseTests(unittest.TestCase):
 
                 voices = asyncio.run(app_module.get_voices())
                 voices_by_name = {voice["name"]: voice for voice in voices}
-                self.assertEqual(voices_by_name["Novo"]["config"].get("alias"), "Queen Novo")
+                self.assertEqual(voices_by_name["Novo"]["config"].get("alias", ""), "")
                 self.assertEqual(voices_by_name["Queen Novo"]["config"].get("alias", ""), "")
             finally:
                 app_module.ROOT_DIR = original_root

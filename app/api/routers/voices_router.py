@@ -10,6 +10,16 @@ class NarratorThresholdRequest(BaseModel):
     value: int
 
 
+class VoiceProfilePatchRequest(BaseModel):
+    fields: VoiceConfigItem
+    confirm_invalidation: bool = False
+
+
+class VoiceProfileBatchRequest(BaseModel):
+    config: Dict[str, VoiceConfigItem]
+    confirm_invalidation: bool = False
+
+
 def _normalized_speaker(name: str) -> str:
     return project_manager._normalize_speaker_name(name)
 
@@ -131,54 +141,133 @@ def _infer_contained_name_aliases(
     return suggested_aliases
 
 
+def _can_use_project_chunk_store() -> bool:
+    manager_root = str(getattr(project_manager, "root_dir", "") or "").strip()
+    route_root = str(ROOT_DIR or "").strip()
+    if not manager_root or not route_root:
+        return False
+    return os.path.realpath(manager_root) == os.path.realpath(route_root)
+
+
+def _compute_auto_narrator_aliases_for_route(
+    voice_config: Dict[str, dict],
+    line_counts: Dict[str, int],
+    narrator_name: str,
+) -> Dict[str, str]:
+    refresh_aliases = getattr(project_manager, "refresh_auto_narrator_aliases", None)
+    if callable(refresh_aliases) and _can_use_project_chunk_store():
+        return refresh_aliases(
+            voice_config=voice_config,
+            line_counts=line_counts,
+            narrator_name=narrator_name,
+        )
+
+    threshold = int(project_manager.get_narrator_threshold() or 0)
+    if threshold <= 0 or not narrator_name:
+        return {}
+
+    aliases: Dict[str, str] = {}
+    narrator_key = _normalized_speaker("NARRATOR")
+    for voice_name, count in (line_counts or {}).items():
+        if _normalized_speaker(voice_name) == narrator_key:
+            continue
+        config_key = _find_config_key_case_insensitive(voice_config, voice_name)
+        config = voice_config.get(config_key, {}) if config_key else {}
+        if str((config or {}).get("alias") or "").strip():
+            continue
+        if int(count or 0) < threshold:
+            aliases[voice_name] = narrator_name
+    return aliases
+
+
+def _infer_name_aliases_from_voice_payloads(
+    voices: List[Dict[str, object]],
+    voice_config: Dict[str, dict],
+) -> Dict[str, str]:
+    voice_names = [str((voice or {}).get("name") or "").strip() for voice in (voices or []) if str((voice or {}).get("name") or "").strip()]
+    line_counts = {
+        name: int((voice or {}).get("line_count") or 0)
+        for voice in (voices or [])
+        for name in [str((voice or {}).get("name") or "").strip()]
+        if name
+    }
+    para_counts_by_norm = {
+        _normalized_speaker(str((voice or {}).get("name") or "").strip()): int((voice or {}).get("paragraph_count") or 0)
+        for voice in (voices or [])
+        if str((voice or {}).get("name") or "").strip()
+    }
+    return _infer_contained_name_aliases(voice_names, voice_config, line_counts, para_counts_by_norm)
+
+
+def _merge_voice_config_patch(config_items: Dict[str, VoiceConfigItem] | None) -> Dict[str, dict]:
+    incoming_config = _canonicalize_voice_config_keys({
+        _canonical_speaker_name(voice_name): config_item.model_dump()
+        for voice_name, config_item in (config_items or {}).items()
+    })
+    existing_config = _canonicalize_voice_config_keys(_load_runtime_voice_config())
+    new_config = copy.deepcopy(existing_config)
+    for voice_name, config_item in incoming_config.items():
+        target_name = _canonical_speaker_name(voice_name)
+        existing_key = _find_config_key_case_insensitive(new_config, target_name)
+        new_config[existing_key or target_name] = config_item
+    return _canonicalize_voice_config_keys(new_config)
+
+
+def _load_runtime_voice_config() -> Dict[str, dict]:
+    load_fn = getattr(project_manager, "_load_voice_config", None)
+    manager_root = str(getattr(project_manager, "root_dir", "") or "").strip()
+    if callable(load_fn) and (not manager_root or _can_use_project_chunk_store()):
+        return load_fn()
+    if os.path.exists(VOICE_CONFIG_PATH):
+        try:
+            with open(VOICE_CONFIG_PATH, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            return payload if isinstance(payload, dict) else {}
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {}
+    return {}
+
+
+def _save_runtime_voice_config(config: Dict[str, dict]):
+    save_fn = getattr(project_manager, "_save_voice_config", None)
+    manager_root = str(getattr(project_manager, "root_dir", "") or "").strip()
+    if callable(save_fn) and (not manager_root or _can_use_project_chunk_store()):
+        save_fn(config)
+        return
+    with open(VOICE_CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+
+
 @router.get("/api/voices")
 async def get_voices():
-    # Parse voices directly from the current script (no stale cache)
-    voices_list = []
-    line_counts: dict[str, int] = {}
-    script_data = []
-    if os.path.exists(SCRIPT_PATH):
+    chunks = project_manager.load_chunks() if _can_use_project_chunk_store() else []
+    script_store = getattr(project_manager, "script_store", None)
+    voice_rows = script_store.list_voice_rows() if (_can_use_project_chunk_store() and script_store is not None) else []
+    runtime_voice_config = _canonicalize_voice_config_keys(_load_runtime_voice_config())
+    if not voice_rows and os.path.exists(SCRIPT_PATH):
         try:
             script_data = _load_project_script_document()["entries"]
-            voices_map = {}
-            line_counts_by_norm: dict[str, int] = {}
+            seen = {}
             for entry in script_data:
                 speaker = (entry.get("speaker") or entry.get("type") or "").strip()
-                if speaker:
-                    normalized = _normalized_speaker(speaker)
-                    if not normalized:
-                        continue
-                    canonical_name = voices_map.get(normalized)
-                    if not canonical_name:
-                        canonical_name = _canonical_speaker_name(speaker)
-                        voices_map[normalized] = canonical_name
-                    line_counts_by_norm[normalized] = line_counts_by_norm.get(normalized, 0) + 1
-            voices_list = sorted(voices_map.values(), key=lambda value: value.casefold())
-            line_counts = {
-                voices_map[norm]: count
-                for norm, count in line_counts_by_norm.items()
-                if norm in voices_map
-            }
-            # Update voices.json for compatibility with other tools
-            with open(VOICES_PATH, "w", encoding="utf-8") as f:
-                json.dump(voices_list, f, indent=2, ensure_ascii=False)
+                normalized = _normalized_speaker(speaker)
+                if not normalized or normalized in seen:
+                    if normalized in seen:
+                        seen[normalized]["line_count"] += 1
+                    continue
+                seen[normalized] = {
+                    "name": _canonical_speaker_name(speaker),
+                    "config": runtime_voice_config.get(_canonical_speaker_name(speaker), {}),
+                    "line_count": 1,
+                    "auto_narrator_alias": False,
+                    "auto_alias_target": "",
+                }
+            voice_rows = list(seen.values())
         except (json.JSONDecodeError, ValueError):
-            pass
+            voice_rows = []
 
-    if not voices_list:
+    if not voice_rows:
         return []
-
-    narrator_threshold = project_manager.get_narrator_threshold()
-    narrator_name = next(
-        (name for name in voices_list if _normalized_speaker(name) == _normalized_speaker("NARRATOR")),
-        "",
-    )
-
-    # Combine with config
-    voice_config = {}
-    if os.path.exists(VOICE_CONFIG_PATH):
-        with open(VOICE_CONFIG_PATH, "r", encoding="utf-8") as f:
-            voice_config = _canonicalize_voice_config_keys(json.load(f))
 
     # Count paragraphs per speaker from paragraphs.json (new pipeline only)
     para_counts_by_norm: dict[str, int] = {}
@@ -197,32 +286,13 @@ async def get_voices():
             pass
 
     result = []
-    chunks = project_manager.load_chunks()
-    inferred_aliases = _infer_contained_name_aliases(voices_list, voice_config, line_counts, para_counts_by_norm)
-    auto_narrator_aliases = project_manager.refresh_auto_narrator_aliases(
-        voice_config=voice_config,
-        script_entries=script_data,
-        line_counts=line_counts,
-        narrator_name=narrator_name,
-    )
-    for voice_name in voices_list:
-        config_key = _find_config_key_case_insensitive(voice_config, voice_name)
-        config = dict(voice_config.get(config_key, {}) if config_key else {})
-        if not (config.get("alias") or "").strip():
-            inferred_alias = inferred_aliases.get(voice_name)
-            if inferred_alias:
-                config["alias"] = inferred_alias
+    for voice in voice_rows:
+        voice_name = str((voice or {}).get("name") or "").strip()
+        config = dict((voice or {}).get("config") or {})
         sample_suggestion = project_manager.suggest_design_sample_text(voice_name, chunks)
-        line_count = line_counts.get(voice_name, 0)
-        auto_alias_target = next(
-            (
-                target_name
-                for speaker_name, target_name in auto_narrator_aliases.items()
-                if _normalized_speaker(speaker_name) == _normalized_speaker(voice_name)
-            ),
-            "",
-        )
-        auto_narrator_alias = bool(auto_alias_target)
+        line_count = int((voice or {}).get("line_count") or 0)
+        auto_alias_target = str((voice or {}).get("auto_alias_target") or "")
+        auto_narrator_alias = bool((voice or {}).get("auto_narrator_alias"))
         ref_audio = (config.get("ref_audio") or "").strip()
         ref_audio_path = os.path.join(ROOT_DIR, ref_audio) if ref_audio and not os.path.isabs(ref_audio) else ref_audio
         design_clone_loaded = bool(ref_audio and ref_audio_path and os.path.exists(ref_audio_path))
@@ -272,56 +342,38 @@ async def save_dictionary(request: DictionarySaveRequest):
 
 @router.post("/api/save_voice_config")
 async def save_voice_config(config_data: Dict[str, VoiceConfigItem]):
-    # Read existing to preserve any fields not sent?
-    # For now, we assume frontend sends full config or we just overwrite specific keys
-
-    current_config = {}
-    if os.path.exists(VOICE_CONFIG_PATH):
-        with open(VOICE_CONFIG_PATH, "r", encoding="utf-8") as f:
-            try:
-                current_config = json.load(f)
-            except (json.JSONDecodeError, ValueError):
-                pass
-
-    # Update current config with new data
-    for voice_name, config in config_data.items():
-        # Convert Pydantic model to dict
-        target_name = _canonical_speaker_name(voice_name)
-        existing_key = _find_config_key_case_insensitive(current_config, target_name)
-        current_config[existing_key or target_name] = config.model_dump()
-
-    current_config = _canonicalize_voice_config_keys(current_config)
-
-    with open(VOICE_CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(current_config, f, indent=2, ensure_ascii=False)
-
-    return {"status": "saved"}
+    new_config = _merge_voice_config_patch(config_data)
+    project_manager._save_voice_config(new_config)
+    return {"status": "saved", "saved": len(config_data or {})}
 
 
 @router.post("/api/voices/save_config")
 async def save_voice_config_with_invalidation(request: VoiceConfigSaveRequest):
-    # Voice updates must remain available even during active processing so the
-    # UI can prompt for invalidation and intentionally clear affected clips.
-    incoming_config = _canonicalize_voice_config_keys({
-        _canonical_speaker_name(voice_name): config_item.model_dump()
-        for voice_name, config_item in (request.config or {}).items()
-    })
-    existing_config = _canonicalize_voice_config_keys(project_manager._load_voice_config())
-
-    # Treat request payload as patch semantics: update submitted voices while
-    # preserving unrelated voice entries already in the config file.
-    new_config = copy.deepcopy(existing_config)
-    for voice_name, config_item in incoming_config.items():
-        target_name = _canonical_speaker_name(voice_name)
-        existing_key = _find_config_key_case_insensitive(new_config, target_name)
-        new_config[existing_key or target_name] = config_item
-    new_config = _canonicalize_voice_config_keys(new_config)
-
+    new_config = _merge_voice_config_patch(request.config)
     result = project_manager.save_voice_config_with_invalidation(
         new_config,
         confirm_invalidation=bool(request.confirm_invalidation),
     )
     return result
+
+
+@router.post("/api/voices/batch")
+async def batch_save_voice_profiles(request: VoiceProfileBatchRequest):
+    new_config = _merge_voice_config_patch(request.config)
+    return project_manager.save_voice_config_with_invalidation(
+        new_config,
+        confirm_invalidation=bool(request.confirm_invalidation),
+    )
+
+
+@router.patch("/api/voices/{speaker}")
+async def patch_voice_profile(speaker: str, request: VoiceProfilePatchRequest):
+    return await batch_save_voice_profiles(
+        VoiceProfileBatchRequest(
+            config={speaker: request.fields},
+            confirm_invalidation=bool(request.confirm_invalidation),
+        )
+    )
 
 
 def _load_runtime_config() -> Dict[str, dict]:
@@ -494,17 +546,12 @@ def run_voice_processing_task(run_id: str, stop_check=None, relay_fn=None):
             log("Task voices completed successfully.")
             return True
 
-        voice_config = {}
-        if os.path.exists(VOICE_CONFIG_PATH):
-            with open(VOICE_CONFIG_PATH, "r", encoding="utf-8") as f:
-                try:
-                    voice_config = _canonicalize_voice_config_keys(json.load(f))
-                except (json.JSONDecodeError, ValueError):
-                    voice_config = {}
+        voice_config = _canonicalize_voice_config_keys(_load_runtime_voice_config())
 
         known_names = {voice["name"] for voice in voices}
         updated_config = copy.deepcopy(voice_config)
         changed = False
+        inferred_aliases = _infer_name_aliases_from_voice_payloads(voices, updated_config)
 
         for voice in voices:
             speaker = voice["name"]
@@ -512,10 +559,11 @@ def run_voice_processing_task(run_id: str, stop_check=None, relay_fn=None):
             if not entry.get("type"):
                 entry["type"] = "design"
                 changed = True
-            inferred_alias = ((voice.get("config") or {}).get("alias") or "").strip()
+            inferred_alias = (inferred_aliases.get(speaker) or "").strip()
             if inferred_alias and not (entry.get("alias") or "").strip():
                 entry["alias"] = inferred_alias
                 changed = True
+                log(f"Auto-aliased {speaker} to {inferred_alias}.")
             ref_audio = (entry.get("ref_audio") or "").strip()
             ref_audio_path = os.path.join(ROOT_DIR, ref_audio) if ref_audio else ""
             reusable_match = _find_saved_voice_option_for_speaker(speaker)
@@ -536,8 +584,7 @@ def run_voice_processing_task(run_id: str, stop_check=None, relay_fn=None):
                     changed = True
 
         if changed:
-            with open(VOICE_CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(updated_config, f, indent=2, ensure_ascii=False)
+            _save_runtime_voice_config(updated_config)
 
         eligible = []
         for voice in voices:
@@ -583,8 +630,7 @@ def run_voice_processing_task(run_id: str, stop_check=None, relay_fn=None):
                 for suggestion in suggestion_batch["results"]:
                     speaker = suggestion["speaker"]
                     updated_config.setdefault(speaker, {})["description"] = suggestion["voice"].strip()
-                with open(VOICE_CONFIG_PATH, "w", encoding="utf-8") as f:
-                    json.dump(updated_config, f, indent=2, ensure_ascii=False)
+                _save_runtime_voice_config(updated_config)
             for failure in suggestion_batch["failures"]:
                 speaker = failure["speaker"]
                 speakers_with_suggestion_failures.add(speaker)
@@ -827,13 +873,8 @@ async def clear_uploaded_voices_for_current_script():
         _save_manifest(DESIGNED_VOICES_MANIFEST, kept_designed_entries)
 
     updated_voice_config = False
-    if os.path.exists(VOICE_CONFIG_PATH):
-        try:
-            with open(VOICE_CONFIG_PATH, "r", encoding="utf-8") as f:
-                voice_config = json.load(f)
-        except (json.JSONDecodeError, ValueError):
-            voice_config = {}
-
+    voice_config = _load_runtime_voice_config()
+    if voice_config:
         removed_set = set(removed_relative_paths)
         for speaker, cfg in (voice_config or {}).items():
             if not isinstance(cfg, dict):
@@ -854,8 +895,7 @@ async def clear_uploaded_voices_for_current_script():
                 updated_voice_config = True
 
         if updated_voice_config:
-            with open(VOICE_CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(voice_config, f, indent=2, ensure_ascii=False)
+            _save_runtime_voice_config(voice_config)
 
     if project_manager.engine and hasattr(project_manager.engine, "clear_clone_prompt_cache"):
         try:

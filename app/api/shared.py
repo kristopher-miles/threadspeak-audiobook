@@ -429,6 +429,7 @@ def _save_current_script_snapshot(name: str, *, purge_existing: bool = False):
 
     shutil.copy2(SCRIPT_PATH, dest)
 
+    _ensure_voice_compat_exports()
     if os.path.exists(VOICE_CONFIG_PATH):
         shutil.copy2(VOICE_CONFIG_PATH, os.path.join(SCRIPTS_DIR, f"{safe_name}.voice_config.json"))
 
@@ -1311,7 +1312,7 @@ def _serialize_audio_job(job):
         "error_clips": job.get("error_clips", 0),
         "pending_indices": [ordinals[uid] for uid in pending_uids if uid in ordinals],
         "recovery_count": job.get("recovery_count", 0),
-        "queued_at": job["queued_at"],
+        "queued_at": job.get("queued_at"),
         "started_at": job.get("started_at"),
         "finished_at": job.get("finished_at"),
         "last_output_at": job.get("last_output_at"),
@@ -1562,7 +1563,7 @@ def _derived_processing_completed_stages(options=None):
         if stage_name in ("sanity", "repair") and markers.get(stage_name) and os.path.exists(SCRIPT_PATH) and os.path.exists(SCRIPT_SANITY_PATH):
             completed.append(stage_name)
             continue
-        if stage_name == "voices" and markers.get(stage_name) and os.path.exists(VOICE_CONFIG_PATH):
+        if stage_name == "voices" and markers.get(stage_name) and getattr(project_manager, "has_voice_config", lambda: False)():
             completed.append(stage_name)
             continue
         if stage_name == "audio" and markers.get(stage_name) and bool(_load_compat_chunks_snapshot()):
@@ -1945,6 +1946,13 @@ def _archive_state_with_relative_paths():
     return state
 
 
+def _ensure_voice_compat_exports():
+    if hasattr(project_manager, "export_voice_config_compat"):
+        project_manager.export_voice_config_compat(VOICE_CONFIG_PATH)
+    if hasattr(project_manager, "export_voice_state_compat"):
+        project_manager.export_voice_state_compat(os.path.join(ROOT_DIR, "state.json"))
+
+
 def _project_archive_entries():
     entries = {}
 
@@ -2058,6 +2066,7 @@ def _project_has_generated_audio() -> bool:
 
 
 def _write_project_archive(zip_path: str):
+    _ensure_voice_compat_exports()
     entries = _project_archive_entries()
     manifest = _build_project_archive_manifest(entries)
     os.makedirs(os.path.dirname(zip_path), exist_ok=True)
@@ -3563,6 +3572,7 @@ def _run_extract_temperament_task(run_id: str, paragraphs_path: str, config_path
 
 def _run_create_script_task(run_id: str, paragraphs_path: str, voice_config_path: str,
                             script_output_path: str, chunks_output_path: str):
+    _ensure_voice_compat_exports()
     # ── Error correction: retry dialogue-error paragraphs before building script ──
     try:
         with open(paragraphs_path, "r", encoding="utf-8") as f:
@@ -3601,6 +3611,8 @@ def _run_create_script_task(run_id: str, paragraphs_path: str, voice_config_path
     )
     if success:
         project_manager.reload_script_store()
+        if hasattr(project_manager, "import_voice_compat"):
+            project_manager.import_voice_compat(voice_config_path, os.path.join(ROOT_DIR, "state.json"))
 
 
 def _load_script_max_length() -> int:
@@ -3980,11 +3992,10 @@ def _derived_new_mode_completed_stages_from_files(options=None) -> list:
     if os.path.exists(script_path) and os.path.exists(chunks_path):
         completed.append("create_script")
 
-    # process_voices: all voice entries in voice_config have a ref_audio file
-    if options.get("process_voices", True) and os.path.exists(VOICE_CONFIG_PATH):
+    # process_voices: all voice entries in the runtime store have a ref_audio file
+    if options.get("process_voices", True):
         try:
-            with open(VOICE_CONFIG_PATH, "r", encoding="utf-8") as f:
-                vc = json.load(f)
+            vc = project_manager._load_voice_config()
             if isinstance(vc, dict) and vc:
                 all_have_audio = all(
                     bool((v.get("ref_audio") or "").strip())

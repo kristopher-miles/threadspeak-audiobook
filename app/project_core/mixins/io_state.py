@@ -65,6 +65,9 @@ class ProjectIOStateMixin:
             os.replace(tmp, self.paragraphs_path)
 
         def _load_voice_config(self):
+            script_store = getattr(self, "script_store", None)
+            if script_store is not None:
+                return script_store.load_voice_config()
             if os.path.exists(self.voice_config_path):
                 try:
                     with open(self.voice_config_path, "r", encoding="utf-8") as f:
@@ -74,6 +77,14 @@ class ProjectIOStateMixin:
             return {}
 
         def _save_voice_config(self, voice_config):
+            script_store = getattr(self, "script_store", None)
+            if script_store is not None:
+                rows = [
+                    {"speaker": speaker, "config": dict(config or {})}
+                    for speaker, config in dict(voice_config or {}).items()
+                ]
+                script_store.replace_voice_profiles(rows, reason="save_voice_config", wait=True)
+                return
             with open(self.voice_config_path, "w", encoding="utf-8") as f:
                 json.dump(voice_config, f, indent=2, ensure_ascii=False)
 

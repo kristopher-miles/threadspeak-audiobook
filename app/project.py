@@ -155,6 +155,8 @@ class ProjectManager(
             queue_log_path=self.chunks_queue_log_path,
             script_path=self.script_path,
             legacy_chunks_path=self.chunks_path,
+            voice_config_path=self.voice_config_path,
+            state_path=os.path.join(self.root_dir, "state.json"),
             archive_dir=self.chunks_backups_dir,
         )
         self.script_store.start()

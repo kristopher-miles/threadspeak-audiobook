@@ -20,15 +20,16 @@ class VoicesTabSaveQueueTests(unittest.TestCase):
             const vm = require('vm');
 
             const source = fs.readFileSync({str(VOICES_TAB_JS)!r}, 'utf8')
-                + '\\nthis.__voicesTabTestHooks = {{ saveVoicesNow, suggestVoiceDescriptionsBulk, collectVoiceConfig }};';
+                + '\\nthis.__voicesTabTestHooks = {{ saveVoicesNow, suggestVoiceDescriptionsBulk, collectVoiceConfig, flushPendingVoiceSavesOnUnload }};';
 
-            function createControl(initial = '') {{
+            function createControl(initial = '', classNames = []) {{
                 return {{
                     value: initial,
                     checked: false,
                     disabled: false,
                     textContent: '',
                     className: '',
+                    classList: createClassList(classNames),
                     style: {{ display: 'block' }},
                     title: '',
                     addEventListener() {{}},
@@ -49,6 +50,22 @@ class VoicesTabSaveQueueTests(unittest.TestCase):
                     contains(name) {{ return values.has(name); }},
                     add(name) {{ values.add(name); }},
                     remove(name) {{ values.delete(name); }},
+                    toggle(name, force) {{
+                        if (force === undefined) {{
+                            if (values.has(name)) {{
+                                values.delete(name);
+                                return false;
+                            }}
+                            values.add(name);
+                            return true;
+                        }}
+                        if (force) {{
+                            values.add(name);
+                            return true;
+                        }}
+                        values.delete(name);
+                        return false;
+                    }},
                 }};
             }}
 
@@ -59,7 +76,7 @@ class VoicesTabSaveQueueTests(unittest.TestCase):
                 }};
 
                 const controls = {{
-                    aliasInput: createControl(options.alias || ''),
+                    aliasInput: createControl(options.alias || '', ['voice-alias-input']),
                     narrates: createControl(''),
                     customVoice: createControl('Aiden'),
                     customStyle: createControl(''),
@@ -73,15 +90,15 @@ class VoicesTabSaveQueueTests(unittest.TestCase):
                     designSampleText: createControl(options.sampleText || ''),
                     designRefAudio: createControl(options.refAudio || ''),
                     designGeneratedRefText: createControl(options.generatedRefText || ''),
-                    generateButton: createControl('Generate'),
-                    suggestButton: createControl('Suggest'),
-                    playButton: createControl('Play'),
-                    downloadButton: createControl('Download'),
-                    customOpts: {{ style: {{ display: state.type === 'custom' ? 'block' : 'none' }} }},
-                    builtinLoraOpts: {{ style: {{ display: state.type === 'builtin_lora' ? 'block' : 'none' }} }},
-                    cloneOpts: {{ style: {{ display: state.type === 'clone' ? 'block' : 'none' }} }},
-                    loraOpts: {{ style: {{ display: state.type === 'lora' ? 'block' : 'none' }} }},
-                    designOpts: {{ style: {{ display: state.type === 'design' ? 'block' : 'none' }} }},
+                    generateButton: createControl('Generate', ['design-generate-btn']),
+                    suggestButton: createControl('Suggest', ['design-suggest-btn']),
+                    playButton: createControl('Play', ['design-play-btn']),
+                    downloadButton: createControl('Download', ['design-download-btn']),
+                    customOpts: {{ style: {{ display: state.type === 'custom' ? 'block' : 'none' }}, classList: createClassList() }},
+                    builtinLoraOpts: {{ style: {{ display: state.type === 'builtin_lora' ? 'block' : 'none' }}, classList: createClassList() }},
+                    cloneOpts: {{ style: {{ display: state.type === 'clone' ? 'block' : 'none' }}, classList: createClassList() }},
+                    loraOpts: {{ style: {{ display: state.type === 'lora' ? 'block' : 'none' }}, classList: createClassList() }},
+                    designOpts: {{ style: {{ display: state.type === 'design' ? 'block' : 'none' }}, classList: createClassList() }},
                 }};
 
                 controls.narrates.checked = Boolean(options.narrates);
@@ -192,6 +209,15 @@ class VoicesTabSaveQueueTests(unittest.TestCase):
                 }});
                 controls.generateButton.closest = (selector) => selector === '.card-body' ? body : card;
                 controls.suggestButton.closest = (selector) => selector === '.card-body' ? body : card;
+                Object.values(controls).forEach((control) => {{
+                    if (control && typeof control === 'object' && !control.closest) {{
+                        control.closest = (selector) => {{
+                            if (selector === '.voice-card') return card;
+                            if (selector === '.card-body') return body;
+                            return null;
+                        }};
+                    }}
+                }});
 
                 card = {{
                     dataset: {{
@@ -218,8 +244,11 @@ class VoicesTabSaveQueueTests(unittest.TestCase):
             function createContext(cards, apiPost) {{
                 const bulkButton = createControl('Generate outstanding');
                 const saveStatus = {{ innerHTML: '' }};
+                const listeners = {{}};
                 const voicesList = {{
-                    addEventListener() {{}},
+                    addEventListener(type, handler) {{
+                        listeners[type] = handler;
+                    }},
                     style: {{}},
                     getBoundingClientRect() {{ return {{ top: 0 }}; }},
                 }};
@@ -229,6 +258,7 @@ class VoicesTabSaveQueueTests(unittest.TestCase):
                 const clearButton = createControl('Clear');
                 const toasts = [];
                 const spinnerCalls = [];
+                const fetchCalls = [];
                 const context = {{
                     console,
                     Promise,
@@ -264,6 +294,10 @@ class VoicesTabSaveQueueTests(unittest.TestCase):
                     API: {{
                         post: apiPost,
                         get: async () => [],
+                    }},
+                    fetch(url, options) {{
+                        fetchCalls.push({{ url, options }});
+                        return Promise.resolve({{ ok: true }});
                     }},
                     showToast(message, level) {{
                         toasts.push({{ message, level }});
@@ -301,6 +335,8 @@ class VoicesTabSaveQueueTests(unittest.TestCase):
                 context.__saveStatus = saveStatus;
                 context.__toasts = toasts;
                 context.__spinnerCalls = spinnerCalls;
+                context.__voicesListListeners = listeners;
+                context.__fetchCalls = fetchCalls;
                 return context;
             }}
 
@@ -347,7 +383,7 @@ class VoicesTabSaveQueueTests(unittest.TestCase):
                 let releaseFirstSave;
                 const savePayloads = [];
                 const context = createContext([voice], async (url, payload) => {
-                    if (url !== '/api/voices/save_config') {
+                    if (url !== '/api/voices/batch') {
                         return { status: 'ok' };
                     }
                     savePayloads.push(JSON.parse(JSON.stringify(payload)));
@@ -394,7 +430,7 @@ class VoicesTabSaveQueueTests(unittest.TestCase):
                 const savePayloads = [];
                 const generatedSpeakers = [];
                 const context = createContext([voice], async (url, payload) => {
-                    if (url === '/api/voices/save_config') {
+                    if (url === '/api/voices/batch') {
                         savePayloads.push(JSON.parse(JSON.stringify(payload)));
                         if (savePayloads.length === 1) {
                             await new Promise((resolve) => { releaseFirstSave = resolve; });
@@ -439,6 +475,248 @@ class VoicesTabSaveQueueTests(unittest.TestCase):
                     context.__toasts.every((entry) => !entry.message.includes('missing description')),
                     'generation should not fail on missing descriptions'
                 );
+            })().catch((error) => {
+                console.error(error);
+                process.exit(1);
+            });
+            """
+        )
+
+    def test_generate_outstanding_voices_reloads_live_card_state_after_suggestions(self):
+        self._run_node_test(
+            """
+            (async () => {
+                const cards = [
+                    createVoiceCard('Aerial', {
+                        type: 'custom',
+                        description: '',
+                        sampleText: '',
+                        suggestedSample: 'The clouds parted over the ridge.',
+                    }),
+                ];
+                let saveCount = 0;
+                const generatedDescriptions = [];
+                const context = createContext(cards, async (url, payload) => {
+                    if (url === '/api/voices/batch') {
+                        saveCount += 1;
+                        if (saveCount === 1) {
+                            const replacement = createVoiceCard('Aerial', {
+                                type: 'design',
+                                description: 'Wind-bright mezzo with steady resolve',
+                                sampleText: 'The clouds parted over the ridge.',
+                                suggestedSample: 'The clouds parted over the ridge.',
+                            });
+                            cards[0] = replacement;
+                        }
+                        return { status: 'saved' };
+                    }
+                    if (url === '/api/voices/suggest_descriptions_bulk') {
+                        return {
+                            results: [{ speaker: 'Aerial', voice: 'Wind-bright mezzo with steady resolve' }],
+                            failures: [],
+                        };
+                    }
+                    if (url === '/api/voices/unload_bulk_generation') {
+                        return { status: 'unloaded', unloaded: true };
+                    }
+                    throw new Error(`Unexpected API call: ${url}`);
+                });
+
+                vm.createContext(context);
+                vm.runInContext(source, context);
+
+                context.window.generateVoiceDesignClone = async (btn) => {
+                    const card = btn.closest('.card-body');
+                    generatedDescriptions.push(card.querySelector('.design-description').value);
+                    card.querySelector('.design-ref-audio').value = 'clone_voices/aerial.wav';
+                };
+
+                await context.window.generateOutstandingVoices();
+
+                assert.deepStrictEqual(
+                    generatedDescriptions,
+                    ['Wind-bright mezzo with steady resolve'],
+                    'expected bulk generation to use refreshed description state'
+                );
+                assert.ok(
+                    context.__toasts.every((entry) => !entry.message.includes('missing description')),
+                    'generation should not fail on missing descriptions after a live card refresh'
+                );
+            })().catch((error) => {
+                console.error(error);
+                process.exit(1);
+            });
+            """
+        )
+
+    def test_background_confirmation_required_keeps_unsaved_status(self):
+        self._run_node_test(
+            """
+            (async () => {
+                const voice = createVoiceCard('Aerial', {
+                    type: 'design',
+                    description: 'Warm, composed contralto',
+                    sampleText: 'line',
+                    alias: '',
+                });
+                const context = createContext([voice], async (url, payload) => {
+                    if (url !== '/api/voices/batch') {
+                        throw new Error(`Unexpected API call: ${url}`);
+                    }
+                    return {
+                        status: 'confirmation_required',
+                        invalidated_clips: 3,
+                    };
+                });
+
+                vm.createContext(context);
+                vm.runInContext(source, context);
+
+                await context.__voicesTabTestHooks.saveVoicesNow({
+                    promptConfirmation: false,
+                    retryOnNetworkFailure: true,
+                }).catch(() => {});
+
+                assert.ok(
+                    context.__saveStatus.innerHTML.includes('unsaved'),
+                    `expected unsaved status, got: ${context.__saveStatus.innerHTML}`
+                );
+                assert.ok(
+                    !context.__saveStatus.innerHTML.includes('save cancelled'),
+                    `did not expect cancelled status, got: ${context.__saveStatus.innerHTML}`
+                );
+            })().catch((error) => {
+                console.error(error);
+                process.exit(1);
+            });
+            """
+        )
+
+    def test_generate_voice_prompts_for_invalidation_and_continues(self):
+        self._run_node_test(
+            """
+            (async () => {
+                const voice = createVoiceCard('Aerial', {
+                    type: 'design',
+                    description: 'Warm, composed contralto',
+                    sampleText: 'line',
+                    alias: '',
+                });
+                const savePayloads = [];
+                const context = createContext([voice], async (url, payload) => {
+                    if (url === '/api/voices/batch') {
+                        savePayloads.push(JSON.parse(JSON.stringify(payload)));
+                        if (savePayloads.length === 1) {
+                            return { status: 'confirmation_required', invalidated_clips: 2 };
+                        }
+                        return { status: 'saved', invalidated_clips: 2 };
+                    }
+                    if (url === '/api/voices/design_generate') {
+                        return {
+                            ref_audio: 'clone_voices/aerial.wav',
+                            generated_ref_text: 'line',
+                            ref_text: 'line',
+                        };
+                    }
+                    if (url === '/api/clone_voices/list') {
+                        return [];
+                    }
+                    throw new Error(`Unexpected API call: ${url}`);
+                });
+
+                vm.createContext(context);
+                vm.runInContext(source, context);
+
+                const button = voice.controls.generateButton;
+                await context.window.generateVoiceDesignClone(button);
+
+                assert.ok(savePayloads.length >= 2, 'expected confirmable save flow');
+                assert.strictEqual(savePayloads[0].confirm_invalidation, false);
+                assert.strictEqual(savePayloads[1].confirm_invalidation, true);
+                assert.strictEqual(voice.controls.designRefAudio.value, 'clone_voices/aerial.wav');
+                assert.ok(
+                    context.__toasts.some((entry) => entry.message.includes('Generated voice for Aerial.')),
+                    'expected successful generation toast'
+                );
+            })().catch((error) => {
+                console.error(error);
+                process.exit(1);
+            });
+            """
+        )
+
+    def test_alias_change_uses_confirmable_save_flow(self):
+        self._run_node_test(
+            """
+            (async () => {
+                const voice = createVoiceCard('Aerial', {
+                    type: 'design',
+                    description: 'Warm, composed contralto',
+                    sampleText: 'line',
+                    alias: '',
+                });
+                const savePayloads = [];
+                const context = createContext([voice], async (url, payload) => {
+                    if (url !== '/api/voices/batch') {
+                        throw new Error(`Unexpected API call: ${url}`);
+                    }
+                    savePayloads.push(JSON.parse(JSON.stringify(payload)));
+                    if (savePayloads.length === 1) {
+                        return { status: 'confirmation_required', invalidated_clips: 4 };
+                    }
+                    return { status: 'saved', invalidated_clips: 4 };
+                });
+
+                vm.createContext(context);
+                vm.runInContext(source, context);
+
+                voice.controls.aliasInput.value = 'Skylark';
+                await context.__voicesListListeners.change({ target: voice.controls.aliasInput });
+                await tick();
+                await tick();
+
+                assert.ok(savePayloads.length >= 2, 'expected confirmable alias save flow');
+                assert.strictEqual(savePayloads[0].confirm_invalidation, false);
+                assert.strictEqual(savePayloads[1].confirm_invalidation, true);
+                assert.strictEqual(savePayloads[0].config.Aerial.alias, 'Skylark');
+                assert.ok(
+                    !context.__saveStatus.innerHTML.includes('unsaved'),
+                    `did not expect unsaved status, got: ${context.__saveStatus.innerHTML}`
+                );
+            })().catch((error) => {
+                console.error(error);
+                process.exit(1);
+            });
+            """
+        )
+
+    def test_alias_input_flushes_confirmable_payload_on_unload(self):
+        self._run_node_test(
+            """
+            (async () => {
+                const voice = createVoiceCard('Aerial', {
+                    type: 'design',
+                    description: 'Warm, composed contralto',
+                    sampleText: 'line',
+                    alias: '',
+                });
+                const context = createContext([voice], async () => {
+                    throw new Error('did not expect API.post during unload flush test');
+                });
+
+                vm.createContext(context);
+                vm.runInContext(source, context);
+
+                voice.controls.aliasInput.value = 'Skylark';
+                await context.__voicesListListeners.input({ target: voice.controls.aliasInput });
+                context.__voicesTabTestHooks.flushPendingVoiceSavesOnUnload();
+
+                assert.strictEqual(context.__fetchCalls.length, 1, 'expected keepalive unload flush');
+                const request = context.__fetchCalls[0];
+                const payload = JSON.parse(request.options.body);
+                assert.strictEqual(request.url, '/api/voices/batch');
+                assert.strictEqual(payload.confirm_invalidation, true);
+                assert.strictEqual(payload.config.Aerial.alias, 'Skylark');
             })().catch((error) => {
                 console.error(error);
                 process.exit(1);
