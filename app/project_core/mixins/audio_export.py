@@ -47,6 +47,14 @@ from script_store import (
 from source_document import load_source_document, iter_document_paragraphs
 from project_core.constants import *
 from project_core.chunking import _coerce_bool, get_speaker, _is_structural_text, _extract_chapter_name, _build_chunk, group_into_chunks, script_entries_to_chunks
+from runtime_layout import LAYOUT
+
+
+def _make_runtime_temp_dir(project_manager, prefix, *, run_id=None):
+    if getattr(project_manager, "_using_default_runtime_layout", False):
+        effective_run_id = str(run_id or f"runtime-{uuid.uuid4().hex[:8]}")
+        return LAYOUT.make_named_temp_dir(effective_run_id, prefix)
+    return tempfile.mkdtemp(prefix=prefix, dir=project_manager.root_dir)
 
 
 class ProjectAudioExportMixin:
@@ -1088,8 +1096,8 @@ class ProjectAudioExportMixin:
         def merge_audio(self, progress_callback=None, log_callback=None, export_config=None, chapter=None):
             merge_started_at = time.time()
             output_filename = "cloned_audiobook.mp3"
-            output_path = os.path.join(self.root_dir, output_filename)
-            temp_dir = tempfile.mkdtemp(prefix="merge_audio_", dir=self.root_dir)
+            output_path = os.path.join(self.exports_dir, output_filename)
+            temp_dir = _make_runtime_temp_dir(self, "merge_audio_")
             timeline = self._collect_merge_timeline(
                 progress_callback=progress_callback,
                 merge_started_at=merge_started_at,
@@ -1279,8 +1287,8 @@ class ProjectAudioExportMixin:
 
         def export_optimized_mp3_zip(self, progress_callback=None, log_callback=None, export_config=None, max_part_seconds=7200):
             merge_started_at = time.time()
-            zip_path = os.path.join(self.root_dir, "optimized_audiobook.zip")
-            temp_dir = tempfile.mkdtemp(prefix="optimized_export_", dir=self.root_dir)
+            zip_path = os.path.join(self.exports_dir, "optimized_audiobook.zip")
+            temp_dir = _make_runtime_temp_dir(self, "optimized_export_")
             timeline = self._collect_merge_timeline(
                 progress_callback=progress_callback,
                 merge_started_at=merge_started_at,
@@ -1611,7 +1619,7 @@ class ProjectAudioExportMixin:
             labels_content = "\n".join(label_lines) + "\n"
 
             # Phase 4 — Zip everything
-            zip_path = os.path.join(self.root_dir, "audacity_export.zip")
+            zip_path = os.path.join(self.exports_dir, "audacity_export.zip")
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
                 zf.writestr("project.lof", lof_content)
                 zf.writestr("labels.txt", labels_content)
@@ -1693,9 +1701,10 @@ class ProjectAudioExportMixin:
                 same_speaker_pause_ms=same_speaker_ms,
             )
 
-            temp_wav = os.path.join(self.root_dir, "temp_m4b_combined.wav")
-            meta_path = os.path.join(self.root_dir, "temp_m4b_meta.txt")
-            output_path = os.path.join(self.root_dir, "audiobook.m4b")
+            temp_dir = _make_runtime_temp_dir(self, "m4b_export_")
+            temp_wav = os.path.join(temp_dir, "temp_m4b_combined.wav")
+            meta_path = os.path.join(temp_dir, "temp_m4b_meta.txt")
+            output_path = os.path.join(self.exports_dir, "audiobook.m4b")
 
             try:
                 final_audio.export(temp_wav, format="wav")
@@ -1749,12 +1758,7 @@ class ProjectAudioExportMixin:
                     return False, f"FFmpeg failed (exit {result.returncode})"
 
             finally:
-                for tmp in [temp_wav, meta_path]:
-                    if os.path.exists(tmp):
-                        try:
-                            os.remove(tmp)
-                        except OSError:
-                            pass
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
             return True, "audiobook.m4b"
 

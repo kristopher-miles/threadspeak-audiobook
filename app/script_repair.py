@@ -7,7 +7,7 @@ import hashlib
 
 from openai import OpenAI
 
-from generate_script import process_chunk
+from scripts.generate_script import process_chunk
 from script_sanity import run_script_sanity_check
 from script_store import load_script_document, save_script_document
 from source_document import load_source_document

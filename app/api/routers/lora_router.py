@@ -252,7 +252,7 @@ async def lora_start_training(request: LoraTrainingRequest, background_tasks: Ba
 
     # Build subprocess command
     command = [
-        sys.executable, "-u", "train_lora.py",
+        sys.executable, "-u", "-m", "scripts.train_lora",
         "--data_dir", dataset_dir,
         "--output_dir", output_dir,
         "--epochs", str(request.epochs),

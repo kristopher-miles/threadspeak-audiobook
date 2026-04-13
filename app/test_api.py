@@ -8,6 +8,7 @@ Usage:
 """
 
 import argparse
+import importlib.util
 import io
 import json
 import os
@@ -19,6 +20,7 @@ import tempfile
 import time
 from urllib.parse import urlparse
 import requests
+from runtime_layout import RuntimeLayout
 try:
     import pytest
 except Exception:  # pragma: no cover - pytest import only needed when running under pytest
@@ -63,9 +65,12 @@ BASE_URL = _discover_base_url()
 FULL_MODE = (os.getenv("THREADSPEAK_TEST_FULL", "").strip().lower() in {"1", "true", "yes", "on"})
 TEST_PREFIX = "_test_"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_DIR = os.path.dirname(APP_DIR)
-STATE_PATH = os.path.join(REPO_DIR, "state.json")
-UPLOADS_PATH = os.path.join(REPO_DIR, "uploads")
+SOURCE_LAYOUT = RuntimeLayout.from_app_dir(APP_DIR)
+SOURCE_REPO_DIR = SOURCE_LAYOUT.repo_root
+REPO_DIR = SOURCE_LAYOUT.repo_root
+PROJECT_DIR = SOURCE_LAYOUT.project_dir
+STATE_PATH = SOURCE_LAYOUT.state_path
+UPLOADS_PATH = SOURCE_LAYOUT.uploads_dir
 ACTIVE_APP_DIR = APP_DIR
 
 results = {"passed": 0, "failed": 0, "skipped": 0}
@@ -82,7 +87,7 @@ def _find_free_port():
 
 
 def _start_isolated_test_server():
-    global BASE_URL, REPO_DIR, STATE_PATH, UPLOADS_PATH, ACTIVE_APP_DIR, _SERVER_PROC, _SERVER_TEMP_ROOT
+    global BASE_URL, REPO_DIR, PROJECT_DIR, STATE_PATH, UPLOADS_PATH, ACTIVE_APP_DIR, _SERVER_PROC, _SERVER_TEMP_ROOT
 
     _SERVER_TEMP_ROOT = tempfile.mkdtemp(prefix="threadspeak_api_test_")
     temp_app_dir = os.path.join(_SERVER_TEMP_ROOT, "app")
@@ -100,9 +105,11 @@ def _start_isolated_test_server():
         "dialogue_identification_system_prompt.txt",
         "temperament_extraction_system_prompt.txt",
     ):
-        source = os.path.join(REPO_DIR, filename)
+        source = os.path.join(SOURCE_REPO_DIR, "config", "prompts", filename)
         if os.path.exists(source):
-            shutil.copy2(source, os.path.join(temp_root, filename))
+            prompt_dir = os.path.join(temp_root, "config", "prompts")
+            os.makedirs(prompt_dir, exist_ok=True)
+            shutil.copy2(source, os.path.join(prompt_dir, filename))
 
     port = _find_free_port()
     env = os.environ.copy()
@@ -146,9 +153,11 @@ def _start_isolated_test_server():
 
     BASE_URL = base_url
     ACTIVE_APP_DIR = temp_app_dir
-    REPO_DIR = os.path.dirname(temp_app_dir)
-    STATE_PATH = os.path.join(REPO_DIR, "state.json")
-    UPLOADS_PATH = os.path.join(REPO_DIR, "uploads")
+    layout = RuntimeLayout.from_app_dir(temp_app_dir)
+    REPO_DIR = layout.repo_root
+    PROJECT_DIR = layout.project_dir
+    STATE_PATH = layout.state_path
+    UPLOADS_PATH = layout.uploads_dir
 
 
 def _stop_isolated_test_server():
@@ -757,10 +766,19 @@ def test_get_voices():
 
 
 def test_get_voices_reflects_chunk_store_speaker_updates():
-    from project import ProjectManager
+    if ACTIVE_APP_DIR != APP_DIR:
+        skip_test("covered by router-level in-process test; isolated API server does not observe out-of-process chunk-store writes")
 
-    manager = ProjectManager(REPO_DIR)
-    script_path = os.path.join(REPO_DIR, "annotated_script.json")
+    project_module_path = os.path.join(ACTIVE_APP_DIR, "project.py")
+    spec = importlib.util.spec_from_file_location("threadspeak_test_api_project_module", project_module_path)
+    if spec is None or spec.loader is None:
+        raise TestFailure(f"Unable to load isolated project module from {project_module_path}")
+    project_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(project_module)
+
+    layout = RuntimeLayout.from_app_dir(ACTIVE_APP_DIR)
+    manager = project_module.ProjectManager(layout.project_dir)
+    script_path = layout.script_path
     original_chunks = manager.load_chunks()
     original_script = None
     if os.path.exists(script_path):

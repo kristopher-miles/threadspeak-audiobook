@@ -1,6 +1,7 @@
 import os
+from runtime_layout import LAYOUT
 
-_PROMPTS_FILE = os.path.join(os.path.dirname(__file__), "..", "review_prompts.txt")
+_PROMPTS_FILE = LAYOUT.prompt_review_path
 
 
 def load_review_prompts():

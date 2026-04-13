@@ -5,18 +5,19 @@ import requests
 from fastapi import APIRouter
 from .. import shared as _shared
 from factory_prompt_defaults import load_factory_default_prompts
+from runtime_layout import LAYOUT
 
 globals().update({k: v for k, v in vars(_shared).items() if not k.startswith("__")})
 
 router = APIRouter()
 
 _PROMPT_SEPARATOR = "\n\n---SEPARATOR---\n\n"
-_DEFAULT_PROMPTS_PATH = os.path.join(ROOT_DIR, "default_prompts.txt")
-_REVIEW_PROMPTS_PATH = os.path.join(ROOT_DIR, "review_prompts.txt")
-_ATTRIBUTION_PROMPTS_PATH = os.path.join(ROOT_DIR, "attribution_prompts.txt")
-_VOICE_PROMPT_PATH = os.path.join(ROOT_DIR, "voice_prompt.txt")
-_DIALOGUE_PROMPT_PATH = os.path.join(ROOT_DIR, "dialogue_identification_system_prompt.txt")
-_TEMPERAMENT_PROMPT_PATH = os.path.join(ROOT_DIR, "temperament_extraction_system_prompt.txt")
+_DEFAULT_PROMPTS_PATH = LAYOUT.prompt_default_path
+_REVIEW_PROMPTS_PATH = LAYOUT.prompt_review_path
+_ATTRIBUTION_PROMPTS_PATH = LAYOUT.prompt_attribution_path
+_VOICE_PROMPT_PATH = LAYOUT.prompt_voice_path
+_DIALOGUE_PROMPT_PATH = LAYOUT.prompt_dialogue_path
+_TEMPERAMENT_PROMPT_PATH = LAYOUT.prompt_temperament_path
 _TOOL_CAPABILITY_TIMEOUT_SECONDS = 5
 
 
@@ -243,7 +244,7 @@ async def read_index():
 
 @router.get("/favicon.ico")
 async def read_favicon():
-    return FileResponse(os.path.join(ROOT_DIR, "favicon.ico"), media_type="image/x-icon")
+    return FileResponse(os.path.join(REPO_DIR, "favicon.ico"), media_type="image/x-icon")
 
 @router.get("/api/config")
 async def get_config():

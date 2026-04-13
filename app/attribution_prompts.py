@@ -1,6 +1,7 @@
 import os
+from runtime_layout import LAYOUT
 
-_PROMPTS_FILE = os.path.join(os.path.dirname(__file__), "..", "attribution_prompts.txt")
+_PROMPTS_FILE = LAYOUT.prompt_attribution_path
 
 
 def load_attribution_prompts():

@@ -15,9 +15,9 @@ class MergeRequest(BaseModel):
     export: Optional[ExportConfig] = None
     chapter: Optional[str] = None
 
-SANITY_TRIM_FIRST_CLIP_PATH = os.path.join(ROOT_DIR, "trim_sanity_first_clip.wav")
-SANITY_ASSEMBLE_FIRST5_PATH = os.path.join(ROOT_DIR, "assemble_sanity_first5.wav")
-SANITY_ASSEMBLE_FIRST5_NORMALIZED_PATH = os.path.join(ROOT_DIR, "assemble_sanity_first5_normalized.wav")
+SANITY_TRIM_FIRST_CLIP_PATH = LAYOUT.sanity_trim_first_clip_path
+SANITY_ASSEMBLE_FIRST5_PATH = LAYOUT.sanity_assemble_first5_path
+SANITY_ASSEMBLE_FIRST5_NORMALIZED_PATH = LAYOUT.sanity_assemble_first5_normalized_path
 
 def _export_download_basename():
     """Return a filesystem-safe base name for export downloads, using the saved script name when available."""
@@ -310,7 +310,8 @@ async def repair_lost_audio(request: LostAudioRepairRequest, background_tasks: B
         [
             sys.executable,
             "-u",
-            "lost_audio_repair_runner.py",
+            "-m",
+            "scripts.lost_audio_repair_runner",
             ROOT_DIR,
             "1" if bool(request.use_asr) else "0",
             "1" if bool(request.rejected_only) else "0",
@@ -334,7 +335,7 @@ async def start_proofread(request: ProofreadRequest, background_tasks: Backgroun
     threshold = max(0.0, min(float(request.threshold or 0.0), 1.0))
     background_tasks.add_task(
         run_process,
-        [sys.executable, "-u", "proofread_runner.py", ROOT_DIR, str(threshold), chapter_arg],
+        [sys.executable, "-u", "-m", "scripts.proofread_runner", ROOT_DIR, str(threshold), chapter_arg],
         "proofread",
         run_id,
     )
@@ -350,7 +351,7 @@ async def start_proofread_auto(request: ProofreadRequest, background_tasks: Back
     threshold = max(0.0, min(float(request.threshold or 0.0), 1.0))
     background_tasks.add_task(
         run_process,
-        [sys.executable, "-u", "proofread_runner.py", ROOT_DIR, str(threshold), chapter_arg],
+        [sys.executable, "-u", "-m", "scripts.proofread_runner", ROOT_DIR, str(threshold), chapter_arg],
         "proofread",
         run_id,
     )
@@ -1071,7 +1072,7 @@ async def export_audacity_endpoint(request: Optional[MergeRequest] = None, backg
 
 @router.get("/api/export_audacity")
 async def get_audacity_export():
-    zip_path = os.path.join(ROOT_DIR, "audacity_export.zip")
+    zip_path = LAYOUT.audacity_export_path
     if not os.path.exists(zip_path):
         raise HTTPException(status_code=404, detail="Audacity export not found. Generate it first.")
     return FileResponse(zip_path, filename="audacity_export.zip", media_type="application/zip")
@@ -1100,7 +1101,7 @@ async def merge_m4b_endpoint(request: M4bExportRequest, background_tasks: Backgr
                 "narrator": request.narrator,
                 "year": request.year,
                 "description": request.description,
-                "cover_path": os.path.join(ROOT_DIR, "m4b_cover.jpg") if os.path.exists(os.path.join(ROOT_DIR, "m4b_cover.jpg")) else "",
+                "cover_path": LAYOUT.m4b_cover_path if os.path.exists(LAYOUT.m4b_cover_path) else "",
             }
             success, msg = project_manager.merge_m4b(
                 per_chunk_chapters=request.per_chunk_chapters,
@@ -1130,7 +1131,7 @@ async def upload_m4b_cover(file: UploadFile = File(...)):
     """Upload a cover image for M4B export."""
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
-    cover_path = os.path.join(ROOT_DIR, "m4b_cover.jpg")
+    cover_path = LAYOUT.m4b_cover_path
     content = await file.read()
     with open(cover_path, "wb") as f:
         f.write(content)
@@ -1139,7 +1140,7 @@ async def upload_m4b_cover(file: UploadFile = File(...)):
 @router.delete("/api/m4b_cover")
 async def delete_m4b_cover():
     """Remove the uploaded cover image."""
-    cover_path = os.path.join(ROOT_DIR, "m4b_cover.jpg")
+    cover_path = LAYOUT.m4b_cover_path
     if os.path.exists(cover_path):
         os.remove(cover_path)
     return {"status": "removed"}

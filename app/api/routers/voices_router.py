@@ -258,7 +258,25 @@ async def get_voices():
     script_store = getattr(project_manager, "script_store", None)
     voice_rows = script_store.list_voice_rows() if (_can_use_project_chunk_store() and script_store is not None) else []
     runtime_voice_config = _canonicalize_voice_config_keys(_load_runtime_voice_config())
-    if not voice_rows and os.path.exists(SCRIPT_PATH):
+    if not voice_rows and chunks:
+        seen = {}
+        for chunk in chunks:
+            speaker = str((chunk or {}).get("speaker") or "").strip()
+            normalized = _normalized_speaker(speaker)
+            if not normalized:
+                continue
+            if normalized not in seen:
+                canonical_name = _canonical_speaker_name(speaker)
+                seen[normalized] = {
+                    "name": canonical_name,
+                    "config": runtime_voice_config.get(canonical_name, {}),
+                    "line_count": 0,
+                    "auto_narrator_alias": False,
+                    "auto_alias_target": "",
+                }
+            seen[normalized]["line_count"] += 1
+        voice_rows = list(seen.values())
+    elif not voice_rows and os.path.exists(SCRIPT_PATH):
         try:
             script_data = _load_project_script_document()["entries"]
             seen = {}
@@ -356,7 +374,7 @@ async def parse_voices(background_tasks: BackgroundTasks):
     if process_state["voices"]["running"]:
          raise HTTPException(status_code=400, detail="Voice parsing already running")
 
-    background_tasks.add_task(run_process, [sys.executable, "-u", "parse_voices.py"], "voices")
+    background_tasks.add_task(run_process, [sys.executable, "-u", "-m", "scripts.parse_voices"], "voices")
     return {"status": "started"}
 
 

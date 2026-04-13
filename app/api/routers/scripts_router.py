@@ -32,7 +32,11 @@ async def list_saved_scripts():
             "kind": str(metadata.get("kind") or "project"),
             "has_audio": bool(metadata.get("has_audio", _project_archive_contains_entry(filepath, "voicelines/"))),
             "has_voice_config": bool(
-                metadata.get("has_voice_config", _project_archive_contains_entry(filepath, "chunks.sqlite3"))
+                metadata.get(
+                    "has_voice_config",
+                    _project_archive_contains_entry(filepath, "db/chunks.sqlite3")
+                    or _project_archive_contains_entry(filepath, "chunks.sqlite3"),
+                )
             ),
             "chunk_count": int(metadata.get("chunk_count") or 0),
             "chapter_count": int(metadata.get("chapter_count") or 0),
@@ -74,9 +78,7 @@ async def export_project_archive(background_tasks: BackgroundTasks):
     if running_task:
         raise HTTPException(status_code=409, detail=f"Cannot save a project archive while '{running_task}' is running.")
 
-    handle = tempfile.NamedTemporaryFile(prefix="threadspeak_project_", suffix=".zip", delete=False)
-    temp_zip_path = handle.name
-    handle.close()
+    temp_zip_path = _make_runtime_temp_file("threadspeak_project_", suffix=".zip")
 
     try:
         _write_project_archive(temp_zip_path)
@@ -101,7 +103,7 @@ async def load_project_archive(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Project archive must be a .zip file.")
 
     content = await file.read()
-    temp_root = tempfile.mkdtemp(prefix="threadspeak_project_import_")
+    temp_root = _make_runtime_temp_dir("threadspeak_project_import_")
     zip_path = os.path.join(temp_root, "project.zip")
 
     try:
@@ -355,7 +357,7 @@ async def load_script(request: ScriptLoadRequest):
             status_code=409,
             detail=f"Saved script snapshot '{safe_name}' is missing its SQLite state companion.",
         )
-    _copy_sqlite_database_snapshot(db_companion, os.path.join(ROOT_DIR, "chunks.sqlite3"))
+    _copy_sqlite_database_snapshot(db_companion, getattr(project_manager, "chunks_db_path", os.path.join(ROOT_DIR, "chunks.sqlite3")))
 
     paragraphs_path = os.path.join(ROOT_DIR, "paragraphs.json")
     paragraphs_companion = os.path.join(SCRIPTS_DIR, f"{safe_name}.paragraphs.json")

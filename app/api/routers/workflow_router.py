@@ -106,11 +106,11 @@ async def reset_project():
         VOICES_PATH,
         VOICE_CONFIG_PATH,
         CHUNKS_PATH,
-        os.path.join(ROOT_DIR, "chunks.sqlite3"),
-        os.path.join(ROOT_DIR, "chunks.sqlite3-wal"),
-        os.path.join(ROOT_DIR, "chunks.sqlite3-shm"),
-        os.path.join(ROOT_DIR, "chunks.queue.log"),
-        os.path.join(ROOT_DIR, "transcription_cache.json"),
+        getattr(project_manager, "chunks_db_path", os.path.join(ROOT_DIR, "chunks.sqlite3")),
+        f"{getattr(project_manager, 'chunks_db_path', os.path.join(ROOT_DIR, 'chunks.sqlite3'))}-wal",
+        f"{getattr(project_manager, 'chunks_db_path', os.path.join(ROOT_DIR, 'chunks.sqlite3'))}-shm",
+        getattr(project_manager, "chunks_queue_log_path", os.path.join(ROOT_DIR, "chunks.queue.log")),
+        getattr(project_manager, "transcription_cache_path", os.path.join(ROOT_DIR, "transcription_cache.json")),
         SCRIPT_REPAIR_TRACE_PATH,
         AUDIOBOOK_PATH,
         M4B_PATH,
@@ -119,8 +119,8 @@ async def reset_project():
         NEW_MODE_WORKFLOW_STATE_PATH,
         os.path.join(ROOT_DIR, "paragraphs.json"),
         SCRIPT_SANITY_PATH,
-        os.path.join(ROOT_DIR, "audacity_export.zip"),
-        os.path.join(ROOT_DIR, "m4b_cover.jpg"),
+        _project_export_filesystem_path("audacity_export.zip"),
+        _project_export_filesystem_path("m4b_cover.jpg"),
     ]
 
     for path in paths_to_report:
@@ -301,7 +301,7 @@ def _run_create_script_task_with_new_mode_state(
 async def get_pipeline_step_status():
     """Return file-based completion status for the 4 new-mode pipeline steps."""
     paragraphs_path = os.path.join(ROOT_DIR, "paragraphs.json")
-    script_path = os.path.join(ROOT_DIR, "annotated_script.json")
+    script_path = SCRIPT_PATH
 
     # Check if an input file is loaded
     has_input_file = False

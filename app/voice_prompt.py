@@ -1,6 +1,7 @@
 import os
+from runtime_layout import LAYOUT
 
-_PROMPT_FILE = os.path.join(os.path.dirname(__file__), "..", "voice_prompt.txt")
+_PROMPT_FILE = LAYOUT.prompt_voice_path
 
 
 def load_voice_prompt():

@@ -4,12 +4,15 @@ This page reflects the current Threadspeak layout and where data actually lives 
 
 ## Path Model
 
-Threadspeak is launched from `app/` (`start.js` runs `python app.py` in that directory), but the API uses two path roots:
+Threadspeak is launched from `app/` (`start.js` runs `python app.py` in that directory), but runtime state is no longer stored in repo root.
 
 - `BASE_DIR` = `repo/app`
-- `ROOT_DIR` = `repo/` (parent of `app`)
+- `REPO_ROOT` = `repo/`
+- `config/prompts/` = editable prompt files
+- `runtime/current/project/` = active project state, user assets, and final exports
+- `runtime/runs/<run_id>/` = per-run temp files, scratch work, and transient logs
 
-Most active project artifacts (scripts, chunks, voices, exports, workflow state) are written under `ROOT_DIR` (repo root), not under `app/`.
+The path contract is centralized in [`app/runtime_layout.py`](../app/runtime_layout.py).
 
 ## Source Code Layout
 
@@ -17,6 +20,7 @@ Most active project artifacts (scripts, chunks, voices, exports, workflow state)
 threadspeak-audiobook.git/
 ├── app/
 │   ├── app.py                         # Runtime entrypoint + compatibility export surface
+│   ├── runtime_layout.py              # Centralized config/runtime path definitions
 │   ├── api/
 │   │   ├── main.py                    # Router composition
 │   │   ├── shared.py                  # Global paths/state/models/schemas
@@ -30,27 +34,41 @@ threadspeak-audiobook.git/
 │   │       ├── clone_voices_router.py
 │   │       ├── lora_router.py
 │   │       └── dataset_builder_router.py
-│   ├── process_paragraphs.py          # Source -> paragraphs/chapters stage
-│   ├── assign_dialogue.py             # Dialogue speaker identification stage
-│   ├── extract_temperament.py         # Temperament extraction stage
-│   ├── create_script.py               # Paragraphs -> script/chunks stage
 │   ├── project.py                     # Core project/chunk/audio management
-│   ├── proofread_runner.py            # Whisper-based proofread flow
+│   ├── scripts/                       # Operational CLI/workflow entrypoints
+│   │   ├── process_paragraphs.py
+│   │   ├── assign_dialogue.py
+│   │   ├── extract_temperament.py
+│   │   ├── create_script.py
+│   │   ├── generate_script.py
+│   │   ├── review_script.py
+│   │   ├── proofread_runner.py
+│   │   ├── lost_audio_repair_runner.py
+│   │   ├── train_lora.py
+│   │   └── migrate_runtime_layout.py
+│   ├── resources/
+│   │   └── builtin_lora/              # Bundled adapter presets + manifest
 │   ├── tts.py                         # TTS backends and batching
 │   ├── static/                        # Frontend shell/fragments/scripts/styles
 │   ├── prompt_defaults/               # Factory prompt presets used by reset/default APIs
 │   └── requirements.txt
+├── config/
+│   └── prompts/                       # Editable prompt files used by the app
+├── runtime/
+│   ├── current/
+│   │   └── project/                   # Active project state and assets
+│   └── runs/                          # Run-scoped temp/log/export scratch space
 ├── wiki/                              # Project docs (this page included)
 ├── .github/ISSUE_TEMPLATE/            # Issue forms/config
 ├── README.md
 ├── pinokio.js
 ├── install.js / start.js / reset.js / update.js
-└── (runtime artifacts at repo root; see sections below)
+└── icon.png / favicon.ico / manifests
 ```
 
-## Runtime Data (Repo Root)
+## Active Project Data
 
-These paths are actively read/written during normal operation:
+Persistent project files live under `runtime/current/project/`:
 
 - `annotated_script.json` - canonical working script document
 - `paragraphs.json` - ingestion output with paragraph/chapter structure
@@ -58,39 +76,62 @@ These paths are actively read/written during normal operation:
 - `voice_config.json` - speaker voice assignments and options
 - `voices.json` - detected voice/speaker list
 - `state.json` - selected source path + project-level flags
-- `processing_workflow_state.json`, `new_mode_workflow_state.json` - workflow progress snapshots
-- `audio_queue_state.json` - audio queue recovery state
-- `script_sanity_check.json`, `script_repair_trace.jsonl` - sanity/repair outputs
-- `transcription_cache.json` - ASR/proofread cache
 
-## Runtime Directories (Repo Root)
+## Project Subdirectories
 
+- `workflow/`
+  - `processing_workflow_state.json`, `new_mode_workflow_state.json`
+  - `audio_queue_state.json`, `audio_cancel_tombstone.json`
+  - `script_generation_checkpoint.json`, `script_review_checkpoint.json`
+- `db/`
+  - `chunks.sqlite3`
+  - `chunks.queue.log`
+  - `transcription_cache.json`
+  - `voice_state.audit.jsonl`
+- `repair/`
+  - `script_sanity_check.json`
+  - `script_repair_trace.jsonl`
+- `exports/`
+  - `cloned_audiobook.mp3`
+  - `optimized_audiobook.zip`
+  - `audacity_export.zip`
+  - `audiobook.m4b`
+  - `m4b_cover.jpg`
+  - sanity preview/audio assembly outputs
 - `uploads/` - imported source documents
-- `scripts/` - saved script snapshots (`*.json`, companions)
-- `saved_projects/` - project archive ZIPs
-- `voicelines/` - generated line audio (includes `discarded/` pool)
+- `voicelines/` - generated line audio, including `discarded/`
 - `clone_voices/` - uploaded clone reference audio + `manifest.json`
 - `designed_voices/` - generated designed voices + `manifest.json` + `previews/`
-- `dataset_builder/` - dataset builder working projects
-- `lora_datasets/` - LoRA training datasets
-- `lora_models/` - trained LoRA adapters
-- `builtin_lora/` - bundled adapter presets + manifest
-- `logs/` - service/debug logs
+- `archives/script_snapshots/` - saved script snapshots and companions
+- `archives/project_archives/` - saved project archive ZIPs
+- `archives/backups/` - chunk/script backups
+- `workspace/dataset_builder/` - dataset builder working projects
+- `workspace/lora_datasets/` - LoRA training datasets
+- `workspace/lora_models/` - trained LoRA adapters
 
-## Prompt Files (Repo Root)
+## Run-Scoped Scratch Space
 
-Prompt values are synchronized between API config and these files:
+Transient files created while a job is running live under `runtime/runs/<run_id>/`:
 
-- `default_prompts.txt`
-- `review_prompts.txt`
-- `attribution_prompts.txt`
-- `voice_prompt.txt`
-- `dialogue_identification_system_prompt.txt`
-- `temperament_extraction_system_prompt.txt`
+- `tmp/` - merge/export scratch directories, temp WAVs, temp metadata files, import extracts
+- `logs/` - run-specific LLM/review logs and transient diagnostics
+- `exports/` - optional run-specific staging outputs before promotion into the active project
+
+## Editable Prompts
+
+Prompt values are synchronized between API config and `config/prompts/`:
+
+- `config/prompts/default_prompts.txt`
+- `config/prompts/review_prompts.txt`
+- `config/prompts/attribution_prompts.txt`
+- `config/prompts/voice_prompt.txt`
+- `config/prompts/dialogue_identification_system_prompt.txt`
+- `config/prompts/temperament_extraction_system_prompt.txt`
 
 See [Prompt Customization](Prompt-Customization) for behavior and precedence.
 
 ## Practical Notes
 
-- If you need to inspect or back up a project, focus on repo-root runtime files/directories, not only `app/`.
-- Some similarly named paths may exist under `app/` from historical compatibility; the active API path constants in `app/api/shared.py` point core project state to repo root.
+- If you need to inspect or back up a project, focus on `runtime/current/project/`.
+- If you are debugging transient artifacts, inspect `runtime/runs/` rather than repo root.
+- Repo root should now contain launcher files, docs, manifests, and source code, not active runtime state.

@@ -307,8 +307,8 @@ EXPECTED_SIGNATURES = {
     "update_chunk": "(self, chunk_ref, data)",
     "prepare_chunk_for_regeneration": "(self, chunk_ref)",
     "generate_chunk_audio": "(self, index, attempt=0, generation_token=None)",
-    "generate_chunks_parallel": "(self, indices, max_workers=2, progress_callback=None, cancel_check=None, item_callback=None, generation_token=None)",
-    "generate_chunks_batch": "(self, indices, batch_seed=-1, batch_size=4, progress_callback=None, batch_group_by_type=False, cancel_check=None, item_callback=None, generation_token=None)",
+    "generate_chunks_parallel": "(self, indices, max_workers=2, progress_callback=None, cancel_check=None, item_callback=None, generation_token=None, item_started_callback=None)",
+    "generate_chunks_batch": "(self, indices, batch_seed=-1, batch_size=4, progress_callback=None, batch_group_by_type=False, cancel_check=None, item_callback=None, generation_token=None, item_started_callback=None)",
     "merge_audio": "(self, progress_callback=None, log_callback=None, export_config=None, chapter=None)",
     "merge_m4b": "(self, per_chunk_chapters=False, metadata=None, export_config=None)",
     "proofread_chunks": "(self, chapter=None, threshold=1.0, progress_callback=None)",
@@ -358,8 +358,8 @@ class ProjectManagerContractTests(unittest.TestCase):
         repo_root = os.path.dirname(__file__)
         allowed = {
             os.path.join(repo_root, "script_provider.py"),
-            os.path.join(repo_root, "create_script.py"),
-            os.path.join(repo_root, "generate_script.py"),
+            os.path.join(repo_root, "scripts", "create_script.py"),
+            os.path.join(repo_root, "scripts", "generate_script.py"),
             os.path.join(repo_root, "test_project_archive.py"),
             os.path.join(repo_root, "test_workflow_entrypoints.py"),
         }

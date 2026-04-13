@@ -265,6 +265,7 @@ class SQLiteScriptStore(ScriptStore):
         voice_config_path=None,
         state_path=None,
         archive_dir=None,
+        voice_audit_log_path=None,
     ):
         self.root_dir = root_dir
         self.db_path = db_path
@@ -274,7 +275,7 @@ class SQLiteScriptStore(ScriptStore):
         self.voice_config_path = voice_config_path or os.path.join(root_dir, "voice_config.json")
         self.state_path = state_path or os.path.join(root_dir, "state.json")
         self.archive_dir = archive_dir or os.path.join(root_dir, "backups", "chunks")
-        self.voice_audit_log_path = os.path.join(root_dir, "voice_state.audit.jsonl")
+        self.voice_audit_log_path = voice_audit_log_path or os.path.join(root_dir, "voice_state.audit.jsonl")
         self.voice_audit_logging_enabled = VOICE_AUDIT_LOG_ENABLED_DEFAULT
         self._command_queue = queue.Queue()
         self._writer_thread = None

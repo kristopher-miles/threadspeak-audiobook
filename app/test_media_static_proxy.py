@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 import api.shared as shared
 from api.shared import _VoicelinesProxyStatic
+from runtime_layout import LAYOUT
 
 
 class MediaStaticProxyTests(unittest.TestCase):
@@ -72,7 +73,7 @@ class MediaStaticProxyTests(unittest.TestCase):
 
     def test_media_static_origin_waits_until_server_is_ready(self):
         shared._shutdown_media_static_server()
-        voicelines_dir = os.path.join(shared.ROOT_DIR, "voicelines")
+        voicelines_dir = LAYOUT.voicelines_dir
         os.makedirs(voicelines_dir, exist_ok=True)
         probe_path = os.path.join(voicelines_dir, "__media_ready_probe__.mp3")
         with open(probe_path, "wb") as handle:
@@ -91,7 +92,7 @@ class MediaStaticProxyTests(unittest.TestCase):
 
     def test_media_static_origin_supports_range_requests_for_voicelines(self):
         shared._shutdown_media_static_server()
-        voicelines_dir = os.path.join(shared.ROOT_DIR, "voicelines")
+        voicelines_dir = LAYOUT.voicelines_dir
         os.makedirs(voicelines_dir, exist_ok=True)
         clip_path = os.path.join(voicelines_dir, "__media_range_probe__.mp3")
         with open(clip_path, "wb") as handle:

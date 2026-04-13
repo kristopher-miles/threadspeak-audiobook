@@ -102,7 +102,7 @@ module.exports = {
     }, {
       icon: "fa-solid fa-folder-open",
       text: "Open Voicelines",
-      href: "voicelines"
+      href: "runtime/current/project/voicelines"
     }, {
       icon: "fa-solid fa-arrows-rotate",
       text: "Update",

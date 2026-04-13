@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 sys.modules.setdefault("openai", SimpleNamespace(OpenAI=object))
 
-from extract_temperament import build_temperament_context
+from scripts.extract_temperament import build_temperament_context
 
 
 class BuildTemperamentContextTests(unittest.TestCase):

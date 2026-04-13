@@ -753,7 +753,10 @@ class TTSEngine:
         except ImportError as e:
             raise RuntimeError("mlx-audio generation API unavailable in current environment.") from e
 
-        with tempfile.TemporaryDirectory(prefix="alex_mlx_tts_") as temp_dir:
+        run_temp_dir = (os.getenv("THREADSPEAK_RUN_TEMP_DIR") or "").strip() or None
+        if run_temp_dir:
+            os.makedirs(run_temp_dir, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="alex_mlx_tts_", dir=run_temp_dir) as temp_dir:
             generate_audio(model=model, output_path=temp_dir, **kwargs)
             output_file = os.path.join(temp_dir, "audio_000.wav")
             if not os.path.exists(output_file):

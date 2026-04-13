@@ -673,7 +673,7 @@ class ProjectArchiveHelpersTests(unittest.TestCase):
             self.assertIn("designed_voices/current_design.wav", entries)
             self.assertNotIn("designed_voices/orphan_design.wav", entries)
             self.assertIn("uploads/story.txt", entries)
-            self.assertIn("transcription_cache.json", entries)
+            self.assertIn("db/transcription_cache.json", entries)
 
     def test_restore_project_archive_restores_discarded_pool_and_transcription_cache(self):
         with tempfile.TemporaryDirectory() as temp_root:
@@ -775,7 +775,7 @@ class ProjectArchiveHelpersTests(unittest.TestCase):
                 self.assertFalse(os.path.exists(os.path.join(app_module.SCRIPTS_DIR, "demo.json")))
                 self.assertFalse(os.path.exists(os.path.join(app_module.SCRIPTS_DIR, "demo.voice_config.json")))
                 with zipfile.ZipFile(archive_path, "r") as zf:
-                    self.assertIn("chunks.sqlite3", zf.namelist())
+                    self.assertIn("db/chunks.sqlite3", zf.namelist())
 
     def test_unified_save_uses_project_zip_with_audio_and_removes_script_artifacts(self):
         with tempfile.TemporaryDirectory() as temp_root:
@@ -804,7 +804,7 @@ class ProjectArchiveHelpersTests(unittest.TestCase):
                 with zipfile.ZipFile(archive_path, "r") as zf:
                     self.assertIn(app_module.PROJECT_ARCHIVE_MANIFEST_NAME, zf.namelist())
                     self.assertIn("voicelines/live.mp3", zf.namelist())
-                    self.assertIn("chunks.sqlite3", zf.namelist())
+                    self.assertIn("db/chunks.sqlite3", zf.namelist())
 
     def test_unified_list_deduplicates_script_when_project_zip_exists(self):
         with tempfile.TemporaryDirectory() as temp_root:

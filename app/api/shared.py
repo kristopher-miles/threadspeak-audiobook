@@ -48,6 +48,7 @@ from script_store import apply_dictionary_to_text, clean_dictionary_entries, loa
 from source_document import load_source_document
 from script_sanity import build_attribution_classifier, run_script_sanity_check
 from script_repair import RepairSupersededError, repair_invalid_chunks
+from runtime_layout import LAYOUT, REPO_ROOT
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -56,32 +57,31 @@ logger = logging.getLogger("ThreadspeakUI")
 app = FastAPI(title="Threadspeak Audiobook")
 
 # Paths
-# shared.py lives in app/api, but runtime paths must stay compatible with the
-# original app.py location in app/.
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ROOT_DIR = os.path.dirname(BASE_DIR)
+BASE_DIR = LAYOUT.app_dir
+REPO_DIR = REPO_ROOT
+ROOT_DIR = LAYOUT.project_dir
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
-VOICES_PATH = os.path.join(ROOT_DIR, "voices.json")
-VOICE_CONFIG_PATH = os.path.join(ROOT_DIR, "voice_config.json")
-SCRIPT_PATH = os.path.join(ROOT_DIR, "annotated_script.json")
-AUDIOBOOK_PATH = os.path.join(ROOT_DIR, "cloned_audiobook.mp3")
-M4B_PATH = os.path.join(ROOT_DIR, "audiobook.m4b")
-OPTIMIZED_EXPORT_PATH = os.path.join(ROOT_DIR, "optimized_audiobook.zip")
-UPLOADS_DIR = os.path.join(BASE_DIR, "uploads")
-SCRIPTS_DIR = os.path.join(ROOT_DIR, "scripts")
-SAVED_PROJECTS_DIR = os.path.join(ROOT_DIR, "saved_projects")
-CHUNKS_PATH = os.path.join(ROOT_DIR, "chunks.json")
-AUDIO_QUEUE_STATE_PATH = os.path.join(ROOT_DIR, "audio_queue_state.json")
-AUDIO_CANCEL_TOMBSTONE_PATH = os.path.join(ROOT_DIR, "audio_cancel_tombstone.json")
-SCRIPT_SANITY_PATH = os.path.join(ROOT_DIR, "script_sanity_check.json")
-SCRIPT_REPAIR_TRACE_PATH = os.path.join(ROOT_DIR, "script_repair_trace.jsonl")
-DESIGNED_VOICES_DIR = os.path.join(ROOT_DIR, "designed_voices")
-CLONE_VOICES_DIR = os.path.join(ROOT_DIR, "clone_voices")
-LORA_MODELS_DIR = os.path.join(ROOT_DIR, "lora_models")
-LORA_DATASETS_DIR = os.path.join(ROOT_DIR, "lora_datasets")
-BUILTIN_LORA_DIR = os.path.join(ROOT_DIR, "builtin_lora")
+VOICES_PATH = LAYOUT.voices_path
+VOICE_CONFIG_PATH = LAYOUT.voice_config_path
+SCRIPT_PATH = LAYOUT.script_path
+AUDIOBOOK_PATH = LAYOUT.audiobook_path
+M4B_PATH = LAYOUT.m4b_path
+OPTIMIZED_EXPORT_PATH = LAYOUT.optimized_export_path
+UPLOADS_DIR = LAYOUT.uploads_dir
+SCRIPTS_DIR = LAYOUT.script_snapshots_dir
+SAVED_PROJECTS_DIR = LAYOUT.project_archives_dir
+CHUNKS_PATH = LAYOUT.chunks_path
+AUDIO_QUEUE_STATE_PATH = LAYOUT.audio_queue_state_path
+AUDIO_CANCEL_TOMBSTONE_PATH = LAYOUT.audio_cancel_tombstone_path
+SCRIPT_SANITY_PATH = LAYOUT.script_sanity_path
+SCRIPT_REPAIR_TRACE_PATH = LAYOUT.script_repair_trace_path
+DESIGNED_VOICES_DIR = LAYOUT.designed_voices_dir
+CLONE_VOICES_DIR = LAYOUT.clone_voices_dir
+LORA_MODELS_DIR = LAYOUT.lora_models_dir
+LORA_DATASETS_DIR = LAYOUT.lora_datasets_dir
+BUILTIN_LORA_DIR = LAYOUT.builtin_lora_dir
 BUILTIN_LORA_MANIFEST = os.path.join(BUILTIN_LORA_DIR, "manifest.json")
-DATASET_BUILDER_DIR = os.path.join(ROOT_DIR, "dataset_builder")
+DATASET_BUILDER_DIR = LAYOUT.dataset_builder_dir
 DESIGNED_VOICES_MANIFEST = os.path.join(DESIGNED_VOICES_DIR, "manifest.json")
 CLONE_VOICES_MANIFEST = os.path.join(CLONE_VOICES_DIR, "manifest.json")
 ALLOWED_AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg"}
@@ -92,10 +92,15 @@ PROJECT_ARCHIVE_ALLOWED_FILES = {
     "paragraphs.json",
     "voices.json",
     "chunks.json",
-    "chunks.sqlite3",
-    "script_sanity_check.json",
+    "db/chunks.sqlite3",
+    "repair/script_sanity_check.json",
     "state.json",
-    "transcription_cache.json",
+    "db/transcription_cache.json",
+}
+PROJECT_ARCHIVE_LEGACY_FILE_ALIASES = {
+    "chunks.sqlite3": "db/chunks.sqlite3",
+    "script_sanity_check.json": "repair/script_sanity_check.json",
+    "transcription_cache.json": "db/transcription_cache.json",
 }
 PROJECT_ARCHIVE_ALLOWED_DIRS = {
     "uploads",
@@ -104,14 +109,7 @@ PROJECT_ARCHIVE_ALLOWED_DIRS = {
     "voicelines",
 }
 
-os.makedirs(UPLOADS_DIR, exist_ok=True)
-os.makedirs(SCRIPTS_DIR, exist_ok=True)
-os.makedirs(SAVED_PROJECTS_DIR, exist_ok=True)
-os.makedirs(DESIGNED_VOICES_DIR, exist_ok=True)
-os.makedirs(CLONE_VOICES_DIR, exist_ok=True)
-os.makedirs(LORA_MODELS_DIR, exist_ok=True)
-os.makedirs(LORA_DATASETS_DIR, exist_ok=True)
-os.makedirs(DATASET_BUILDER_DIR, exist_ok=True)
+LAYOUT.ensure_base_dirs()
 
 _media_static_server_lock = threading.Lock()
 _media_static_server_process = None
@@ -169,6 +167,25 @@ def _media_static_server_command(port):
         "--app-dir",
         BASE_DIR,
     ]
+
+
+def _new_runtime_run_id(prefix: str = "runtime") -> str:
+    label = str(prefix or "runtime").strip() or "runtime"
+    return f"{label}-{uuid.uuid4().hex[:8]}"
+
+
+def _make_runtime_temp_dir(prefix: str, *, run_id: Optional[str] = None) -> str:
+    effective_run_id = str(run_id or _new_runtime_run_id(prefix)).strip()
+    return LAYOUT.make_named_temp_dir(effective_run_id, prefix)
+
+
+def _make_runtime_temp_file(prefix: str, suffix: str = "", *, run_id: Optional[str] = None, subdir: str = "tmp") -> str:
+    effective_run_id = str(run_id or _new_runtime_run_id(prefix)).strip()
+    directory = LAYOUT.run_subdir(effective_run_id, subdir)
+    handle = tempfile.NamedTemporaryFile(prefix=prefix, suffix=suffix, dir=directory, delete=False)
+    path = handle.name
+    handle.close()
+    return path
 
 
 def _get_media_static_origin():
@@ -645,7 +662,7 @@ os.makedirs(STATIC_DIR, exist_ok=True)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 # Create voicelines directory if it doesn't exist to prevent startup error
-VOICELINES_DIR = os.path.join(ROOT_DIR, "voicelines")
+VOICELINES_DIR = LAYOUT.voicelines_dir
 os.makedirs(VOICELINES_DIR, exist_ok=True)
 app.mount("/voicelines", _VoicelinesProxyStatic(directory=VOICELINES_DIR), name="voicelines")
 
@@ -976,8 +993,8 @@ class WorkflowPauseRequested(Exception):
 ROLLING_AUDIO_SAMPLE_LIMIT = 50
 AUDIO_HEARTBEAT_INTERVAL_SECONDS = 600
 AUDIO_RECOVERY_POLL_SECONDS = 5
-PROCESSING_WORKFLOW_STATE_PATH = os.path.join(ROOT_DIR, "processing_workflow_state.json")
-NEW_MODE_WORKFLOW_STATE_PATH = os.path.join(ROOT_DIR, "new_mode_workflow_state.json")
+PROCESSING_WORKFLOW_STATE_PATH = LAYOUT.processing_workflow_state_path
+NEW_MODE_WORKFLOW_STATE_PATH = LAYOUT.new_mode_workflow_state_path
 NEW_MODE_STAGE_LABELS = {
     "process_paragraphs": "Process Paragraphs",
     "assign_dialogue": "Assign Dialogue",
@@ -1849,9 +1866,9 @@ def _clear_project_derived_state(preserve_input_file=True):
         chunks_queue_log_path = project_manager.chunks_queue_log_path
         transcription_cache_path = project_manager.transcription_cache_path
     else:
-        chunks_db_path = os.path.join(ROOT_DIR, "chunks.sqlite3")
-        chunks_queue_log_path = os.path.join(ROOT_DIR, "chunks.queue.log")
-        transcription_cache_path = os.path.join(ROOT_DIR, "transcription_cache.json")
+        chunks_db_path = getattr(project_manager, "chunks_db_path", os.path.join(ROOT_DIR, "chunks.sqlite3"))
+        chunks_queue_log_path = getattr(project_manager, "chunks_queue_log_path", os.path.join(ROOT_DIR, "chunks.queue.log"))
+        transcription_cache_path = getattr(project_manager, "transcription_cache_path", os.path.join(ROOT_DIR, "transcription_cache.json"))
 
     files_to_remove = [
         SCRIPT_PATH,
@@ -2067,14 +2084,48 @@ def _normalize_archive_path(path: str) -> str:
     return "/".join(parts)
 
 
-def _is_allowed_project_archive_path(path: str) -> bool:
+def _archive_relative_file_target(path: str) -> str:
     normalized = _normalize_archive_path(path)
+    return PROJECT_ARCHIVE_LEGACY_FILE_ALIASES.get(normalized, normalized)
+
+
+def _project_archive_filesystem_path(path: str) -> str:
+    normalized = _archive_relative_file_target(path)
+    if os.path.abspath(ROOT_DIR) == os.path.abspath(LAYOUT.project_dir):
+        return os.path.join(ROOT_DIR, normalized)
+    reverse_aliases = {target: legacy for legacy, target in PROJECT_ARCHIVE_LEGACY_FILE_ALIASES.items()}
+    legacy_relative = reverse_aliases.get(normalized, normalized)
+    return os.path.join(ROOT_DIR, legacy_relative)
+
+
+def _project_archive_source_path(extracted_dir: str, path: str) -> str:
+    normalized = _archive_relative_file_target(path)
+    source_path = os.path.join(extracted_dir, normalized)
+    if os.path.exists(source_path):
+        return source_path
+    reverse_aliases = {target: legacy for legacy, target in PROJECT_ARCHIVE_LEGACY_FILE_ALIASES.items()}
+    legacy_relative = reverse_aliases.get(normalized)
+    if legacy_relative:
+        legacy_path = os.path.join(extracted_dir, legacy_relative)
+        if os.path.exists(legacy_path):
+            return legacy_path
+    return source_path
+
+
+def _is_allowed_project_archive_path(path: str) -> bool:
+    normalized = _archive_relative_file_target(path)
     if not normalized or normalized == PROJECT_ARCHIVE_MANIFEST_NAME:
         return True
     if normalized in PROJECT_ARCHIVE_ALLOWED_FILES:
         return True
     first = normalized.split("/", 1)[0]
     return first in PROJECT_ARCHIVE_ALLOWED_DIRS
+
+
+def _project_export_filesystem_path(filename: str) -> str:
+    if os.path.abspath(ROOT_DIR) == os.path.abspath(LAYOUT.project_dir):
+        return os.path.join(LAYOUT.exports_dir, filename)
+    return os.path.join(ROOT_DIR, filename)
 
 
 def _archive_state_with_relative_paths():
@@ -2176,7 +2227,7 @@ def _prepare_project_archive_sqlite_snapshot():
         except Exception:
             pass
 
-    temp_dir = tempfile.mkdtemp(prefix="threadspeak_archive_db_")
+    temp_dir = _make_runtime_temp_dir("threadspeak_archive_db_")
     backup_path = os.path.join(temp_dir, "chunks.sqlite3")
     try:
         _copy_sqlite_database_snapshot(db_path, backup_path)
@@ -2190,14 +2241,14 @@ def _project_archive_entries():
     entries = {}
 
     def add_relative_path(relative_path: str):
-        normalized = _normalize_archive_path(relative_path)
+        normalized = _archive_relative_file_target(relative_path)
         if not normalized or not _is_allowed_project_archive_path(normalized):
             return
-        absolute_path = os.path.join(ROOT_DIR, normalized)
+        absolute_path = _project_archive_filesystem_path(normalized)
         if os.path.exists(absolute_path):
             entries[normalized] = absolute_path
 
-    for relative_path in sorted(PROJECT_ARCHIVE_ALLOWED_FILES - {"chunks.json", "chunks.sqlite3"}):
+    for relative_path in sorted(PROJECT_ARCHIVE_ALLOWED_FILES - {"chunks.json", "db/chunks.sqlite3"}):
         add_relative_path(relative_path)
 
     state = _archive_state_with_relative_paths()
@@ -2308,7 +2359,7 @@ def _write_project_archive(zip_path: str):
         sqlite_snapshot = _prepare_project_archive_sqlite_snapshot()
         if sqlite_snapshot is not None:
             _, sqlite_backup_path = sqlite_snapshot
-            entries["chunks.sqlite3"] = sqlite_backup_path
+            entries["db/chunks.sqlite3"] = sqlite_backup_path
         sorted_entries = sorted(entries.items())
         manifest = _build_project_archive_manifest(sorted_entries)
     except Exception:
@@ -2347,33 +2398,33 @@ def _write_project_archive(zip_path: str):
 
 def _clear_project_archive_targets():
     removable_files = [
-        "annotated_script.json",
-        "voice_config.json",
-        "voices.json",
-        "chunks.json",
-        "chunks.sqlite3",
-        "chunks.sqlite3-wal",
-        "chunks.sqlite3-shm",
-        "chunks.queue.log",
-        "script_sanity_check.json",
-        "state.json",
-        "transcription_cache.json",
-        "cloned_audiobook.mp3",
-        "optimized_audiobook.zip",
-        "audacity_export.zip",
-        "audiobook.m4b",
-        "audio_queue_state.json",
-        "processing_workflow_state.json",
+        SCRIPT_PATH,
+        VOICE_CONFIG_PATH,
+        VOICES_PATH,
+        CHUNKS_PATH,
+        getattr(project_manager, "chunks_db_path", os.path.join(ROOT_DIR, "chunks.sqlite3")),
+        f"{getattr(project_manager, 'chunks_db_path', os.path.join(ROOT_DIR, 'chunks.sqlite3'))}-wal",
+        f"{getattr(project_manager, 'chunks_db_path', os.path.join(ROOT_DIR, 'chunks.sqlite3'))}-shm",
+        getattr(project_manager, "chunks_queue_log_path", os.path.join(ROOT_DIR, "chunks.queue.log")),
+        SCRIPT_SANITY_PATH,
+        os.path.join(ROOT_DIR, "state.json"),
+        getattr(project_manager, "transcription_cache_path", os.path.join(ROOT_DIR, "transcription_cache.json")),
+        AUDIOBOOK_PATH,
+        OPTIMIZED_EXPORT_PATH,
+        _project_export_filesystem_path("audacity_export.zip"),
+        M4B_PATH,
+        _project_export_filesystem_path("m4b_cover.jpg"),
+        AUDIO_QUEUE_STATE_PATH,
+        PROCESSING_WORKFLOW_STATE_PATH,
+        NEW_MODE_WORKFLOW_STATE_PATH,
     ]
-    removable_dirs = ["uploads", "clone_voices", "designed_voices", "voicelines"]
+    removable_dirs = [UPLOADS_DIR, CLONE_VOICES_DIR, DESIGNED_VOICES_DIR, VOICELINES_DIR]
 
-    for relative_path in removable_files:
-        absolute_path = os.path.join(ROOT_DIR, relative_path)
+    for absolute_path in removable_files:
         if os.path.exists(absolute_path):
             os.remove(absolute_path)
 
-    for dirname in removable_dirs:
-        absolute_dir = os.path.join(ROOT_DIR, dirname)
+    for absolute_dir in removable_dirs:
         if os.path.isdir(absolute_dir):
             shutil.rmtree(absolute_dir)
         os.makedirs(absolute_dir, exist_ok=True)
@@ -2420,8 +2471,8 @@ def _restore_project_archive(extracted_dir: str, *, loaded_project_name: str = "
     _clear_project_archive_targets()
 
     for relative_path in sorted(PROJECT_ARCHIVE_ALLOWED_FILES):
-        source_path = os.path.join(extracted_dir, relative_path)
-        target_path = os.path.join(ROOT_DIR, relative_path)
+        source_path = _project_archive_source_path(extracted_dir, relative_path)
+        target_path = _project_archive_filesystem_path(relative_path)
         if not os.path.exists(source_path):
             continue
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
@@ -2474,7 +2525,7 @@ def _restore_project_archive(extracted_dir: str, *, loaded_project_name: str = "
 
 
 def _restore_project_archive_zip(zip_path: str, *, loaded_project_name: str = ""):
-    temp_root = tempfile.mkdtemp(prefix="threadspeak_project_import_")
+    temp_root = _make_runtime_temp_dir("threadspeak_project_import_")
     extract_root = os.path.join(temp_root, "extracted")
     os.makedirs(extract_root, exist_ok=True)
 
@@ -2502,7 +2553,7 @@ def _restore_project_archive_zip(zip_path: str, *, loaded_project_name: str = ""
                 relative_path = _normalize_archive_path(info.filename)
                 if not _is_allowed_project_archive_path(relative_path):
                     raise HTTPException(status_code=400, detail=f"Archive contains unsupported path: {relative_path}")
-                target_path = os.path.join(extract_root, relative_path)
+                target_path = os.path.join(extract_root, _archive_relative_file_target(relative_path))
                 os.makedirs(os.path.dirname(target_path), exist_ok=True)
                 with zf.open(info, "r") as source, open(target_path, "wb") as target:
                     shutil.copyfileobj(source, target)
@@ -3735,6 +3786,11 @@ def run_process(command: List[str], task_name: str, run_id: str, relay_fn=None):
         env.setdefault("PYTHONIOENCODING", "utf-8")
         env.setdefault("PYTHONUTF8", "1")
         env.setdefault("PYTHONUNBUFFERED", "1")
+        env["THREADSPEAK_RUN_ID"] = str(run_id or "")
+        env["THREADSPEAK_RUN_DIR"] = LAYOUT.run_dir(run_id)
+        env["THREADSPEAK_RUN_TEMP_DIR"] = LAYOUT.run_temp_dir(run_id)
+        env["THREADSPEAK_RUN_LOGS_DIR"] = LAYOUT.run_logs_dir(run_id)
+        env["THREADSPEAK_RUN_EXPORTS_DIR"] = LAYOUT.run_exports_dir(run_id)
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -4122,7 +4178,7 @@ def run_lost_audio_repair_task(run_id: str, use_asr: bool):
 
 def _run_assign_dialogue_task(run_id: str, paragraphs_path: str, config_path: str):
     run_process(
-        [sys.executable, "-u", "assign_dialogue.py", paragraphs_path, config_path],
+        [sys.executable, "-u", "-m", "scripts.assign_dialogue", paragraphs_path, config_path],
         "assign_dialogue",
         run_id,
     )
@@ -4130,7 +4186,7 @@ def _run_assign_dialogue_task(run_id: str, paragraphs_path: str, config_path: st
 
 def _run_extract_temperament_task(run_id: str, paragraphs_path: str, config_path: str):
     run_process(
-        [sys.executable, "-u", "extract_temperament.py", paragraphs_path, config_path],
+        [sys.executable, "-u", "-m", "scripts.extract_temperament", paragraphs_path, config_path],
         "extract_temperament",
         run_id,
     )
@@ -4161,7 +4217,7 @@ def _run_create_script_task(run_id: str, paragraphs_path: str,
 
     if dialogue_errors and retry_attempts > 0:
         run_process(
-            [sys.executable, "-u", "assign_dialogue.py",
+            [sys.executable, "-u", "-m", "scripts.assign_dialogue",
              paragraphs_path, CONFIG_PATH, "--retry-errors", str(retry_attempts)],
             "create_script",
             run_id,
@@ -4169,7 +4225,7 @@ def _run_create_script_task(run_id: str, paragraphs_path: str,
 
     # ── Build the script ──────────────────────────────────────────────────────
     success = run_process(
-        [sys.executable, "-u", "create_script.py",
+        [sys.executable, "-u", "-m", "scripts.create_script",
          paragraphs_path, script_output_path, chunks_output_path,
          "--max-length", str(script_max_length)],
         "create_script",
@@ -4200,7 +4256,7 @@ def _load_script_max_length() -> int:
 
 def _run_process_paragraphs_task(run_id: str, input_file: str, output_path: str):
     run_process(
-        [sys.executable, "-u", "process_paragraphs.py", input_file, output_path],
+        [sys.executable, "-u", "-m", "scripts.process_paragraphs", input_file, output_path],
         "process_paragraphs",
         run_id,
     )
@@ -4212,7 +4268,7 @@ def _run_generate_script_task(run_id: str):
     if not input_file:
         raise FileNotFoundError("No input file found in state")
     _clear_processing_stage_and_downstream("script")
-    success = run_process([sys.executable, "-u", "generate_script.py", input_file], "script", run_id)
+    success = run_process([sys.executable, "-u", "-m", "scripts.generate_script", input_file], "script", run_id)
     if success:
         project_manager.reload_script_store()
         _mark_processing_stage_completed_marker("script")
@@ -4221,7 +4277,7 @@ def _run_generate_script_task(run_id: str):
 
 def _run_review_script_task(run_id: str):
     _clear_processing_stage_and_downstream("review")
-    success = run_process([sys.executable, "-u", "review_script.py"], "review", run_id)
+    success = run_process([sys.executable, "-u", "-m", "scripts.review_script"], "review", run_id)
     if success:
         _mark_processing_stage_completed_marker("review")
     return success
@@ -4545,7 +4601,7 @@ def _derived_new_mode_completed_stages_from_files(options=None) -> list:
     allowed = set(_new_mode_stage_sequence(options))
     paragraphs_path = os.path.join(ROOT_DIR, "paragraphs.json")
     chunks_path = CHUNKS_PATH
-    script_path = os.path.join(ROOT_DIR, "annotated_script.json")
+    script_path = SCRIPT_PATH
 
     pdata: dict = {}
     if os.path.exists(paragraphs_path):
@@ -4738,24 +4794,24 @@ def _run_new_mode_workflow_stage(stage_name: str):
             if not input_file or not os.path.exists(input_file):
                 raise RuntimeError("No input file found. Please upload a book first.")
             success = run_process(
-                [sys.executable, "-u", "process_paragraphs.py", input_file, paragraphs_path],
+                [sys.executable, "-u", "-m", "scripts.process_paragraphs", input_file, paragraphs_path],
                 stage_name, run_id, relay_fn=relay,
             )
         elif stage_name == "assign_dialogue":
             success = run_process(
-                [sys.executable, "-u", "assign_dialogue.py", paragraphs_path, config_path],
+                [sys.executable, "-u", "-m", "scripts.assign_dialogue", paragraphs_path, config_path],
                 stage_name, run_id, relay_fn=relay,
             )
         elif stage_name == "extract_temperament":
             success = run_process(
-                [sys.executable, "-u", "extract_temperament.py", paragraphs_path, config_path],
+                [sys.executable, "-u", "-m", "scripts.extract_temperament", paragraphs_path, config_path],
                 stage_name, run_id, relay_fn=relay,
             )
         elif stage_name == "create_script":
-            script_path = os.path.join(ROOT_DIR, "annotated_script.json")
+            script_path = SCRIPT_PATH
             script_max_length = _load_script_max_length()
             success = run_process(
-                [sys.executable, "-u", "create_script.py",
+                [sys.executable, "-u", "-m", "scripts.create_script",
                  paragraphs_path, script_path, CHUNKS_PATH,
                  "--max-length", str(script_max_length)],
                 stage_name, run_id, relay_fn=relay,
@@ -4766,7 +4822,7 @@ def _run_new_mode_workflow_stage(stage_name: str):
                 )
         elif stage_name == "proofread":
             success = run_process(
-                [sys.executable, "-u", "proofread_runner.py", ROOT_DIR, "0.8", "__ALL__"],
+                [sys.executable, "-u", "-m", "scripts.proofread_runner", ROOT_DIR, "0.8", "__ALL__"],
                 "proofread", run_id, relay_fn=relay,
             )
         else:

@@ -1,12 +1,9 @@
 import os
+from runtime_layout import LAYOUT
 
-_PROMPTS_FILE = os.path.join(os.path.dirname(__file__), "..", "default_prompts.txt")
-_DIALOGUE_PROMPT_FILE = os.path.join(
-    os.path.dirname(__file__), "..", "dialogue_identification_system_prompt.txt"
-)
-_TEMPERAMENT_PROMPT_FILE = os.path.join(
-    os.path.dirname(__file__), "..", "temperament_extraction_system_prompt.txt"
-)
+_PROMPTS_FILE = LAYOUT.prompt_default_path
+_DIALOGUE_PROMPT_FILE = LAYOUT.prompt_dialogue_path
+_TEMPERAMENT_PROMPT_FILE = LAYOUT.prompt_temperament_path
 
 
 def load_default_prompts():
