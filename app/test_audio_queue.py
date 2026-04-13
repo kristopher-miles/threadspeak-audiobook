@@ -1,5 +1,6 @@
 import copy
 import threading
+import time
 import unittest
 
 import app as app_module
@@ -126,7 +127,8 @@ class AudioQueueMetricsTests(unittest.TestCase):
 
         def fake_generate_chunks_batch(indices, batch_seed, batch_size, progress_callback=None,
                                        batch_group_by_type=False, cancel_check=None,
-                                       item_callback=None, generation_token=None):
+                                       item_callback=None, generation_token=None,
+                                       item_started_callback=None):
             captured["indices"] = list(indices)
             captured["generation_token"] = generation_token
             return {"completed": [], "failed": [], "cancelled": 0}
@@ -177,6 +179,116 @@ class AudioQueueMetricsTests(unittest.TestCase):
             self.assertEqual(captured["generation_token"], "run-restored")
         finally:
             app_module.project_manager.generate_chunks_batch = original_generate
+            with app_module.audio_queue_lock:
+                app_module.audio_current_job = self._backup_audio_current_job
+                app_module.process_state["audio"]["cancel"] = False
+                app_module.audio_cancel_event.clear()
+
+    def test_parallel_success_waits_for_finalize_before_counting_metrics(self):
+        callbacks = {}
+
+        def fake_register_audio_finalization_listener(
+            generation_token,
+            *,
+            submission_callback=None,
+            item_callback=None,
+            activity_callback=None,
+        ):
+            callbacks["submission"] = submission_callback
+            callbacks["item"] = item_callback
+            callbacks["activity"] = activity_callback
+
+        def fake_unregister_audio_finalization_listener(_generation_token):
+            callbacks.clear()
+
+        def fake_generate_chunks_parallel(indices, max_workers=2, progress_callback=None,
+                                          cancel_check=None, item_callback=None,
+                                          generation_token=None, item_started_callback=None):
+            self.assertEqual(indices, ["u3"])
+            self.assertEqual(generation_token, "run-finalize")
+            self.assertIsNotNone(item_callback)
+            self.assertIsNotNone(item_started_callback)
+            self.assertEqual(job["processed_clips"], 0)
+            self.assertEqual(job["remaining_words"], 6)
+
+            item_started_callback("u3", time.time() - 60.0)
+            item_callback("u3", True, 2.0, 6, 6)
+            self.assertEqual(job["processed_clips"], 0)
+            self.assertEqual(job["remaining_words"], 6)
+
+            callbacks["submission"]("u3", {"id": 99})
+            callbacks["item"]("u3", True, 0.02, 6, 6, {})
+
+            self.assertEqual(job["processed_clips"], 1)
+            self.assertEqual(job["remaining_words"], 0)
+            return {"completed": ["u3"], "failed": [], "cancelled": 0}
+
+        original_generate = app_module.project_manager.generate_chunks_parallel
+        original_register = app_module.project_manager.register_audio_finalization_listener
+        original_unregister = app_module.project_manager.unregister_audio_finalization_listener
+        done_event = threading.Event()
+        job = {
+            "id": 9,
+            "corr_id": "audio-00009-finalize",
+            "kind": "parallel",
+            "uids": ["u3"],
+            "pending_uids": ["u3"],
+            "generation_pending_uids": ["u3"],
+            "pending_finalize_uids": [],
+            "total_chunks": 1,
+            "total_words": 6,
+            "remaining_words": 6,
+            "processed_clips": 0,
+            "error_clips": 0,
+            "status": "running",
+            "label": "Finalize metrics job",
+            "scope": "custom",
+            "run_token": "run-finalize",
+            "queued_at": 0.0,
+            "started_at": 1.0,
+            "last_output_at": None,
+            "last_generation_activity_at": 1.0,
+            "last_finalize_activity_at": None,
+        }
+        result_holder = {}
+
+        try:
+            app_module.project_manager.generate_chunks_parallel = fake_generate_chunks_parallel
+            app_module.project_manager.register_audio_finalization_listener = fake_register_audio_finalization_listener
+            app_module.project_manager.unregister_audio_finalization_listener = fake_unregister_audio_finalization_listener
+
+            with app_module.audio_queue_lock:
+                app_module.audio_current_job = job
+                app_module.process_state["audio"]["cancel"] = False
+                app_module.audio_cancel_event.clear()
+                app_module.process_state["audio"]["metrics"] = app_module._new_audio_metrics()
+
+            app_module._audio_job_runner(
+                job,
+                {
+                    "workers": 2,
+                    "batch_seed": -1,
+                    "batch_size": 2,
+                    "batch_group_by_type": False,
+                },
+                "run-finalize",
+                result_holder,
+                done_event,
+            )
+
+            self.assertTrue(done_event.is_set())
+            metrics = app_module.process_state["audio"]["metrics"]
+            self.assertEqual(metrics["processed_clips"], 1)
+            self.assertEqual(metrics["successful_clips"], 1)
+            self.assertEqual(len(metrics["samples"]), 1)
+            self.assertGreater(metrics["total_elapsed_seconds"], 1.5)
+            self.assertLess(metrics["total_elapsed_seconds"], 5.0)
+            self.assertEqual(job["pending_uids"], [])
+            self.assertEqual(job["pending_finalize_uids"], [])
+        finally:
+            app_module.project_manager.generate_chunks_parallel = original_generate
+            app_module.project_manager.register_audio_finalization_listener = original_register
+            app_module.project_manager.unregister_audio_finalization_listener = original_unregister
             with app_module.audio_queue_lock:
                 app_module.audio_current_job = self._backup_audio_current_job
                 app_module.process_state["audio"]["cancel"] = False

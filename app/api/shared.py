@@ -3339,6 +3339,8 @@ def _abandon_audio_job_locked(job, run_token, reason, *, status="cancelled"):
 def _audio_job_runner(job, settings, run_token, result_holder, done_event):
     job_prefix = f"[JOB {job['id']}|{job.get('corr_id', 'no-cid')}]"
     execution_uids = list(_job_generation_pending_uids(job) or _job_uids(job))
+    started_at_by_uid = {}
+    generation_elapsed_by_uid = {}
 
     def is_active():
         with audio_queue_lock:
@@ -3347,6 +3349,52 @@ def _audio_job_runner(job, settings, run_token, result_holder, done_event):
                 and audio_current_job["id"] == job["id"]
                 and audio_current_job.get("run_token") == run_token
             )
+
+    def _remember_started_at(uid, started_at):
+        normalized_uid = str(uid or "").strip()
+        if not normalized_uid:
+            return
+        try:
+            normalized_started_at = float(started_at)
+        except (TypeError, ValueError):
+            return
+        if normalized_started_at <= 0:
+            return
+        started_at_by_uid[normalized_uid] = normalized_started_at
+
+    def _remember_generation_elapsed(uid, elapsed_seconds):
+        normalized_uid = str(uid or "").strip()
+        if not normalized_uid:
+            return
+        try:
+            normalized_elapsed = float(elapsed_seconds)
+        except (TypeError, ValueError):
+            return
+        generation_elapsed_by_uid[normalized_uid] = max(0.0, normalized_elapsed)
+
+    def _consume_generation_elapsed(uid, fallback_elapsed_seconds):
+        normalized_uid = str(uid or "").strip()
+        if not normalized_uid:
+            return max(0.0, float(fallback_elapsed_seconds or 0.0))
+        stored = generation_elapsed_by_uid.pop(normalized_uid, None)
+        if stored is not None:
+            return stored
+        return max(0.0, float(fallback_elapsed_seconds or 0.0))
+
+    def _consume_elapsed_seconds(uid, fallback_elapsed_seconds):
+        normalized_uid = str(uid or "").strip()
+        started_at = started_at_by_uid.pop(normalized_uid, None)
+        if started_at is None:
+            return max(0.0, float(fallback_elapsed_seconds or 0.0))
+        return max(0.0, time.time() - started_at)
+
+    def item_started_callback(uid, started_at):
+        with audio_queue_lock:
+            if not is_active():
+                return
+            _remember_started_at(uid, started_at)
+            _mark_audio_generation_activity_locked(job)
+            _refresh_audio_process_state_locked(persist=True)
 
     def progress_callback(completed, failed, total):
         with audio_queue_lock:
@@ -3367,7 +3415,12 @@ def _audio_job_runner(job, settings, run_token, result_holder, done_event):
                 generation_pending.remove(uid)
             job["generation_pending_uids"] = generation_pending
             _mark_audio_generation_activity_locked(job)
-            _record_audio_sample_locked(job, uid, elapsed_seconds, input_words, output_words, success)
+            if success:
+                _remember_generation_elapsed(uid, elapsed_seconds)
+                _refresh_audio_process_state_locked(persist=True)
+                return
+            effective_elapsed = _consume_elapsed_seconds(uid, elapsed_seconds)
+            _record_audio_sample_locked(job, uid, effective_elapsed, input_words, output_words, success)
             _refresh_audio_process_state_locked(persist=True)
 
     def submission_callback(uid, task):
@@ -3383,7 +3436,9 @@ def _audio_job_runner(job, settings, run_token, result_holder, done_event):
             if not is_active():
                 return
             _record_audio_finalize_result_locked(job, uid, success, meta)
-            _record_audio_sample_locked(job, uid, elapsed_seconds, input_words, output_words, success)
+            effective_elapsed = _consume_generation_elapsed(uid, 0.0) + max(0.0, float(elapsed_seconds or 0.0))
+            started_at_by_uid.pop(str(uid or "").strip(), None)
+            _record_audio_sample_locked(job, uid, effective_elapsed, input_words, output_words, success)
             _refresh_audio_process_state_locked(persist=True)
             audio_queue_condition.notify_all()
 
@@ -3418,6 +3473,7 @@ def _audio_job_runner(job, settings, run_token, result_holder, done_event):
                 cancel_check=cancel_check,
                 item_callback=item_callback,
                 generation_token=run_token,
+                item_started_callback=item_started_callback,
             )
         else:
             result_holder["results"] = project_manager.generate_chunks_batch(
@@ -3429,6 +3485,7 @@ def _audio_job_runner(job, settings, run_token, result_holder, done_event):
                 cancel_check=cancel_check,
                 item_callback=item_callback,
                 generation_token=run_token,
+                item_started_callback=item_started_callback,
             )
     except BaseException as e:
         result_holder["error"] = str(e)
@@ -3576,7 +3633,8 @@ def _audio_queue_worker():
                 _append_audio_log_locked(f"{job_prefix} Batch generation error: {result_holder['error']}")
                 for uid in list(_job_generation_pending_uids(job)):
                     word_count = _job_word_counts(job).get(uid, 0)
-                    _record_audio_sample_locked(job, uid, 0.0, word_count, 0, False)
+                    effective_elapsed = _consume_elapsed_seconds(uid, 0.0)
+                    _record_audio_sample_locked(job, uid, effective_elapsed, word_count, 0, False)
                 job["generation_pending_uids"] = []
                 if not job.get("retry_uids"):
                     job["retry_uids"] = []

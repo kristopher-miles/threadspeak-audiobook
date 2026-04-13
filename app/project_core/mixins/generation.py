@@ -351,7 +351,8 @@ class ProjectGenerationMixin:
             )
 
         def generate_chunks_parallel(self, indices, max_workers=2, progress_callback=None,
-                                      cancel_check=None, item_callback=None, generation_token=None):
+                                      cancel_check=None, item_callback=None, generation_token=None,
+                                      item_started_callback=None):
             """Generate multiple chunks in parallel using ThreadPoolExecutor.
 
             Uses individual TTS API calls with per-speaker voice settings.
@@ -362,6 +363,7 @@ class ProjectGenerationMixin:
                 progress_callback: Optional callback(completed, failed, total) for progress updates
                 cancel_check: Optional callable returning True when cancellation is requested
                 item_callback: Optional callback(index, success, elapsed_seconds, input_words, output_words)
+                item_started_callback: Optional callback(index, started_at_seconds)
 
             Returns:
                 dict with 'completed', 'failed', and 'cancelled' keys
@@ -390,6 +392,8 @@ class ProjectGenerationMixin:
 
             def _timed_generate(uid):
                 start = time.time()
+                if item_started_callback:
+                    item_started_callback(uid, start)
                 try:
                     chunk = self.get_chunk_raw(uid)
                     attempt = int((chunk or {}).get("auto_regen_count") or 0)
@@ -422,6 +426,8 @@ class ProjectGenerationMixin:
                     if success:
                         results["completed"].append(uid)
                         print(f"Chunk {uid} submitted for finalization: {msg}")
+                        if item_callback:
+                            item_callback(uid, True, elapsed_seconds, word_counts.get(uid, 0), word_counts.get(uid, 0))
                     else:
                         results["failed"].append((uid, msg))
                         print(f"Chunk {uid} failed: {msg}")
@@ -561,7 +567,8 @@ class ProjectGenerationMixin:
             return reordered
 
         def generate_chunks_batch(self, indices, batch_seed=-1, batch_size=4, progress_callback=None,
-                                   batch_group_by_type=False, cancel_check=None, item_callback=None, generation_token=None):
+                                   batch_group_by_type=False, cancel_check=None, item_callback=None,
+                                   generation_token=None, item_started_callback=None):
             """Generate multiple chunks using batch TTS API with a single seed.
 
             Args:
@@ -573,6 +580,7 @@ class ProjectGenerationMixin:
                     GPU efficiency. When False, indices are batched in sequential order.
                 cancel_check: Optional callable returning True when cancellation is requested
                 item_callback: Optional callback(index, success, elapsed_seconds, input_words, output_words)
+                item_started_callback: Optional callback(index, started_at_seconds)
 
             Returns:
                 dict with 'completed', 'failed', and 'cancelled' keys
@@ -664,6 +672,9 @@ class ProjectGenerationMixin:
 
                 # Call batch TTS with single seed
                 batch_start = time.time()
+                if item_started_callback:
+                    for uid in batch_uids:
+                        item_started_callback(uid, batch_start)
                 batch_output_dir = os.path.join(
                     self.audio_finalize_spool_dir,
                     sanitize_filename(spool_run_token) or "manual",
@@ -755,6 +766,8 @@ class ProjectGenerationMixin:
                             continue
                         results["completed"].append(uid)
                         print(f"Chunk {uid} submitted for finalization")
+                        if item_callback:
+                            item_callback(uid, True, shared_elapsed, word_counts.get(uid, 0), word_counts.get(uid, 0))
                     except Exception as e:
                         print(f"Error queueing async finalization for chunk {uid}: {e}")
                         results["failed"].append((uid, str(e)))
