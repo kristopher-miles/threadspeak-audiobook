@@ -155,7 +155,13 @@ class ProjectChunkStoreMixin:
 
         def load_chunks_view(self, chapter=None):
             if chapter:
-                self.ensure_chapter_narrator_voice_can_narrate(chapter)
+                narrator_repair = self.get_chapter_narrator_voice_repair(chapter)
+                if narrator_repair is not None:
+                    self.ensure_chapter_narrator_voice_can_narrate(
+                        chapter,
+                        reason="load_chunks_view_chapter_narrator_repair",
+                        repair=narrator_repair,
+                    )
             chunks = self.load_chunks_raw(chapter=chapter)
             runtime = self._copy_chunk_runtime(chunk.get("uid") for chunk in chunks)
             return [

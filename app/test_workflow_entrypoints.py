@@ -219,16 +219,27 @@ class WorkflowEntrypointAccessibilityTests(unittest.TestCase):
             original_root = app_module.ROOT_DIR
             original_voice = app_module.VOICE_CONFIG_PATH
             original_voicelines = app_module.VOICELINES_DIR
+            original_pm = app_module.project_manager
             try:
+                class StubProjectManager:
+                    def __init__(self):
+                        self.reset_calls = 0
+
+                    def reset_voice_state(self, reason=""):
+                        self.reset_calls += 1
+
                 app_module.ROOT_DIR = temp_root
                 app_module.VOICE_CONFIG_PATH = voice_config_path
                 app_module.VOICELINES_DIR = voicelines_dir
+                app_module.project_manager = StubProjectManager()
 
                 result = asyncio.run(app_module.reset_new_mode())
+                self.assertEqual(app_module.project_manager.reset_calls, 1)
             finally:
                 app_module.ROOT_DIR = original_root
                 app_module.VOICE_CONFIG_PATH = original_voice
                 app_module.VOICELINES_DIR = original_voicelines
+                app_module.project_manager = original_pm
 
             self.assertEqual(result["status"], "reset")
             self.assertFalse(result["preserved_voices"])
@@ -378,28 +389,29 @@ class WorkflowEntrypointAccessibilityTests(unittest.TestCase):
 
     def test_script_info_reports_voice_state_without_script_file(self):
         with tempfile.TemporaryDirectory() as temp_root:
-            voice_config_path = os.path.join(temp_root, "voice_config.json")
             voicelines_dir = os.path.join(temp_root, "voicelines")
             os.makedirs(voicelines_dir, exist_ok=True)
-
-            with open(voice_config_path, "w", encoding="utf-8") as f:
-                json.dump({"Narrator": {}, "Alice": {}}, f)
             with open(os.path.join(voicelines_dir, "clip.wav"), "w", encoding="utf-8") as f:
                 f.write("audio")
 
             original_root = app_module.ROOT_DIR
-            original_voice = app_module.VOICE_CONFIG_PATH
             original_voicelines = app_module.VOICELINES_DIR
+            original_pm = app_module.project_manager
+            manager = None
             try:
                 app_module.ROOT_DIR = temp_root
-                app_module.VOICE_CONFIG_PATH = voice_config_path
                 app_module.VOICELINES_DIR = voicelines_dir
+                manager = app_module.ProjectManager(temp_root)
+                manager._save_voice_config({"Narrator": {}, "Alice": {}})
+                app_module.project_manager = manager
 
                 result = asyncio.run(app_module.get_script_info())
             finally:
+                if manager is not None:
+                    manager.shutdown_script_store(flush=True)
                 app_module.ROOT_DIR = original_root
-                app_module.VOICE_CONFIG_PATH = original_voice
                 app_module.VOICELINES_DIR = original_voicelines
+                app_module.project_manager = original_pm
 
             self.assertEqual(result["entry_count"], 0)
             self.assertTrue(result["has_voice_config"])
@@ -409,9 +421,9 @@ class WorkflowEntrypointAccessibilityTests(unittest.TestCase):
     def test_standalone_create_script_marks_new_mode_stage_complete(self):
         captured = {"calls": 0}
 
-        def fake_run_create_script_task(run_id, paragraphs_path, voice_config_path, script_output_path, chunks_output_path):
+        def fake_run_create_script_task(run_id, paragraphs_path, script_output_path, chunks_output_path):
             captured["calls"] += 1
-            captured["args"] = (run_id, paragraphs_path, voice_config_path, script_output_path, chunks_output_path)
+            captured["args"] = (run_id, paragraphs_path, script_output_path, chunks_output_path)
 
         self._patch("_run_create_script_task", fake_run_create_script_task)
 
@@ -429,7 +441,6 @@ class WorkflowEntrypointAccessibilityTests(unittest.TestCase):
                 app_module._run_create_script_task_with_new_mode_state(
                     "run-1",
                     os.path.join(temp_root, "paragraphs.json"),
-                    os.path.join(temp_root, "voice_config.json"),
                     os.path.join(temp_root, "annotated_script.json"),
                     os.path.join(temp_root, "chunks.json"),
                 )

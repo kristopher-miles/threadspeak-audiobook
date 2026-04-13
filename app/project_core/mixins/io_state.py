@@ -50,6 +50,13 @@ from project_core.chunking import _coerce_bool, get_speaker, _is_structural_text
 
 class ProjectIOStateMixin:
         """Provide durable JSON I/O operations for project-scoped state."""
+        @staticmethod
+        def _prune_legacy_voice_state_fields(state):
+            payload = dict(state or {})
+            for key in ("narrator_threshold", "narrator_overrides", "auto_narrator_aliases"):
+                payload.pop(key, None)
+            return payload
+
         def load_paragraphs(self):
             """Return the paragraphs.json document, or None if it does not exist yet."""
             if not os.path.exists(self.paragraphs_path):
@@ -68,13 +75,7 @@ class ProjectIOStateMixin:
             script_store = getattr(self, "script_store", None)
             if script_store is not None:
                 return script_store.load_voice_config()
-            if os.path.exists(self.voice_config_path):
-                try:
-                    with open(self.voice_config_path, "r", encoding="utf-8") as f:
-                        return json.load(f)
-                except (json.JSONDecodeError, ValueError):
-                    return {}
-            return {}
+            raise RuntimeError("Voice config requires the SQLite script store")
 
         def _save_voice_config(self, voice_config):
             script_store = getattr(self, "script_store", None)
@@ -85,8 +86,25 @@ class ProjectIOStateMixin:
                 ]
                 script_store.replace_voice_profiles(rows, reason="save_voice_config", wait=True)
                 return
-            with open(self.voice_config_path, "w", encoding="utf-8") as f:
-                json.dump(voice_config, f, indent=2, ensure_ascii=False)
+            raise RuntimeError("Voice config requires the SQLite script store")
+
+        def load_voice_state_snapshot(self):
+            script_store = getattr(self, "script_store", None)
+            if script_store is None:
+                raise RuntimeError("Voice state requires the SQLite script store")
+            return script_store.load_voice_state_snapshot()
+
+        def replace_voice_state_snapshot(self, snapshot, *, reason="replace_voice_state_snapshot"):
+            script_store = getattr(self, "script_store", None)
+            if script_store is None:
+                raise RuntimeError("Voice state requires the SQLite script store")
+            return script_store.replace_voice_state_snapshot(snapshot, reason=reason, wait=True)
+
+        def log_voice_audit_event(self, event, **details):
+            script_store = getattr(self, "script_store", None)
+            if script_store is None or not hasattr(script_store, "_append_voice_audit_entry"):
+                return
+            script_store._append_voice_audit_entry({"event": event, **dict(details or {})})
 
         def _load_app_config(self):
             if os.path.exists(self.config_path):
@@ -218,14 +236,15 @@ class ProjectIOStateMixin:
                 return {}
             try:
                 with open(state_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    payload = json.load(f)
             except (json.JSONDecodeError, ValueError, OSError):
                 return {}
+            return self._prune_legacy_voice_state_fields(payload if isinstance(payload, dict) else {})
 
         def _save_state(self, state):
             state_path = os.path.join(self.root_dir, "state.json")
             with open(state_path, "w", encoding="utf-8") as f:
-                json.dump(state, f, indent=2, ensure_ascii=False)
+                json.dump(self._prune_legacy_voice_state_fields(state), f, indent=2, ensure_ascii=False)
 
         def _load_generation_settings(self):
             return self._load_app_config().get("generation", {})

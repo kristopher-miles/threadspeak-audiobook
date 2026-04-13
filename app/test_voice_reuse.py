@@ -70,6 +70,7 @@ class SavedVoiceReuseTests(unittest.TestCase):
             original_finish = app_module._finish_task_run
             original_pm = app_module.project_manager
             try:
+                voice_config_state = {}
                 app_module.ROOT_DIR = temp_root
                 app_module.SCRIPT_PATH = script_path
                 app_module.VOICE_CONFIG_PATH = voice_config_path
@@ -91,6 +92,13 @@ class SavedVoiceReuseTests(unittest.TestCase):
                     def _current_script_title(self):
                         return "Book One"
 
+                    def _load_voice_config(self):
+                        return json.loads(json.dumps(voice_config_state))
+
+                    def _save_voice_config(self, config):
+                        voice_config_state.clear()
+                        voice_config_state.update(json.loads(json.dumps(config)))
+
                     def load_chunks(self):
                         return []
 
@@ -100,8 +108,7 @@ class SavedVoiceReuseTests(unittest.TestCase):
                 app_module.project_manager = FakeProjectManager()
                 success = app_module.run_voice_processing_task("run-1")
                 self.assertTrue(success)
-                with open(voice_config_path, "r", encoding="utf-8") as f:
-                    cfg = json.load(f)
+                cfg = voice_config_state
                 self.assertEqual(cfg["twilight sparkle"]["type"], "clone")
                 self.assertEqual(cfg["twilight sparkle"]["ref_audio"], f"clone_voices/{clone_filename}")
                 self.assertEqual(cfg["twilight sparkle"]["ref_text"], "Friendship is magic.")
@@ -168,6 +175,7 @@ class SavedVoiceReuseTests(unittest.TestCase):
             original_pm = app_module.project_manager
             original_suggest = app_module.suggest_voice_description_sync
             try:
+                voice_config_state = {}
                 app_module.ROOT_DIR = temp_root
                 app_module.SCRIPT_PATH = script_path
                 app_module.VOICE_CONFIG_PATH = voice_config_path
@@ -188,6 +196,13 @@ class SavedVoiceReuseTests(unittest.TestCase):
 
                     def _current_script_title(self):
                         return "Book One"
+
+                    def _load_voice_config(self):
+                        return json.loads(json.dumps(voice_config_state))
+
+                    def _save_voice_config(self, config):
+                        voice_config_state.clear()
+                        voice_config_state.update(json.loads(json.dumps(config)))
 
                     def load_chunks(self):
                         return []
@@ -568,6 +583,10 @@ class SavedVoiceReuseTests(unittest.TestCase):
             original_finish = app_module._finish_task_run
             original_pm = app_module.project_manager
             try:
+                voice_config_state = {
+                    "CAT": {"type": "design", "description": "cat desc", "ref_text": "cat text", "ref_audio": ""},
+                    "DOG": {"type": "design", "description": "dog desc", "ref_text": "dog text", "ref_audio": ""},
+                }
                 app_module.ROOT_DIR = temp_root
                 app_module.SCRIPT_PATH = script_path
                 app_module.VOICE_CONFIG_PATH = voice_config_path
@@ -585,6 +604,13 @@ class SavedVoiceReuseTests(unittest.TestCase):
 
                     def _current_script_title(self):
                         return "Project"
+
+                    def _load_voice_config(self):
+                        return json.loads(json.dumps(voice_config_state))
+
+                    def _save_voice_config(self, config):
+                        voice_config_state.clear()
+                        voice_config_state.update(json.loads(json.dumps(config)))
 
                     def load_chunks(self):
                         return []
@@ -713,6 +739,10 @@ class SavedVoiceReuseTests(unittest.TestCase):
             original_pm = app_module.project_manager
             original_suggest = app_module.suggest_voice_description_sync
             try:
+                voice_config_state = {
+                    "CAT": {"type": "design"},
+                    "DOG": {"type": "design"},
+                }
                 app_module.ROOT_DIR = temp_root
                 app_module.SCRIPT_PATH = script_path
                 app_module.VOICE_CONFIG_PATH = voice_config_path
@@ -743,6 +773,13 @@ class SavedVoiceReuseTests(unittest.TestCase):
 
                     def _current_script_title(self):
                         return "Project"
+
+                    def _load_voice_config(self):
+                        return json.loads(json.dumps(voice_config_state))
+
+                    def _save_voice_config(self, config):
+                        voice_config_state.clear()
+                        voice_config_state.update(json.loads(json.dumps(config)))
 
                     def load_chunks(self):
                         return []
@@ -825,6 +862,10 @@ class SavedVoiceReuseTests(unittest.TestCase):
             original_finish = app_module._finish_task_run
             original_pm = app_module.project_manager
             try:
+                voice_config_state = {
+                    "Novo": {"type": "design", "alias": ""},
+                    "Queen Novo": {"type": "design", "alias": "", "description": "queen desc", "ref_text": "queen sample"},
+                }
                 app_module.ROOT_DIR = temp_root
                 app_module.SCRIPT_PATH = script_path
                 app_module.VOICE_CONFIG_PATH = voice_config_path
@@ -842,6 +883,13 @@ class SavedVoiceReuseTests(unittest.TestCase):
 
                     def _current_script_title(self):
                         return "Project"
+
+                    def _load_voice_config(self):
+                        return json.loads(json.dumps(voice_config_state))
+
+                    def _save_voice_config(self, config):
+                        voice_config_state.clear()
+                        voice_config_state.update(json.loads(json.dumps(config)))
 
                     def load_chunks(self):
                         return []
@@ -864,8 +912,7 @@ class SavedVoiceReuseTests(unittest.TestCase):
                 self.assertEqual(calls, ["Queen Novo"])
                 self.assertTrue(any("Auto-aliased Novo to Queen Novo." in message for message in logs))
                 self.assertTrue(any("Skipping Novo: aliased to Queen Novo." in message for message in logs))
-                with open(voice_config_path, "r", encoding="utf-8") as f:
-                    cfg = json.load(f)
+                cfg = voice_config_state
                 self.assertEqual(cfg["Novo"]["alias"], "Queen Novo")
             finally:
                 app_module.ROOT_DIR = original_root
@@ -950,11 +997,29 @@ class SavedVoiceReuseTests(unittest.TestCase):
             original_script_path = app_module.SCRIPT_PATH
             original_voice_config_path = app_module.VOICE_CONFIG_PATH
             original_voices_path = app_module.VOICES_PATH
+            original_pm = app_module.project_manager
             try:
                 app_module.ROOT_DIR = temp_root
                 app_module.SCRIPT_PATH = script_path
                 app_module.VOICE_CONFIG_PATH = voice_config_path
                 app_module.VOICES_PATH = voices_path
+
+                class FakeProjectManager:
+                    script_store = None
+
+                    def load_chunks(self):
+                        return []
+
+                    def _normalize_speaker_name(self, value):
+                        return (value or "").strip().lower()
+
+                    def _load_voice_config(self):
+                        return {"narrator": {"type": "design", "description": "x"}}
+
+                    def suggest_design_sample_text(self, speaker, chunks):
+                        return ""
+
+                app_module.project_manager = FakeProjectManager()
 
                 voices = asyncio.run(app_module.get_voices())
                 self.assertEqual(len(voices), 1)
@@ -966,6 +1031,7 @@ class SavedVoiceReuseTests(unittest.TestCase):
                 app_module.SCRIPT_PATH = original_script_path
                 app_module.VOICE_CONFIG_PATH = original_voice_config_path
                 app_module.VOICES_PATH = original_voices_path
+                app_module.project_manager = original_pm
 
     def test_get_voices_does_not_infer_contained_name_alias_on_page_load(self):
         with tempfile.TemporaryDirectory() as temp_root:
@@ -1174,6 +1240,20 @@ class SavedVoiceReuseTests(unittest.TestCase):
             original_task_running = app_module._any_project_task_running
             original_pm = app_module.project_manager
             try:
+                voice_config_state = {
+                    "CAT": {
+                        "type": "design",
+                        "ref_audio": "clone_voices/booka_cat.wav",
+                        "ref_text": "cat sample",
+                        "generated_ref_text": "cat generated sample",
+                    },
+                    "DOG": {
+                        "type": "design",
+                        "ref_audio": "clone_voices/bookb_dog.wav",
+                        "ref_text": "dog sample",
+                        "generated_ref_text": "dog generated sample",
+                    },
+                }
                 app_module.ROOT_DIR = temp_root
                 app_module.SCRIPT_PATH = script_path
                 app_module.VOICE_CONFIG_PATH = voice_config_path
@@ -1191,6 +1271,13 @@ class SavedVoiceReuseTests(unittest.TestCase):
 
                     def _normalize_speaker_name(self, value):
                         return (value or "").strip().lower()
+
+                    def _load_voice_config(self):
+                        return json.loads(json.dumps(voice_config_state))
+
+                    def _save_voice_config(self, config):
+                        voice_config_state.clear()
+                        voice_config_state.update(json.loads(json.dumps(config)))
 
                 app_module.project_manager = FakeProjectManager()
 
@@ -1212,8 +1299,7 @@ class SavedVoiceReuseTests(unittest.TestCase):
                 self.assertTrue(os.path.exists(os.path.join(clone_dir, "bookb_dog.wav")))
                 self.assertTrue(os.path.exists(os.path.join(designed_dir, "bookb_dog_design.wav")))
 
-                with open(voice_config_path, "r", encoding="utf-8") as f:
-                    updated_cfg = json.load(f)
+                updated_cfg = voice_config_state
                 self.assertEqual(updated_cfg["CAT"].get("ref_audio"), "")
                 self.assertEqual(updated_cfg["CAT"].get("ref_text"), "")
                 self.assertEqual(updated_cfg["CAT"].get("generated_ref_text"), "")

@@ -52,6 +52,7 @@ from project_core.constants import (
     TRIM_SILENCE_THRESHOLD_DBFS,
     TRIM_MIN_SILENCE_LEN_MS,
     TRIM_KEEP_PADDING_MS,
+    VOICE_AUDIT_LOG_ENABLED_DEFAULT,
 )
 from project_core.chunking import (
     _coerce_bool,
@@ -97,6 +98,7 @@ class ProjectManager(
         self.chunks_path = os.path.join(root_dir, "chunks.json")
         self.chunks_db_path = os.path.join(root_dir, "chunks.sqlite3")
         self.chunks_queue_log_path = os.path.join(root_dir, "chunks.queue.log")
+        self.voice_audit_log_path = os.path.join(root_dir, "voice_state.audit.jsonl")
         self.backups_dir = os.path.join(root_dir, "backups")
         self.chunks_backups_dir = os.path.join(self.backups_dir, "chunks")
         self.chunks_latest_backup_path = os.path.join(self.chunks_backups_dir, "chunks.latest.json")
@@ -123,6 +125,7 @@ class ProjectManager(
         self._chunks_flush_condition = threading.Condition()
         self._transcription_cache_lock = threading.Lock()
         self._transcription_cache = None
+        self.voice_audit_logging_enabled = VOICE_AUDIT_LOG_ENABLED_DEFAULT
         runtime_settings = self._load_chunk_runtime_settings()
         self._postprocess_workers = runtime_settings["saveback_workers"]
         self._chunk_state_flush_interval_s = runtime_settings["chunk_state_flush_ms"] / 1000.0

@@ -400,90 +400,50 @@ class ProjectVoiceMixin:
             voice_config = self._load_voice_config()
             return bool(voice_config)
 
-        def export_voice_config_compat(self, target_path=None):
-            destination = target_path or self.voice_config_path
+        def sync_missing_voice_profiles_from_chunks(self, *, reason="sync_missing_voice_profiles_from_chunks"):
             script_store = getattr(self, "script_store", None)
-            if script_store is not None:
-                return script_store.export_voice_config(destination)
-            self._save_voice_config(self._load_voice_config())
-            return destination
+            if script_store is None:
+                return []
+            existing_config = self._load_voice_config()
+            existing_keys = {self._normalize_speaker_name(name) for name in existing_config.keys()}
+            missing_rows = []
+            for speaker in (script_store.get_voice_summary().get("voices") or []):
+                normalized = self._normalize_speaker_name(speaker)
+                if not normalized or normalized in existing_keys:
+                    continue
+                missing_rows.append({
+                    "speaker": speaker,
+                    "config": self.script_store._default_voice_config(),
+                })
+            if not missing_rows:
+                return []
+            return script_store.upsert_voice_profiles(missing_rows, reason=reason, wait=True)
+
+        def reset_voice_state(self, *, reason="reset_voice_state"):
+            snapshot = {
+                "profiles": {},
+                "narrator_threshold": self.DEFAULT_NARRATOR_THRESHOLD,
+                "narrator_overrides": {},
+                "auto_narrator_aliases": {},
+            }
+            result = self.replace_voice_state_snapshot(snapshot, reason=reason)
+            self.log_voice_audit_event("voice_state_reset", reason=reason)
+            return result
+
+        def export_voice_config_compat(self, target_path=None):
+            return target_path or self.voice_config_path
 
         def export_voice_state_compat(self, target_path=None):
-            destination = target_path or os.path.join(self.root_dir, "state.json")
-            script_store = getattr(self, "script_store", None)
-            if script_store is not None:
-                state = self._load_state()
-                payload = {
-                    "narrator_threshold": self.get_narrator_threshold(),
-                    "narrator_overrides": self.get_narrator_overrides(),
-                    "auto_narrator_aliases": self.get_auto_narrator_aliases(),
-                }
-                state.update(payload)
-                self._save_state(state)
-                return destination
-            state = self._load_state()
-            state["narrator_threshold"] = self.get_narrator_threshold()
-            state["narrator_overrides"] = self.get_narrator_overrides()
-            state["auto_narrator_aliases"] = self.get_auto_narrator_aliases()
-            self._save_state(state)
-            return destination
+            return target_path or os.path.join(self.root_dir, "state.json")
 
         def import_voice_compat(self, voice_config_path=None, state_path=None, replace=False):
-            voice_config_path = voice_config_path or self.voice_config_path
-            state_path = state_path or os.path.join(self.root_dir, "state.json")
-
-            imported_config = {}
-            if os.path.exists(voice_config_path):
-                try:
-                    with open(voice_config_path, "r", encoding="utf-8") as f:
-                        payload = json.load(f)
-                    if isinstance(payload, dict):
-                        imported_config = payload
-                except (OSError, ValueError, json.JSONDecodeError):
-                    imported_config = {}
-
-            imported_state = {}
-            if os.path.exists(state_path):
-                try:
-                    with open(state_path, "r", encoding="utf-8") as f:
-                        payload = json.load(f)
-                    if isinstance(payload, dict):
-                        imported_state = payload
-                except (OSError, ValueError, json.JSONDecodeError):
-                    imported_state = {}
-
-            existing_config = {} if replace else dict(self._load_voice_config() or {})
-            merged_config = dict(existing_config)
-            for speaker, config in imported_config.items():
-                merged_config[speaker] = dict(config or {})
-            self._save_voice_config(merged_config)
-
-            if "narrator_threshold" in imported_state:
-                self.set_narrator_threshold(imported_state.get("narrator_threshold"))
-            if replace and hasattr(self, "script_store") and self.script_store is not None:
-                self.script_store.replace_narrator_overrides([], reason="import_voice_compat_clear_overrides", wait=True)
-                self.script_store.replace_auto_narrator_aliases([], reason="import_voice_compat_clear_auto_aliases", wait=True)
-            if isinstance(imported_state.get("narrator_overrides"), dict):
-                for chapter, voice in imported_state.get("narrator_overrides", {}).items():
-                    self.set_narrator_override(chapter, voice)
-            if isinstance(imported_state.get("auto_narrator_aliases"), dict):
-                if hasattr(self, "script_store") and self.script_store is not None:
-                    self.script_store.replace_auto_narrator_aliases(
-                        [
-                            {"speaker": speaker, "target": target}
-                            for speaker, target in imported_state.get("auto_narrator_aliases", {}).items()
-                        ],
-                        reason="import_voice_compat_auto_aliases",
-                        wait=True,
-                    )
+            return None
 
         def get_narrator_threshold(self):
             script_store = getattr(self, "script_store", None)
             raw = self.DEFAULT_NARRATOR_THRESHOLD
             if script_store is not None:
                 raw = script_store.get_voice_settings().get("narrator_threshold", self.DEFAULT_NARRATOR_THRESHOLD)
-            else:
-                raw = self._load_state().get("narrator_threshold", self.DEFAULT_NARRATOR_THRESHOLD)
             try:
                 value = int(raw)
             except (TypeError, ValueError):
@@ -500,9 +460,7 @@ class ProjectVoiceMixin:
             if script_store is not None:
                 script_store.set_voice_setting("narrator_threshold", parsed, reason="set_narrator_threshold", wait=True)
             else:
-                state = self._load_state()
-                state["narrator_threshold"] = parsed
-                self._save_state(state)
+                raise RuntimeError("Narrator threshold requires the SQLite script store")
             self.refresh_auto_narrator_aliases()
             return parsed
 
@@ -511,7 +469,7 @@ class ProjectVoiceMixin:
             script_store = getattr(self, "script_store", None)
             if script_store is not None:
                 return script_store.get_narrator_overrides()
-            return self._load_state().get("narrator_overrides", {})
+            return {}
 
         def _apply_narrator_override(self, speaker, chapter, narrator_overrides):
             """Return the effective speaker, substituting the chapter narrator override if applicable."""
@@ -527,14 +485,7 @@ class ProjectVoiceMixin:
             if script_store is not None:
                 script_store.set_narrator_override(chapter, voice, reason="set_narrator_override", wait=True)
                 return
-            state = self._load_state()
-            overrides = state.get("narrator_overrides", {})
-            if voice and self._normalize_speaker_name(voice) != self._normalize_speaker_name("NARRATOR"):
-                overrides[chapter] = voice
-            else:
-                overrides.pop(chapter, None)
-            state["narrator_overrides"] = overrides
-            self._save_state(state)
+            raise RuntimeError("Narrator overrides require the SQLite script store")
 
         @staticmethod
         def _count_name_mentions_in_text(text, name):
@@ -712,14 +663,7 @@ class ProjectVoiceMixin:
                 "chapter_assignments": chapter_assignments,
             }
 
-        def ensure_chapter_narrator_voice_can_narrate(self, chapter):
-            """Persist chapter narrator overrides back into voice state.
-
-            The selected narrator for a chapter is treated as the stronger source
-            of truth. If that speaker is no longer marked as `narrates`, repair
-            the persisted voice profile so editor loads cannot silently degrade a
-            valid chapter narrator override back toward the default narrator.
-            """
+        def get_chapter_narrator_voice_repair(self, chapter):
             normalized_chapter = str(chapter or "").strip()
             if not normalized_chapter:
                 return None
@@ -739,30 +683,52 @@ class ProjectVoiceMixin:
 
             current_profile = dict(voice_config.get(canonical_voice) or {})
             if bool(current_profile.get("narrates")):
-                return canonical_voice
+                return None
+
+            return {
+                "chapter": normalized_chapter,
+                "requested_voice": narrator_voice,
+                "canonical_voice": canonical_voice,
+                "previous_narrates": bool(current_profile.get("narrates")),
+            }
+
+        def ensure_chapter_narrator_voice_can_narrate(self, chapter, *, reason="chapter_narrator_repair", repair=None):
+            """Repair narrator eligibility for the chapter override when needed."""
+            repair = repair if isinstance(repair, dict) else self.get_chapter_narrator_voice_repair(chapter)
+            if not repair:
+                return None
 
             script_store = getattr(self, "script_store", None)
             if script_store is not None:
                 script_store.patch_voice_profile(
-                    canonical_voice,
+                    repair["canonical_voice"],
                     fields={"narrates": True},
-                    reason="ensure_chapter_narrator_voice_can_narrate",
+                    reason=reason,
                     wait=True,
                 )
             else:
+                voice_config = self._load_voice_config()
+                current_profile = dict(voice_config.get(repair["canonical_voice"]) or {})
                 current_profile["narrates"] = True
-                voice_config[canonical_voice] = current_profile
+                voice_config[repair["canonical_voice"]] = current_profile
                 self._save_voice_config(voice_config)
-            return canonical_voice
+            self.log_voice_audit_event(
+                "chapter_narrator_narrates_repair",
+                reason=reason,
+                chapter=repair["chapter"],
+                requested_voice=repair["requested_voice"],
+                canonical_voice=repair["canonical_voice"],
+                previous_narrates=repair["previous_narrates"],
+                new_narrates=True,
+            )
+            return repair["canonical_voice"]
 
         def get_auto_narrator_aliases(self):
             script_store = getattr(self, "script_store", None)
             if script_store is not None:
                 aliases = script_store.get_auto_narrator_aliases()
                 return aliases if isinstance(aliases, dict) else {}
-            state = self._load_state()
-            aliases = state.get("auto_narrator_aliases", {})
-            return aliases if isinstance(aliases, dict) else {}
+            return {}
 
         def compute_auto_narrator_aliases(
             self,
@@ -833,9 +799,7 @@ class ProjectVoiceMixin:
                     wait=True,
                 )
             else:
-                state = self._load_state()
-                state["auto_narrator_aliases"] = aliases
-                self._save_state(state)
+                raise RuntimeError("Auto narrator aliases require the SQLite script store")
             return aliases
 
         @staticmethod

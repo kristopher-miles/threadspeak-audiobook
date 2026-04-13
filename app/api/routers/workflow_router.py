@@ -232,16 +232,9 @@ async def start_extract_temperament(background_tasks: BackgroundTasks):
 async def get_script_info():
     """Return a lightweight summary of the current script state."""
     script_path = os.path.join(ROOT_DIR, "annotated_script.json")
-    if str(getattr(project_manager, "root_dir", "") or "").strip() == str(ROOT_DIR or "").strip():
+    if hasattr(project_manager, "_load_voice_config"):
         try:
             voice_config = project_manager._load_voice_config()
-        except Exception:
-            voice_config = {}
-    elif os.path.exists(VOICE_CONFIG_PATH):
-        try:
-            with open(VOICE_CONFIG_PATH, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-            voice_config = payload if isinstance(payload, dict) else {}
         except Exception:
             voice_config = {}
     else:
@@ -288,14 +281,12 @@ async def get_script_info():
 def _run_create_script_task_with_new_mode_state(
     run_id: str,
     paragraphs_path: str,
-    voice_config_path: str,
     script_output_path: str,
     chunks_output_path: str,
 ):
     _run_create_script_task(
         run_id,
         paragraphs_path,
-        voice_config_path,
         script_output_path,
         chunks_output_path,
     )
@@ -405,8 +396,6 @@ async def reset_new_mode(request: ResetNewModeRequest = ResetNewModeRequest()):
         os.path.join(ROOT_DIR, "annotated_script.json"),
         CHUNKS_PATH,
     ]
-    if not request.preserve_voices:
-        files_to_remove.append(VOICE_CONFIG_PATH)
 
     for path in files_to_remove:
         if os.path.exists(path):
@@ -415,13 +404,13 @@ async def reset_new_mode(request: ResetNewModeRequest = ResetNewModeRequest()):
 
     if not request.preserve_voices:
         try:
-            project_manager._save_voice_config({})
-            project_manager.set_narrator_threshold(project_manager.DEFAULT_NARRATOR_THRESHOLD)
-            if getattr(project_manager, "script_store", None) is not None:
-                project_manager.script_store.replace_narrator_overrides([], reason="reset_new_mode", wait=True)
-                project_manager.script_store.replace_auto_narrator_aliases([], reason="reset_new_mode", wait=True)
+            if hasattr(project_manager, "reset_voice_state"):
+                project_manager.reset_voice_state(reason="reset_new_mode")
         except Exception:
             pass
+        if os.path.exists(VOICE_CONFIG_PATH):
+            os.remove(VOICE_CONFIG_PATH)
+            removed.append(os.path.basename(VOICE_CONFIG_PATH))
 
     _clear_directory_contents(VOICELINES_DIR)
     removed.append("voicelines/*")
@@ -450,7 +439,6 @@ async def start_create_script(background_tasks: BackgroundTasks):
     _ensure_task_not_running("create_script", "Script creation is already running.")
 
     paragraphs_path    = os.path.join(ROOT_DIR, "paragraphs.json")
-    voice_config_path  = VOICE_CONFIG_PATH
     script_output_path = os.path.join(ROOT_DIR, "annotated_script.json")
     chunks_output_path = CHUNKS_PATH
 
@@ -470,15 +458,10 @@ async def start_create_script(background_tasks: BackgroundTasks):
             detail="Paragraph data is empty or corrupt. Re-run 'Process Paragraphs'.",
         )
 
-    if hasattr(project_manager, "export_voice_config_compat"):
-        project_manager.export_voice_config_compat(voice_config_path)
-    if hasattr(project_manager, "export_voice_state_compat"):
-        project_manager.export_voice_state_compat(os.path.join(ROOT_DIR, "state.json"))
-
     run_id = _start_task_run("create_script")
     background_tasks.add_task(
         _run_create_script_task_with_new_mode_state, run_id,
-        paragraphs_path, voice_config_path, script_output_path, chunks_output_path,
+        paragraphs_path, script_output_path, chunks_output_path,
     )
     return {"status": "started", "run_id": run_id}
 

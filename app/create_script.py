@@ -4,11 +4,9 @@ Create the audiobook script from processed paragraph data.
 
 Reads paragraphs.json (after dialogue assignment and temperament extraction)
 and produces:
-  1. voice_config.json  — one entry per speaker + NARRATOR (new speakers only,
-                          existing entries are never overwritten), alphabetically.
-  2. annotated_script.json — one entry per sentence-level fragment, with speaker
+  1. annotated_script.json — one entry per sentence-level fragment, with speaker
                              and instruct derived from the paragraph data.
-  3. chunks.json        — written immediately after annotated_script.json so its
+  2. chunks.json        — written immediately after annotated_script.json so its
                           mtime is newer, preventing sync_chunks_from_script_if_stale
                           from re-merging the carefully split lines via group_into_chunks.
                           Each script entry maps 1:1 to exactly one chunk.
@@ -16,7 +14,7 @@ and produces:
 No LLM calls are made.  This is a pure deterministic transformation.
 
 CLI usage:
-    create_script.py <paragraphs_path> <voice_config_path> <script_output_path> <chunks_output_path>
+    create_script.py <paragraphs_path> <script_output_path> <chunks_output_path>
                      [--max-length N]
 
 --max-length N  Max characters per audio chunk (default 100).
@@ -299,7 +297,6 @@ def main():
         description="Build annotated_script.json and chunks.json from paragraphs.json."
     )
     parser.add_argument("paragraphs_path")
-    parser.add_argument("voice_config_path")
     parser.add_argument("script_output_path")
     parser.add_argument("chunks_output_path")
     parser.add_argument(
@@ -309,7 +306,6 @@ def main():
     args = parser.parse_args()
 
     paragraphs_path    = args.paragraphs_path
-    voice_config_path  = args.voice_config_path
     script_output_path = args.script_output_path
     chunks_output_path = args.chunks_output_path
     max_length         = args.max_length
@@ -327,15 +323,6 @@ def main():
         _log("ERROR: paragraphs.json contains no paragraphs.")
         sys.exit(1)
 
-    # ── Load existing voice config (create if absent) ──────────────────────────
-    voice_config: dict = {}
-    if os.path.exists(voice_config_path):
-        try:
-            with open(voice_config_path, "r", encoding="utf-8") as f:
-                voice_config = json.load(f)
-        except Exception as e:
-            _log(f"WARNING: Could not read voice_config.json ({e}). Starting fresh.")
-
     # ── Collect all speakers and ensure NARRATOR is included ───────────────────
     raw_speakers: set[str] = set()
     for p in paragraphs:
@@ -344,23 +331,7 @@ def main():
                 if s and s != "NARRATOR":
                     raw_speakers.add(s.strip())
     raw_speakers.add("NARRATOR")
-
-    all_voices = sorted(raw_speakers)  # alphabetical
-
-    new_count = 0
-    for name in all_voices:
-        if name not in voice_config:
-            voice_config[name] = {
-                "type": "design",
-                "description": "",
-                "ref_text": "",
-                "alias": "",
-                "seed": "-1",
-            }
-            new_count += 1
-
-    _atomic_write(voice_config_path, voice_config)
-    _log(f"Voices: created {new_count} new entries ({len(voice_config)} total).")
+    _log(f"Voices discovered in script: {len(raw_speakers)}")
 
     # ── Group paragraphs by chapter (preserving order) ─────────────────────────
     chapters: list[tuple[str, list[dict]]] = []

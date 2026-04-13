@@ -219,27 +219,21 @@ def _merge_voice_config_patch(config_items: Dict[str, VoiceConfigItem] | None) -
 
 def _load_runtime_voice_config() -> Dict[str, dict]:
     load_fn = getattr(project_manager, "_load_voice_config", None)
-    manager_root = str(getattr(project_manager, "root_dir", "") or "").strip()
-    if callable(load_fn) and (not manager_root or _can_use_project_chunk_store()):
-        return load_fn()
-    if os.path.exists(VOICE_CONFIG_PATH):
+    if callable(load_fn):
         try:
-            with open(VOICE_CONFIG_PATH, "r", encoding="utf-8") as f:
-                payload = json.load(f)
+            payload = load_fn()
             return payload if isinstance(payload, dict) else {}
-        except (OSError, ValueError, json.JSONDecodeError):
+        except Exception:
             return {}
     return {}
 
 
 def _save_runtime_voice_config(config: Dict[str, dict]):
     save_fn = getattr(project_manager, "_save_voice_config", None)
-    manager_root = str(getattr(project_manager, "root_dir", "") or "").strip()
-    if callable(save_fn) and (not manager_root or _can_use_project_chunk_store()):
+    if callable(save_fn):
         save_fn(config)
         return
-    with open(VOICE_CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+    raise RuntimeError("Voice config requires the project SQLite store")
 
 
 def _voice_config_is_blank_for_reuse(config: Dict[str, object] | None) -> bool:
@@ -289,8 +283,6 @@ async def get_voices():
     if not voice_rows:
         return []
 
-    updated_runtime_voice_config = _canonicalize_voice_config_keys(runtime_voice_config)
-    runtime_config_changed = False
     for voice in voice_rows:
         voice_name = str((voice or {}).get("name") or "").strip()
         if not voice_name:
@@ -309,11 +301,6 @@ async def get_voices():
             "description": reusable_match.get("description") or config.get("description"),
         })
         voice["config"] = config
-        updated_runtime_voice_config[voice_name] = config
-        runtime_config_changed = True
-
-    if runtime_config_changed:
-        _save_runtime_voice_config(updated_runtime_voice_config)
 
     # Count paragraphs per speaker from paragraphs.json (new pipeline only)
     para_counts_by_norm: dict[str, int] = {}

@@ -448,8 +448,7 @@ class ProjectArchiveHelpersTests(unittest.TestCase):
             os.makedirs(scripts_dir, exist_ok=True)
             with open(os.path.join(scripts_dir, "demo.json"), "w", encoding="utf-8") as f:
                 json.dump({"entries": [], "dictionary": []}, f)
-            with open(os.path.join(scripts_dir, "demo.voice_config.json"), "w", encoding="utf-8") as f:
-                json.dump({"Narrator": {}}, f)
+            _write_sqlite_db(os.path.join(scripts_dir, "demo.chunks.sqlite3"))
             with open(os.path.join(temp_root, "chunks.json"), "w", encoding="utf-8") as f:
                 json.dump([{"id": 0}], f)
             with open(os.path.join(temp_root, "state.json"), "w", encoding="utf-8") as f:
@@ -511,6 +510,7 @@ class ProjectArchiveHelpersTests(unittest.TestCase):
             os.makedirs(scripts_dir, exist_ok=True)
             with open(os.path.join(scripts_dir, "demo.json"), "w", encoding="utf-8") as f:
                 json.dump({"entries": [], "dictionary": []}, f)
+            _write_sqlite_db(os.path.join(scripts_dir, "demo.chunks.sqlite3"))
             with open(os.path.join(temp_root, "state.json"), "w", encoding="utf-8") as f:
                 json.dump({"render_prep_complete": True}, f)
 

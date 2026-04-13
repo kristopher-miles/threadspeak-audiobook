@@ -85,12 +85,11 @@ DATASET_BUILDER_DIR = os.path.join(ROOT_DIR, "dataset_builder")
 DESIGNED_VOICES_MANIFEST = os.path.join(DESIGNED_VOICES_DIR, "manifest.json")
 CLONE_VOICES_MANIFEST = os.path.join(CLONE_VOICES_DIR, "manifest.json")
 ALLOWED_AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg"}
-PROJECT_ARCHIVE_VERSION = 3
+PROJECT_ARCHIVE_VERSION = 4
 PROJECT_ARCHIVE_MANIFEST_NAME = "project_archive_manifest.json"
 PROJECT_ARCHIVE_ALLOWED_FILES = {
     "annotated_script.json",
     "paragraphs.json",
-    "voice_config.json",
     "voices.json",
     "chunks.json",
     "chunks.sqlite3",
@@ -491,11 +490,15 @@ def _save_script_source_companion(name: str):
     return companion_path
 
 
+def _saved_script_db_companion_path(name: str):
+    return os.path.join(SCRIPTS_DIR, f"{name}.chunks.sqlite3")
+
+
 def _delete_saved_script_artifacts(name: str):
     base = os.path.join(SCRIPTS_DIR, f"{name}.json")
     if os.path.exists(base):
         os.remove(base)
-    for suffix in (".voice_config.json", ".paragraphs.json"):
+    for suffix in (".chunks.sqlite3", ".paragraphs.json", ".voice_config.json"):
         companion = os.path.join(SCRIPTS_DIR, f"{name}{suffix}")
         if os.path.exists(companion):
             os.remove(companion)
@@ -522,10 +525,11 @@ def _save_current_script_snapshot(name: str, *, purge_existing: bool = False):
         _delete_saved_script_artifacts(safe_name)
 
     shutil.copy2(SCRIPT_PATH, dest)
-
-    _ensure_voice_compat_exports()
-    if os.path.exists(VOICE_CONFIG_PATH):
-        shutil.copy2(VOICE_CONFIG_PATH, os.path.join(SCRIPTS_DIR, f"{safe_name}.voice_config.json"))
+    db_companion = _saved_script_db_companion_path(safe_name)
+    db_path = getattr(project_manager, "chunks_db_path", os.path.join(ROOT_DIR, "chunks.sqlite3"))
+    if not os.path.exists(db_path):
+        raise FileNotFoundError("No SQLite project state to save alongside the script.")
+    _copy_sqlite_database_snapshot(db_path, db_companion)
 
     paragraphs_path = os.path.join(ROOT_DIR, "paragraphs.json")
     if os.path.exists(paragraphs_path):
@@ -535,6 +539,12 @@ def _save_current_script_snapshot(name: str, *, purge_existing: bool = False):
     state = _load_project_state_payload()
     state["loaded_script_name"] = safe_name
     _save_project_state_payload(state)
+    if hasattr(project_manager, "log_voice_audit_event"):
+        project_manager.log_voice_audit_event(
+            "script_snapshot_write",
+            reason="save_script_snapshot",
+            snapshot_name=safe_name,
+        )
     return {"name": safe_name, "overwrote": existed}
 
 
@@ -1525,11 +1535,18 @@ def _load_project_state_payload():
             payload = json.load(f)
     except (OSError, json.JSONDecodeError, ValueError):
         return {}
-    return payload if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        return {}
+    for key in ("narrator_threshold", "narrator_overrides", "auto_narrator_aliases"):
+        payload.pop(key, None)
+    return payload
 
 
 def _save_project_state_payload(state):
-    _atomic_json_write(os.path.join(ROOT_DIR, "state.json"), state)
+    payload = dict(state or {})
+    for key in ("narrator_threshold", "narrator_overrides", "auto_narrator_aliases"):
+        payload.pop(key, None)
+    _atomic_json_write(os.path.join(ROOT_DIR, "state.json"), payload)
 
 
 def _load_processing_stage_markers():
@@ -2054,10 +2071,7 @@ def _archive_state_with_relative_paths():
 
 
 def _ensure_voice_compat_exports():
-    if hasattr(project_manager, "export_voice_config_compat"):
-        project_manager.export_voice_config_compat(VOICE_CONFIG_PATH)
-    if hasattr(project_manager, "export_voice_state_compat"):
-        project_manager.export_voice_state_compat(os.path.join(ROOT_DIR, "state.json"))
+    return None
 
 
 def _project_archive_metadata():
@@ -2085,9 +2099,9 @@ def _project_archive_metadata():
         try:
             has_voice_config = bool(has_voice_fn())
         except Exception:
-            has_voice_config = os.path.exists(VOICE_CONFIG_PATH)
+            has_voice_config = False
     else:
-        has_voice_config = os.path.exists(VOICE_CONFIG_PATH)
+        has_voice_config = False
 
     return {
         "kind": "project",
@@ -2181,19 +2195,21 @@ def _project_archive_entries():
                 if filename:
                     voice_assets.add(f"{os.path.dirname(relative_manifest).replace(os.sep, '/')}/{filename}")
 
-    if os.path.exists(VOICE_CONFIG_PATH):
+    voice_config = {}
+    load_voice_config = getattr(project_manager, "_load_voice_config", None)
+    if callable(load_voice_config):
         try:
-            with open(VOICE_CONFIG_PATH, "r", encoding="utf-8") as f:
-                voice_config = json.load(f)
-        except (json.JSONDecodeError, ValueError, OSError):
+            payload = load_voice_config()
+            if isinstance(payload, dict):
+                voice_config = payload
+        except Exception:
             voice_config = {}
-        if isinstance(voice_config, dict):
-            for config in voice_config.values():
-                if not isinstance(config, dict):
-                    continue
-                ref_audio = (config.get("ref_audio") or "").strip()
-                if ref_audio:
-                    voice_assets.add(ref_audio)
+    for config in voice_config.values():
+        if not isinstance(config, dict):
+            continue
+        ref_audio = (config.get("ref_audio") or "").strip()
+        if ref_audio:
+            voice_assets.add(ref_audio)
 
     for relative_path in sorted(voice_assets):
         add_relative_path(relative_path)
@@ -2256,7 +2272,6 @@ def _project_has_generated_audio() -> bool:
 
 
 def _write_project_archive(zip_path: str):
-    _ensure_voice_compat_exports()
     sqlite_snapshot = None
     try:
         entries = dict(_project_archive_entries())
@@ -2291,6 +2306,12 @@ def _write_project_archive(zip_path: str):
             os.remove(temp_zip_path)
         if sqlite_snapshot is not None:
             shutil.rmtree(sqlite_snapshot[0], ignore_errors=True)
+    if hasattr(project_manager, "log_voice_audit_event"):
+        project_manager.log_voice_audit_event(
+            "project_archive_write",
+            reason="write_project_archive",
+            archive_path=zip_path,
+        )
     return {"entries": manifest["entries"], "path": zip_path}
 
 
@@ -2380,6 +2401,8 @@ def _restore_project_archive(extracted_dir: str, *, loaded_project_name: str = "
             input_file_path = (state.get("input_file_path") or "").strip()
             if input_file_path:
                 state["input_file_path"] = os.path.join(ROOT_DIR, input_file_path)
+            for key in ("narrator_threshold", "narrator_overrides", "auto_narrator_aliases"):
+                state.pop(key, None)
             with open(target_path, "w", encoding="utf-8") as f:
                 json.dump(state, f, indent=2, ensure_ascii=False)
         else:
@@ -2411,15 +2434,12 @@ def _restore_project_archive(extracted_dir: str, *, loaded_project_name: str = "
 
     if hasattr(project_manager, "reload_script_store"):
         project_manager.reload_script_store()
-    if hasattr(project_manager, "import_voice_compat"):
-        try:
-            project_manager.import_voice_compat(
-                voice_config_path=VOICE_CONFIG_PATH,
-                state_path=os.path.join(ROOT_DIR, "state.json"),
-                replace=False,
-            )
-        except Exception as exc:
-            logger.warning("Failed to import archived voice compatibility state after restore: %s", exc)
+    if hasattr(project_manager, "log_voice_audit_event"):
+        project_manager.log_voice_audit_event(
+            "project_archive_restore",
+            reason="restore_project_archive",
+            loaded_project_name=loaded_project_name,
+        )
     _reset_runtime_state_after_project_load()
 
 
@@ -3799,7 +3819,7 @@ def _run_extract_temperament_task(run_id: str, paragraphs_path: str, config_path
     )
 
 
-def _run_create_script_task(run_id: str, paragraphs_path: str, voice_config_path: str,
+def _run_create_script_task(run_id: str, paragraphs_path: str,
                             script_output_path: str, chunks_output_path: str):
     _ensure_voice_compat_exports()
     # ── Error correction: retry dialogue-error paragraphs before building script ──
@@ -3833,15 +3853,22 @@ def _run_create_script_task(run_id: str, paragraphs_path: str, voice_config_path
     # ── Build the script ──────────────────────────────────────────────────────
     success = run_process(
         [sys.executable, "-u", "create_script.py",
-         paragraphs_path, voice_config_path, script_output_path, chunks_output_path,
+         paragraphs_path, script_output_path, chunks_output_path,
          "--max-length", str(script_max_length)],
         "create_script",
         run_id,
     )
     if success:
         project_manager.reload_script_store()
-        if hasattr(project_manager, "import_voice_compat"):
-            project_manager.import_voice_compat(voice_config_path, os.path.join(ROOT_DIR, "state.json"))
+        if hasattr(project_manager, "sync_missing_voice_profiles_from_chunks"):
+            project_manager.sync_missing_voice_profiles_from_chunks(
+                reason="create_script_seed_voice_profiles",
+            )
+        if hasattr(project_manager, "log_voice_audit_event"):
+            project_manager.log_voice_audit_event(
+                "create_script_voice_seed_complete",
+                reason="create_script_seed_voice_profiles",
+            )
 
 
 def _load_script_max_length() -> int:
@@ -4412,10 +4439,14 @@ def _run_new_mode_workflow_stage(stage_name: str):
             script_max_length = _load_script_max_length()
             success = run_process(
                 [sys.executable, "-u", "create_script.py",
-                 paragraphs_path, VOICE_CONFIG_PATH, script_path, CHUNKS_PATH,
+                 paragraphs_path, script_path, CHUNKS_PATH,
                  "--max-length", str(script_max_length)],
                 stage_name, run_id, relay_fn=relay,
             )
+            if success and hasattr(project_manager, "sync_missing_voice_profiles_from_chunks"):
+                project_manager.sync_missing_voice_profiles_from_chunks(
+                    reason="new_mode_create_script_seed_voice_profiles",
+                )
         elif stage_name == "proofread":
             success = run_process(
                 [sys.executable, "-u", "proofread_runner.py", ROOT_DIR, "0.8", "__ALL__"],

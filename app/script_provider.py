@@ -6,9 +6,11 @@ import sqlite3
 import threading
 import time
 import uuid
+import hashlib
 from abc import ABC, abstractmethod
 
 from project_core.chunking import script_entries_to_chunks
+from project_core.constants import VOICE_AUDIT_LOG_ENABLED_DEFAULT
 from script_store import load_script_document
 
 
@@ -196,6 +198,14 @@ class ScriptStore(ABC):
     def export_voice_state(self, target_path):
         raise NotImplementedError
 
+    @abstractmethod
+    def load_voice_state_snapshot(self):
+        raise NotImplementedError
+
+    @abstractmethod
+    def replace_voice_state_snapshot(self, snapshot, *, reason="replace_voice_state_snapshot", wait=True):
+        raise NotImplementedError
+
 
 class SQLiteScriptStore(ScriptStore):
     _RESERVED_FIELDS = {
@@ -236,6 +246,8 @@ class SQLiteScriptStore(ScriptStore):
         self.voice_config_path = voice_config_path or os.path.join(root_dir, "voice_config.json")
         self.state_path = state_path or os.path.join(root_dir, "state.json")
         self.archive_dir = archive_dir or os.path.join(root_dir, "backups", "chunks")
+        self.voice_audit_log_path = os.path.join(root_dir, "voice_state.audit.jsonl")
+        self.voice_audit_logging_enabled = VOICE_AUDIT_LOG_ENABLED_DEFAULT
         self._command_queue = queue.Queue()
         self._writer_thread = None
         self._writer_stop = threading.Event()
@@ -834,22 +846,29 @@ class SQLiteScriptStore(ScriptStore):
         return target_path
 
     def export_voice_state(self, target_path):
-        settings = self.get_voice_settings()
-        try:
-            narrator_threshold = int(settings.get("narrator_threshold", "10") or 10)
-        except (TypeError, ValueError):
-            narrator_threshold = 10
-        payload = {
-            "narrator_threshold": narrator_threshold,
-            "narrator_overrides": self.get_narrator_overrides(),
-            "auto_narrator_aliases": self.get_auto_narrator_aliases(),
-        }
+        payload = self.load_voice_state_snapshot()
         os.makedirs(os.path.dirname(target_path) or ".", exist_ok=True)
         tmp_path = f"{target_path}.tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
         os.replace(tmp_path, target_path)
         return target_path
+
+    def load_voice_state_snapshot(self):
+        with self._connect() as conn:
+            snapshot = self._load_voice_state_snapshot_tx(conn)
+        return snapshot
+
+    def replace_voice_state_snapshot(self, snapshot, *, reason="replace_voice_state_snapshot", wait=True):
+        payload = dict(snapshot or {})
+        return self._submit_command(
+            "replace_voice_state_snapshot",
+            {
+                "snapshot": payload,
+                "reason": reason,
+            },
+            wait=wait,
+        )
 
     def export_chunks(self, target_path):
         chunks = self.load_chunks()
@@ -1011,54 +1030,15 @@ class SQLiteScriptStore(ScriptStore):
         with self._connect() as conn:
             voice_profile_count = int(conn.execute("SELECT COUNT(*) AS count FROM voice_profiles").fetchone()["count"] or 0)
             settings_count = int(conn.execute("SELECT COUNT(*) AS count FROM voice_settings").fetchone()["count"] or 0)
-            override_count = int(conn.execute("SELECT COUNT(*) AS count FROM chapter_narrator_overrides").fetchone()["count"] or 0)
-            auto_alias_count = int(conn.execute("SELECT COUNT(*) AS count FROM voice_auto_aliases").fetchone()["count"] or 0)
-
-        legacy_voice_config = self._load_legacy_voice_config() if voice_profile_count <= 0 else {}
-        legacy_state = self._load_legacy_voice_state() if (settings_count <= 0 or override_count <= 0 or auto_alias_count <= 0) else {}
+            current_revision = self._get_voice_state_revision(conn)
 
         with self._connect() as conn:
             with conn:
-                if voice_profile_count <= 0 and legacy_voice_config:
-                    self._replace_voice_profiles_tx(
-                        conn,
-                        [
-                            self._normalize_voice_profile_row({"speaker": speaker, "config": config})
-                            for speaker, config in legacy_voice_config.items()
-                        ],
-                    )
-
                 if settings_count <= 0:
-                    narrator_threshold = legacy_state.get("narrator_threshold", 10)
                     conn.execute(
                         "INSERT OR REPLACE INTO voice_settings(key, value) VALUES(?, ?)",
-                        ("narrator_threshold", str(int(narrator_threshold or 0))),
+                        ("narrator_threshold", "10"),
                     )
-
-                if override_count <= 0 and isinstance(legacy_state.get("narrator_overrides"), dict):
-                    rows = [
-                        {
-                            "chapter": str(chapter or "").strip(),
-                            "voice_key": self._speaker_key(voice),
-                            "voice_name": self._speaker_display_name(voice),
-                        }
-                        for chapter, voice in legacy_state.get("narrator_overrides", {}).items()
-                        if str(chapter or "").strip()
-                    ]
-                    self._replace_narrator_overrides_tx(conn, rows)
-
-                if auto_alias_count <= 0 and isinstance(legacy_state.get("auto_narrator_aliases"), dict):
-                    rows = [
-                        {
-                            "speaker_key": self._speaker_key(speaker),
-                            "speaker_name": self._speaker_display_name(speaker),
-                            "target_key": self._speaker_key(target),
-                            "target_name": self._speaker_display_name(target),
-                        }
-                        for speaker, target in legacy_state.get("auto_narrator_aliases", {}).items()
-                        if self._speaker_key(speaker) and self._speaker_key(target)
-                    ]
-                    self._replace_auto_narrator_aliases_tx(conn, rows)
 
                 seeded_rows = []
                 if int(conn.execute("SELECT COUNT(*) AS count FROM voice_profiles").fetchone()["count"] or 0) <= 0:
@@ -1068,31 +1048,12 @@ class SQLiteScriptStore(ScriptStore):
                     ]
                     self._replace_voice_profiles_tx(conn, seeded_rows)
 
-                if legacy_voice_config or legacy_state or seeded_rows:
+                if current_revision <= 0 or seeded_rows:
+                    self._bump_voice_state_revision_tx(conn)
                     conn.execute(
                         "INSERT OR REPLACE INTO metadata(key, value) VALUES('last_voice_bootstrap_at', ?)",
                         (str(time.time()),),
                     )
-
-    def _load_legacy_voice_config(self):
-        if not os.path.exists(self.voice_config_path):
-            return {}
-        try:
-            with open(self.voice_config_path, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-        except (OSError, ValueError, json.JSONDecodeError):
-            return {}
-        return payload if isinstance(payload, dict) else {}
-
-    def _load_legacy_voice_state(self):
-        if not os.path.exists(self.state_path):
-            return {}
-        try:
-            with open(self.state_path, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-        except (OSError, ValueError, json.JSONDecodeError):
-            return {}
-        return payload if isinstance(payload, dict) else {}
 
     def _submit_command(self, name, payload, *, wait, timeout=None):
         event = threading.Event() if wait else None
@@ -1154,31 +1115,51 @@ class SQLiteScriptStore(ScriptStore):
         if name == "delete_chapter":
             return self._delete_chapter_tx(conn, payload.get("chapter"))
         if name == "replace_voice_profiles":
-            return self._replace_voice_profiles_tx(conn, payload.get("rows") or [])
+            result = self._replace_voice_profiles_tx(conn, payload.get("rows") or [])
+            self._audit_voice_state_write(conn, name, payload)
+            return result
         if name == "upsert_voice_profiles":
-            return self._upsert_voice_profiles_tx(conn, payload.get("rows") or [])
+            result = self._upsert_voice_profiles_tx(conn, payload.get("rows") or [])
+            self._audit_voice_state_write(conn, name, payload)
+            return result
         if name == "patch_voice_profile":
-            return self._patch_voice_profile_tx(
+            result = self._patch_voice_profile_tx(
                 conn,
                 payload.get("speaker_key"),
                 payload.get("display_name"),
                 payload.get("fields") or {},
                 payload.get("clear_fields") or (),
             )
+            self._audit_voice_state_write(conn, name, payload)
+            return result
         if name == "set_voice_setting":
-            return self._set_voice_setting_tx(conn, payload.get("key"), payload.get("value"))
+            result = self._set_voice_setting_tx(conn, payload.get("key"), payload.get("value"))
+            self._audit_voice_state_write(conn, name, payload)
+            return result
         if name == "set_narrator_override":
-            return self._set_narrator_override_tx(conn, payload.get("chapter"), payload.get("voice_key"), payload.get("voice_name"))
+            result = self._set_narrator_override_tx(conn, payload.get("chapter"), payload.get("voice_key"), payload.get("voice_name"))
+            self._audit_voice_state_write(conn, name, payload)
+            return result
         if name == "replace_narrator_overrides":
-            return self._replace_narrator_overrides_tx(conn, payload.get("rows") or [])
+            result = self._replace_narrator_overrides_tx(conn, payload.get("rows") or [])
+            self._audit_voice_state_write(conn, name, payload)
+            return result
         if name == "replace_auto_narrator_aliases":
-            return self._replace_auto_narrator_aliases_tx(conn, payload.get("rows") or [])
+            result = self._replace_auto_narrator_aliases_tx(conn, payload.get("rows") or [])
+            self._audit_voice_state_write(conn, name, payload)
+            return result
         if name == "refresh_auto_narrator_aliases_from_chunks":
-            return self._refresh_auto_narrator_aliases_from_chunks_tx(
+            result = self._refresh_auto_narrator_aliases_from_chunks_tx(
                 conn,
                 int(payload.get("narrator_threshold") or 0),
                 payload.get("narrator_name") or "",
             )
+            self._audit_voice_state_write(conn, name, payload)
+            return result
+        if name == "replace_voice_state_snapshot":
+            result = self._replace_voice_state_snapshot_tx(conn, payload.get("snapshot") or {})
+            self._audit_voice_state_write(conn, name, payload)
+            return result
         if name == "barrier":
             return True
         raise ValueError(f"Unsupported script store command: {name}")
@@ -1529,6 +1510,7 @@ class SQLiteScriptStore(ScriptStore):
                     """,
                     self._voice_profile_to_params(row),
                 )
+            self._bump_voice_state_revision_tx(conn)
             conn.execute(
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('last_write_at', ?)",
                 (str(time.time()),),
@@ -1569,6 +1551,7 @@ class SQLiteScriptStore(ScriptStore):
                 )
                 updated.append(row)
             if updated:
+                self._bump_voice_state_revision_tx(conn)
                 conn.execute(
                     "INSERT OR REPLACE INTO metadata(key, value) VALUES('last_write_at', ?)",
                     (str(time.time()),),
@@ -1622,6 +1605,7 @@ class SQLiteScriptStore(ScriptStore):
                 """,
                 self._voice_profile_to_params(normalized),
             )
+            self._bump_voice_state_revision_tx(conn)
             conn.execute(
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('last_write_at', ?)",
                 (str(time.time()),),
@@ -1638,6 +1622,7 @@ class SQLiteScriptStore(ScriptStore):
                 "INSERT OR REPLACE INTO voice_settings(key, value) VALUES(?, ?)",
                 (normalized_key, normalized_value),
             )
+            self._bump_voice_state_revision_tx(conn)
             conn.execute(
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('last_write_at', ?)",
                 (str(time.time()),),
@@ -1659,6 +1644,7 @@ class SQLiteScriptStore(ScriptStore):
                 )
             else:
                 conn.execute("DELETE FROM chapter_narrator_overrides WHERE chapter = ?", (normalized_chapter,))
+            self._bump_voice_state_revision_tx(conn)
             conn.execute(
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('last_write_at', ?)",
                 (str(time.time()),),
@@ -1681,6 +1667,7 @@ class SQLiteScriptStore(ScriptStore):
                         self._speaker_display_name(row.get("voice_name")),
                     ),
                 )
+            self._bump_voice_state_revision_tx(conn)
             conn.execute(
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('last_write_at', ?)",
                 (str(time.time()),),
@@ -1704,11 +1691,95 @@ class SQLiteScriptStore(ScriptStore):
                         self._speaker_display_name(row.get("target_name")),
                     ),
                 )
+            self._bump_voice_state_revision_tx(conn)
             conn.execute(
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('last_write_at', ?)",
                 (str(time.time()),),
             )
         return len(normalized)
+
+    def _replace_voice_state_snapshot_tx(self, conn, snapshot):
+        payload = dict(snapshot or {})
+        profiles = payload.get("profiles") or {}
+        narrator_threshold = payload.get("narrator_threshold", 10)
+        narrator_overrides = payload.get("narrator_overrides") or {}
+        auto_aliases = payload.get("auto_narrator_aliases") or {}
+        profile_rows = self._dedupe_voice_profile_rows(
+            [
+                {"speaker": speaker, "config": config}
+                for speaker, config in dict(profiles).items()
+            ]
+        )
+        override_rows = [
+            {
+                "chapter": str(chapter or "").strip(),
+                "voice_key": self._speaker_key(voice),
+                "voice_name": self._speaker_display_name(voice),
+            }
+            for chapter, voice in dict(narrator_overrides).items()
+            if str(chapter or "").strip()
+        ]
+        alias_rows = [
+            {
+                "speaker_key": self._speaker_key(speaker),
+                "speaker_name": self._speaker_display_name(speaker),
+                "target_key": self._speaker_key(target),
+                "target_name": self._speaker_display_name(target),
+            }
+            for speaker, target in dict(auto_aliases).items()
+            if self._speaker_key(speaker) and self._speaker_key(target)
+        ]
+        with conn:
+            conn.execute("DELETE FROM voice_profiles")
+            for row in profile_rows:
+                conn.execute(
+                    """
+                    INSERT INTO voice_profiles(
+                        speaker_key, display_name, voice_type, voice_name, character_style,
+                        default_style, alias, seed, ref_audio, ref_text, generated_ref_text,
+                        adapter_id, adapter_path, description, narrates, extra_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    self._voice_profile_to_params(row),
+                )
+            conn.execute("DELETE FROM voice_settings")
+            conn.execute(
+                "INSERT OR REPLACE INTO voice_settings(key, value) VALUES(?, ?)",
+                ("narrator_threshold", str(int(narrator_threshold or 0))),
+            )
+            conn.execute("DELETE FROM chapter_narrator_overrides")
+            for row in override_rows:
+                conn.execute(
+                    """
+                    INSERT INTO chapter_narrator_overrides(chapter, voice_key, voice_name)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        str(row.get("chapter") or "").strip(),
+                        self._speaker_key(row.get("voice_key") or row.get("voice_name")),
+                        self._speaker_display_name(row.get("voice_name")),
+                    ),
+                )
+            conn.execute("DELETE FROM voice_auto_aliases")
+            for row in alias_rows:
+                conn.execute(
+                    """
+                    INSERT INTO voice_auto_aliases(speaker_key, speaker_name, target_key, target_name)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        row.get("speaker_key"),
+                        self._speaker_display_name(row.get("speaker_name")),
+                        row.get("target_key"),
+                        self._speaker_display_name(row.get("target_name")),
+                    ),
+                )
+            self._bump_voice_state_revision_tx(conn)
+            conn.execute(
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES('last_write_at', ?)",
+                (str(time.time()),),
+            )
+        return self._load_voice_state_snapshot_tx(conn)
 
     def _refresh_auto_narrator_aliases_from_chunks_tx(self, conn, narrator_threshold, narrator_name):
         threshold = max(0, int(narrator_threshold or 0))
@@ -1927,6 +1998,89 @@ class SQLiteScriptStore(ScriptStore):
             "config": config,
         }
 
+    def _get_voice_state_revision(self, conn):
+        row = conn.execute(
+            "SELECT value FROM metadata WHERE key = 'voice_state_revision'"
+        ).fetchone()
+        try:
+            return int((row["value"] if row is not None else 0) or 0)
+        except (TypeError, ValueError, KeyError):
+            return 0
+
+    def _bump_voice_state_revision_tx(self, conn):
+        next_revision = self._get_voice_state_revision(conn) + 1
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES('voice_state_revision', ?)",
+            (str(next_revision),),
+        )
+        return next_revision
+
+    def _load_voice_state_snapshot_tx(self, conn):
+        rows = conn.execute(
+            """
+            SELECT speaker_key, display_name, voice_type, voice_name, character_style,
+                   default_style, alias, seed, ref_audio, ref_text, generated_ref_text,
+                   adapter_id, adapter_path, description, narrates, extra_json
+            FROM voice_profiles
+            ORDER BY display_name COLLATE NOCASE ASC
+            """
+        ).fetchall()
+        profiles = {}
+        for row in rows:
+            profile = self._row_to_voice_profile(row)
+            profiles[profile["display_name"]] = profile["config"]
+        settings = {
+            row["key"]: row["value"]
+            for row in conn.execute("SELECT key, value FROM voice_settings").fetchall()
+        }
+        try:
+            narrator_threshold = int(settings.get("narrator_threshold", "10") or 10)
+        except (TypeError, ValueError):
+            narrator_threshold = 10
+        narrator_overrides = {
+            str(row["chapter"] or "").strip(): str(row["voice_name"] or "").strip()
+            for row in conn.execute(
+                "SELECT chapter, voice_name FROM chapter_narrator_overrides ORDER BY chapter COLLATE NOCASE ASC"
+            ).fetchall()
+            if str(row["chapter"] or "").strip()
+        }
+        auto_aliases = {
+            str(row["speaker_name"] or "").strip(): str(row["target_name"] or "").strip()
+            for row in conn.execute(
+                "SELECT speaker_name, target_name FROM voice_auto_aliases ORDER BY speaker_name COLLATE NOCASE ASC"
+            ).fetchall()
+            if str(row["speaker_name"] or "").strip() and str(row["target_name"] or "").strip()
+        }
+        return {
+            "profiles": profiles,
+            "narrator_threshold": narrator_threshold,
+            "narrator_overrides": narrator_overrides,
+            "auto_narrator_aliases": auto_aliases,
+            "revision": self._get_voice_state_revision(conn),
+        }
+
+    def _audit_voice_state_write(self, conn, command_name, payload):
+        if command_name not in {
+            "replace_voice_profiles",
+            "upsert_voice_profiles",
+            "patch_voice_profile",
+            "set_voice_setting",
+            "set_narrator_override",
+            "replace_narrator_overrides",
+            "replace_auto_narrator_aliases",
+            "refresh_auto_narrator_aliases_from_chunks",
+            "replace_voice_state_snapshot",
+        }:
+            return
+        self._append_voice_audit_entry(
+            {
+                "event": "voice_state_write",
+                "command": command_name,
+                "reason": (payload or {}).get("reason"),
+            },
+            snapshot=self._load_voice_state_snapshot_tx(conn),
+        )
+
     @staticmethod
     def _encode_voice_extra_json(config):
         reserved = {
@@ -2046,6 +2200,27 @@ class SQLiteScriptStore(ScriptStore):
                 return
             with open(self.queue_log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    def _append_voice_audit_entry(self, entry, *, snapshot=None):
+        if not self.voice_audit_logging_enabled:
+            return
+        if not os.path.isdir(self.root_dir):
+            return
+        audit_dir = os.path.dirname(self.voice_audit_log_path) or "."
+        if audit_dir and not os.path.isdir(audit_dir):
+            return
+        snapshot_payload = snapshot or self.load_voice_state_snapshot()
+        serialized_snapshot = json.dumps(snapshot_payload, sort_keys=True, ensure_ascii=False)
+        record = {
+            "at": time.time(),
+            **dict(entry or {}),
+            "voice_state_revision": snapshot_payload.get("revision", 0),
+            "snapshot_hash": hashlib.sha256(serialized_snapshot.encode("utf-8")).hexdigest(),
+            "snapshot": snapshot_payload,
+        }
+        with self._log_lock:
+            with open(self.voice_audit_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def create_script_store(**kwargs):

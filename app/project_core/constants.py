@@ -49,3 +49,6 @@ TRIM_CACHE_VERSION = 4
 TRIM_SILENCE_THRESHOLD_DBFS = -50.0
 TRIM_MIN_SILENCE_LEN_MS = 150
 TRIM_KEEP_PADDING_MS = 40
+
+# Default-on during investigation; switch this single line to False for release.
+VOICE_AUDIT_LOG_ENABLED_DEFAULT = True

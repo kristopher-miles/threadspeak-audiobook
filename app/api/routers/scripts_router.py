@@ -32,7 +32,7 @@ async def list_saved_scripts():
             "kind": str(metadata.get("kind") or "project"),
             "has_audio": bool(metadata.get("has_audio", _project_archive_contains_entry(filepath, "voicelines/"))),
             "has_voice_config": bool(
-                metadata.get("has_voice_config", _project_archive_contains_entry(filepath, "voice_config.json"))
+                metadata.get("has_voice_config", _project_archive_contains_entry(filepath, "chunks.sqlite3"))
             ),
             "chunk_count": int(metadata.get("chunk_count") or 0),
             "chapter_count": int(metadata.get("chapter_count") or 0),
@@ -40,12 +40,12 @@ async def list_saved_scripts():
         }
 
     for f in os.listdir(SCRIPTS_DIR):
-        if f.endswith(".json") and not f.endswith(".voice_config.json") and not f.endswith(".paragraphs.json"):
+        if f.endswith(".json") and not f.endswith(".paragraphs.json"):
             name = f[:-5]  # strip .json
             if name in projects:
                 continue
             filepath = os.path.join(SCRIPTS_DIR, f)
-            companion = os.path.join(SCRIPTS_DIR, f"{name}.voice_config.json")
+            companion = os.path.join(SCRIPTS_DIR, f"{name}.chunks.sqlite3")
             projects[name] = {
                 "name": name,
                 "created": os.path.getmtime(filepath),
@@ -159,11 +159,15 @@ def _save_script_source_companion(name: str):
     return companion_path
 
 
+def _saved_script_db_companion_path(name: str):
+    return os.path.join(SCRIPTS_DIR, f"{name}.chunks.sqlite3")
+
+
 def _delete_saved_script_artifacts(name: str):
     base = os.path.join(SCRIPTS_DIR, f"{name}.json")
     if os.path.exists(base):
         os.remove(base)
-    for suffix in (".voice_config.json", ".paragraphs.json"):
+    for suffix in (".chunks.sqlite3", ".paragraphs.json", ".voice_config.json"):
         companion = os.path.join(SCRIPTS_DIR, f"{name}{suffix}")
         if os.path.exists(companion):
             os.remove(companion)
@@ -199,11 +203,11 @@ def _save_current_script_snapshot(name: str, *, purge_existing: bool = False):
         _delete_saved_script_artifacts(safe_name)
 
     shutil.copy2(SCRIPT_PATH, dest)
-
-    if hasattr(project_manager, "export_voice_config_compat"):
-        project_manager.export_voice_config_compat(VOICE_CONFIG_PATH)
-    if os.path.exists(VOICE_CONFIG_PATH):
-        shutil.copy2(VOICE_CONFIG_PATH, os.path.join(SCRIPTS_DIR, f"{safe_name}.voice_config.json"))
+    db_companion = _saved_script_db_companion_path(safe_name)
+    db_path = getattr(project_manager, "chunks_db_path", os.path.join(ROOT_DIR, "chunks.sqlite3"))
+    if not os.path.exists(db_path):
+        raise FileNotFoundError("No SQLite project state to save alongside the script.")
+    _copy_sqlite_database_snapshot(db_path, db_companion)
 
     paragraphs_path = os.path.join(ROOT_DIR, "paragraphs.json")
     if os.path.exists(paragraphs_path):
@@ -213,6 +217,12 @@ def _save_current_script_snapshot(name: str, *, purge_existing: bool = False):
     state = _load_project_state_payload()
     state["loaded_script_name"] = safe_name
     _save_project_state_payload(state)
+    if hasattr(project_manager, "log_voice_audit_event"):
+        project_manager.log_voice_audit_event(
+            "script_snapshot_write",
+            reason="save_script_snapshot",
+            snapshot_name=safe_name,
+        )
     return {"name": safe_name, "overwrote": existed}
 
 def _autosave_name_from_input_file():
@@ -339,12 +349,13 @@ async def load_script(request: ScriptLoadRequest):
 
     _clear_project_archive_targets()
     shutil.copy2(src, SCRIPT_PATH)
-
-    companion = os.path.join(SCRIPTS_DIR, f"{safe_name}.voice_config.json")
-    has_voice_config = False
-    if os.path.exists(companion):
-        shutil.copy2(companion, VOICE_CONFIG_PATH)
-        has_voice_config = True
+    db_companion = _saved_script_db_companion_path(safe_name)
+    if not os.path.exists(db_companion):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Saved script snapshot '{safe_name}' is missing its SQLite state companion.",
+        )
+    _copy_sqlite_database_snapshot(db_companion, os.path.join(ROOT_DIR, "chunks.sqlite3"))
 
     paragraphs_path = os.path.join(ROOT_DIR, "paragraphs.json")
     paragraphs_companion = os.path.join(SCRIPTS_DIR, f"{safe_name}.paragraphs.json")
@@ -366,9 +377,10 @@ async def load_script(request: ScriptLoadRequest):
     state["loaded_project_name"] = safe_name
     if restored_input_path:
         state["input_file_path"] = restored_input_path
-    processing_markers = {"script": {"completed_at": time.time()}}
-    if has_voice_config:
-        processing_markers["voices"] = {"completed_at": time.time()}
+    processing_markers = {
+        "script": {"completed_at": time.time()},
+        "voices": {"completed_at": time.time()},
+    }
     state[PROCESSING_STAGE_MARKERS_KEY] = processing_markers
     state[NEW_MODE_STAGE_MARKERS_KEY] = {
         "create_script": {"completed_at": time.time()},
@@ -377,8 +389,12 @@ async def load_script(request: ScriptLoadRequest):
 
     if hasattr(project_manager, "reload_script_store"):
         project_manager.reload_script_store()
-    if hasattr(project_manager, "import_voice_compat"):
-        project_manager.import_voice_compat(VOICE_CONFIG_PATH, os.path.join(ROOT_DIR, "state.json"))
+    if hasattr(project_manager, "log_voice_audit_event"):
+        project_manager.log_voice_audit_event(
+            "script_snapshot_load",
+            reason="load_script_snapshot",
+            snapshot_name=safe_name,
+        )
     _reset_runtime_state_after_project_load()
 
     logger.info("Project script snapshot '%s' loaded", safe_name)
