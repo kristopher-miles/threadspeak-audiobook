@@ -218,6 +218,8 @@ The final export workflow is run from the export tab:
 ## More Info
 
 - [Wiki Home](wiki/Home.md)
+- [LoRA Training Guide](wiki/LoRA-Training-Guide.md)
+- [Voice Reference](wiki/Voice-Reference.md)
 - [API Reference](wiki/API-Reference.md)
 - [Automation Examples (Python/JavaScript)](wiki/Automation-Examples.md)
 - [Project Structure](wiki/Project-Structure.md)

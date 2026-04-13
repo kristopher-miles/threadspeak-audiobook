@@ -9,10 +9,12 @@ This wiki contains detailed technical documentation that is intentionally kept o
 - [Project Structure](Project-Structure)
 - [First Launch](First-Launch)
 - [Performance and ROCm](Performance-and-ROCm)
+- [LoRA Training Guide](LoRA-Training-Guide)
 - [Script Format](Script-Format)
 - [Output Formats](Output-Formats)
 - [Model Recommendations](Model-Recommendations)
 - [Prompt Customization](Prompt-Customization)
+- [Voice Reference](Voice-Reference)
 - [Troubleshooting](Troubleshooting)
 
 ## Source of truth
