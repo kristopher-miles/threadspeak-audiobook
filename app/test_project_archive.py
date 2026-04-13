@@ -533,6 +533,10 @@ class ProjectArchiveHelpersTests(unittest.TestCase):
                     state = json.load(f)
                 self.assertFalse(state["render_prep_complete"])
                 self.assertEqual(list(state["processing_stage_markers"].keys()), ["script", "voices"])
+                self.assertEqual(
+                    list(state["new_mode_stage_markers"].keys()),
+                    ["process_paragraphs", "assign_dialogue", "extract_temperament", "create_script", "process_voices"],
+                )
                 self.assertTrue(os.path.exists(manager.chunks_db_path))
             finally:
                 app_module.ROOT_DIR = original_root
@@ -622,7 +626,7 @@ class ProjectArchiveHelpersTests(unittest.TestCase):
         self.assertEqual(exported["input_file_path"], "uploads/story.txt")
         self.assertTrue(exported["render_prep_complete"])
 
-    def test_project_archive_entries_include_timeline_audio_voice_assets_discarded_pool_and_cache(self):
+    def test_project_archive_entries_include_durable_assets_only(self):
         with tempfile.TemporaryDirectory() as temp_root:
             _ensure_project_root(temp_root)
             os.makedirs(os.path.join(temp_root, "voicelines", "discarded"), exist_ok=True)
@@ -647,6 +651,19 @@ class ProjectArchiveHelpersTests(unittest.TestCase):
                 json.dump([{"id": "clone-1", "filename": "current_clone.wav"}], f)
             with open(os.path.join(temp_root, "designed_voices", "manifest.json"), "w", encoding="utf-8") as f:
                 json.dump([{"id": "design-1", "filename": "current_design.wav"}], f)
+            for rel in (
+                "workflow/processing_workflow_state.json",
+                "workflow/new_mode_workflow_state.json",
+                "workflow/audio_queue_state.json",
+                "workflow/audio_cancel_tombstone.json",
+                "workflow/script_generation_checkpoint.json",
+                "workflow/script_review_checkpoint.json",
+                "repair/script_repair_trace.jsonl",
+            ):
+                full = os.path.join(temp_root, rel)
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "w", encoding="utf-8") as f:
+                    f.write("stale")
 
             original_root = app_module.ROOT_DIR
             original_uploads = app_module.UPLOADS_DIR
@@ -687,7 +704,7 @@ class ProjectArchiveHelpersTests(unittest.TestCase):
             self.assertIn("voicelines/live_a.mp3", entries)
             self.assertIn("voicelines/live_b.mp3", entries)
             self.assertNotIn("voicelines/orphan.mp3", entries)
-            self.assertIn("voicelines/discarded/rejected.mp3", entries)
+            self.assertNotIn("voicelines/discarded/rejected.mp3", entries)
             self.assertIn("clone_voices/manifest.json", entries)
             self.assertIn("clone_voices/current_clone.wav", entries)
             self.assertNotIn("clone_voices/orphan_clone.wav", entries)
@@ -695,7 +712,14 @@ class ProjectArchiveHelpersTests(unittest.TestCase):
             self.assertIn("designed_voices/current_design.wav", entries)
             self.assertNotIn("designed_voices/orphan_design.wav", entries)
             self.assertIn("uploads/story.txt", entries)
-            self.assertIn("db/chunks.sqlite3", {name: None for name in app_module.PROJECT_ARCHIVE_ALLOWED_FILES})
+            self.assertNotIn("workflow/processing_workflow_state.json", entries)
+            self.assertNotIn("workflow/new_mode_workflow_state.json", entries)
+            self.assertNotIn("workflow/audio_queue_state.json", entries)
+            self.assertNotIn("workflow/audio_cancel_tombstone.json", entries)
+            self.assertNotIn("workflow/script_generation_checkpoint.json", entries)
+            self.assertNotIn("workflow/script_review_checkpoint.json", entries)
+            self.assertNotIn("repair/script_repair_trace.jsonl", entries)
+            self.assertIn("db/chunks.sqlite3", {name: None for name in app_module.PROJECT_ARCHIVE_DURABLE_FILES})
 
     def test_restore_project_archive_restores_discarded_pool_and_transcription_cache(self):
         with tempfile.TemporaryDirectory() as temp_root:
@@ -873,6 +897,8 @@ class ProjectArchiveHelpersTests(unittest.TestCase):
                 _write_sqlite_db(os.path.join(app_module.SCRIPTS_DIR, "demo.sqlite3"))
                 with open(os.path.join(app_module.SCRIPTS_DIR, "demo.source.txt"), "w", encoding="utf-8") as f:
                     f.write("source")
+                with open(os.path.join(app_module.CLONE_VOICES_DIR, "keep.wav"), "w", encoding="utf-8") as f:
+                    f.write("voice")
                 _write_project_zip(os.path.join(app_module.SAVED_PROJECTS_DIR, "demo.zip"), {"state.json": {}})
 
                 result = asyncio.run(app_module.delete_script("Demo"))
@@ -881,6 +907,88 @@ class ProjectArchiveHelpersTests(unittest.TestCase):
                 self.assertFalse(os.path.exists(os.path.join(app_module.SAVED_PROJECTS_DIR, "demo.zip")))
                 self.assertFalse(os.path.exists(os.path.join(app_module.SCRIPTS_DIR, "demo.sqlite3")))
                 self.assertFalse(os.path.exists(os.path.join(app_module.SCRIPTS_DIR, "demo.source.txt")))
+                self.assertTrue(os.path.exists(os.path.join(app_module.CLONE_VOICES_DIR, "keep.wav")))
+
+    def test_restore_project_archive_merges_reusable_voice_library_and_normalizes_state(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            with _TempProjectRuntime(self, temp_root):
+                os.makedirs(os.path.join(app_module.CLONE_VOICES_DIR), exist_ok=True)
+                with open(os.path.join(app_module.CLONE_VOICES_DIR, "keep.wav"), "wb") as f:
+                    f.write(b"keep")
+                with open(app_module.CLONE_VOICES_MANIFEST, "w", encoding="utf-8") as f:
+                    json.dump([{"id": "keep", "filename": "keep.wav", "name": "Keep"}], f)
+                app_module.project_manager.script_store.replace_script_document(
+                    entries=[{"speaker": "Narrator", "text": "hello"}],
+                    dictionary=[],
+                    sanity_cache={"phrase_decisions": {}},
+                    reason="test_seed_script",
+                    rebuild_chunks=True,
+                    wait=True,
+                )
+                snapshot_path = os.path.join(temp_root, "archive.sqlite3")
+                _snapshot_manager_db(app_module.project_manager, snapshot_path)
+                with open(snapshot_path, "rb") as f:
+                    archive_db_bytes = f.read()
+
+                archive_path = os.path.join(app_module.SAVED_PROJECTS_DIR, "demo.zip")
+                _write_project_zip(
+                    archive_path,
+                    {
+                        "db/chunks.sqlite3": archive_db_bytes,
+                        "state.json": {
+                            "input_file_path": "uploads/story.txt",
+                            "render_prep_complete": False,
+                            "processing_stage_markers": {"review": {"completed_at": 1}},
+                            "new_mode_stage_markers": {"proofread": {"completed_at": 1}},
+                        },
+                        "uploads/story.txt": b"story",
+                        "clone_voices/manifest.json": [{"id": "imported", "filename": "imported.wav", "name": "Imported"}],
+                        "clone_voices/imported.wav": b"voice",
+                    },
+                )
+
+                asyncio.run(app_module.load_script(app_module.ScriptLoadRequest(name="demo")))
+
+                self.assertTrue(os.path.exists(os.path.join(app_module.CLONE_VOICES_DIR, "keep.wav")))
+                self.assertTrue(os.path.exists(os.path.join(app_module.CLONE_VOICES_DIR, "imported.wav")))
+                with open(app_module.CLONE_VOICES_MANIFEST, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+                ids = {entry["id"] for entry in manifest}
+                self.assertEqual(ids, {"keep", "imported"})
+                with open(os.path.join(app_module.ROOT_DIR, "state.json"), "r", encoding="utf-8") as f:
+                    state = json.load(f)
+                self.assertEqual(state["loaded_project_name"], "demo")
+                self.assertEqual(state["loaded_script_name"], "story")
+                self.assertEqual(state["input_file_path"], os.path.join(app_module.UPLOADS_DIR, "story.txt"))
+                self.assertFalse(state["render_prep_complete"])
+                self.assertEqual(list(state["processing_stage_markers"].keys()), ["script", "voices"])
+                self.assertEqual(
+                    list(state["new_mode_stage_markers"].keys()),
+                    ["process_paragraphs", "assign_dialogue", "extract_temperament", "create_script", "process_voices"],
+                )
+
+    def test_save_script_uses_uploaded_source_name_when_request_name_is_blank(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            with _TempProjectRuntime(self, temp_root):
+                story_path = os.path.join(app_module.UPLOADS_DIR, "My Story.txt")
+                with open(story_path, "w", encoding="utf-8") as f:
+                    f.write("story")
+                with open(os.path.join(app_module.ROOT_DIR, "state.json"), "w", encoding="utf-8") as f:
+                    json.dump({"input_file_path": story_path}, f)
+                app_module.project_manager.script_store.replace_script_document(
+                    entries=[{"speaker": "Narrator", "text": "hello"}],
+                    dictionary=[],
+                    sanity_cache={"phrase_decisions": {}},
+                    reason="test_seed_script",
+                    rebuild_chunks=True,
+                    wait=True,
+                )
+
+                result = asyncio.run(app_module.save_script(app_module.ScriptSaveRequest(name="")))
+
+                self.assertEqual(result["status"], "saved")
+                self.assertEqual(result["name"], "my_story")
+                self.assertTrue(os.path.exists(os.path.join(app_module.SAVED_PROJECTS_DIR, "my_story.zip")))
 
     def test_named_project_archive_restores_through_zip_validation_path(self):
         with tempfile.TemporaryDirectory() as temp_root:

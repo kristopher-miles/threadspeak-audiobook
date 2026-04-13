@@ -268,10 +268,14 @@ class WorkflowEntrypointAccessibilityTests(unittest.TestCase):
             uploads_dir = os.path.join(temp_root, "uploads")
             clone_dir = os.path.join(temp_root, "clone_voices")
             designed_dir = os.path.join(temp_root, "designed_voices")
+            scripts_dir = os.path.join(temp_root, "scripts")
+            saved_projects_dir = os.path.join(temp_root, "saved_projects")
             os.makedirs(voicelines_dir, exist_ok=True)
             os.makedirs(uploads_dir, exist_ok=True)
             os.makedirs(clone_dir, exist_ok=True)
             os.makedirs(designed_dir, exist_ok=True)
+            os.makedirs(scripts_dir, exist_ok=True)
+            os.makedirs(saved_projects_dir, exist_ok=True)
 
             state_path = os.path.join(temp_root, "state.json")
             chunks_db_path = os.path.join(temp_root, "chunks.sqlite3")
@@ -293,6 +297,10 @@ class WorkflowEntrypointAccessibilityTests(unittest.TestCase):
                 f.write("audio")
             with open(os.path.join(designed_dir, "voice.wav"), "w", encoding="utf-8") as f:
                 f.write("audio")
+            with open(os.path.join(scripts_dir, "saved.sqlite3"), "w", encoding="utf-8") as f:
+                f.write("snapshot")
+            with open(os.path.join(saved_projects_dir, "saved.zip"), "w", encoding="utf-8") as f:
+                f.write("archive")
             with open(queue_log_path, "w", encoding="utf-8") as f:
                 f.write("queued")
             with sqlite3.connect(chunks_db_path) as conn:
@@ -373,8 +381,10 @@ class WorkflowEntrypointAccessibilityTests(unittest.TestCase):
             self.assertFalse(os.path.exists(f"{chunks_db_path}-shm"))
             self.assertEqual(os.listdir(voicelines_dir), [])
             self.assertEqual(os.listdir(uploads_dir), [])
-            self.assertEqual(os.listdir(clone_dir), [])
-            self.assertEqual(os.listdir(designed_dir), [])
+            self.assertEqual(sorted(os.listdir(clone_dir)), ["voice.wav"])
+            self.assertEqual(sorted(os.listdir(designed_dir)), ["voice.wav"])
+            self.assertEqual(sorted(os.listdir(scripts_dir)), ["saved.sqlite3"])
+            self.assertEqual(sorted(os.listdir(saved_projects_dir)), ["saved.zip"])
             with open(state_path, "r", encoding="utf-8") as f:
                 state = json.load(f)
             self.assertEqual(state, {"render_prep_complete": False})

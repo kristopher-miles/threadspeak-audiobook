@@ -110,22 +110,28 @@ async def reset_project():
         AUDIOBOOK_PATH,
         M4B_PATH,
         AUDIO_QUEUE_STATE_PATH,
+        AUDIO_CANCEL_TOMBSTONE_PATH,
         PROCESSING_WORKFLOW_STATE_PATH,
         NEW_MODE_WORKFLOW_STATE_PATH,
         _project_export_filesystem_path("audacity_export.zip"),
         _project_export_filesystem_path("m4b_cover.jpg"),
         LAYOUT.script_generation_checkpoint_path,
         LAYOUT.script_review_checkpoint_path,
+        os.path.join(ROOT_DIR, "logs", "llm_responses.log"),
+        os.path.join(ROOT_DIR, "logs", "review_responses.log"),
     ]
 
     for path in paths_to_report:
         if os.path.exists(path):
             removed.append(os.path.basename(path))
-    for dirname in (VOICELINES_DIR, UPLOADS_DIR, CLONE_VOICES_DIR, DESIGNED_VOICES_DIR):
+    for dirname in (VOICELINES_DIR, UPLOADS_DIR):
         if os.path.isdir(dirname) and os.listdir(dirname):
             removed.append(f"{os.path.basename(dirname)}/*")
 
-    _clear_project_derived_state(preserve_input_file=False)
+    _clear_project_derived_state(
+        preserve_input_file=False,
+        preserve_reusable_voices=True,
+    )
 
     with audio_queue_condition:
         audio_queue.clear()

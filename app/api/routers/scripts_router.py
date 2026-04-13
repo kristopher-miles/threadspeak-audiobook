@@ -201,24 +201,20 @@ async def load_script(request: ScriptLoadRequest):
         os.makedirs(UPLOADS_DIR, exist_ok=True)
         shutil.copy2(source_companion, restored_input_path)
 
-    state = {
-        "render_prep_complete": False,
-        "loaded_script_name": safe_name,
-        "loaded_project_name": safe_name,
-        PROCESSING_STAGE_MARKERS_KEY: {
-            "script": {"completed_at": time.time()},
-            "voices": {"completed_at": time.time()},
-        },
-        NEW_MODE_STAGE_MARKERS_KEY: {
-            "create_script": {"completed_at": time.time()},
-        },
-    }
-    if restored_input_path:
-        state["input_file_path"] = restored_input_path
-    _save_project_state_payload(state)
-
     if hasattr(project_manager, "reload_script_store"):
         project_manager.reload_script_store()
+    restored_state = {
+        "loaded_script_name": safe_name,
+        "loaded_project_name": safe_name,
+    }
+    if restored_input_path:
+        restored_state["input_file_path"] = restored_input_path
+    _save_project_state_payload(
+        _normalize_restored_project_state(
+            restored_state,
+            loaded_project_name=safe_name,
+        )
+    )
     if hasattr(project_manager, "log_voice_audit_event"):
         project_manager.log_voice_audit_event(
             "script_snapshot_load",

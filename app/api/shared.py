@@ -80,11 +80,18 @@ DATASET_BUILDER_DIR = LAYOUT.dataset_builder_dir
 DESIGNED_VOICES_MANIFEST = os.path.join(DESIGNED_VOICES_DIR, "manifest.json")
 CLONE_VOICES_MANIFEST = os.path.join(CLONE_VOICES_DIR, "manifest.json")
 ALLOWED_AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg"}
-PROJECT_ARCHIVE_VERSION = 5
+PROJECT_ARCHIVE_VERSION = 6
 PROJECT_ARCHIVE_MANIFEST_NAME = "project_archive_manifest.json"
-PROJECT_ARCHIVE_ALLOWED_FILES = {
+PROJECT_ARCHIVE_DURABLE_FILES = {
     "db/chunks.sqlite3",
     "state.json",
+    "exports/cloned_audiobook.mp3",
+    "exports/optimized_audiobook.zip",
+    "exports/audacity_export.zip",
+    "exports/audiobook.m4b",
+    "exports/m4b_cover.jpg",
+}
+PROJECT_ARCHIVE_LEGACY_OPTIONAL_FILES = {
     "workflow/processing_workflow_state.json",
     "workflow/new_mode_workflow_state.json",
     "workflow/audio_queue_state.json",
@@ -92,12 +99,8 @@ PROJECT_ARCHIVE_ALLOWED_FILES = {
     "workflow/script_generation_checkpoint.json",
     "workflow/script_review_checkpoint.json",
     "repair/script_repair_trace.jsonl",
-    "exports/cloned_audiobook.mp3",
-    "exports/optimized_audiobook.zip",
-    "exports/audacity_export.zip",
-    "exports/audiobook.m4b",
-    "exports/m4b_cover.jpg",
 }
+PROJECT_ARCHIVE_ALLOWED_FILES = PROJECT_ARCHIVE_DURABLE_FILES | PROJECT_ARCHIVE_LEGACY_OPTIONAL_FILES
 PROJECT_ARCHIVE_LEGACY_FILE_ALIASES = {}
 PROJECT_ARCHIVE_ALLOWED_DIRS = {
     "uploads",
@@ -563,6 +566,75 @@ def _delete_saved_script_artifacts(name: str):
         source_companion = _find_saved_script_source_companion(name)
 
 
+def _resolve_project_save_name(name: str):
+    requested_name = str(name or "").strip()
+    if requested_name:
+        safe_name = _sanitize_name(requested_name)
+        if not safe_name:
+            raise ValueError("Invalid project name.")
+        return safe_name
+
+    state = _load_project_state_payload()
+    input_path = str(state.get("input_file_path") or "").strip()
+    fallback_name = ""
+    if input_path:
+        fallback_name = os.path.splitext(os.path.basename(input_path))[0].strip()
+    if not fallback_name:
+        fallback_name = str(state.get("loaded_project_name") or "").strip()
+    if not fallback_name:
+        fallback_name = str(state.get("loaded_script_name") or "").strip()
+    if not fallback_name:
+        current_script_title = getattr(project_manager, "_current_script_title", None)
+        if callable(current_script_title):
+            try:
+                fallback_name = str(current_script_title() or "").strip()
+            except Exception:
+                fallback_name = ""
+
+    safe_name = _sanitize_name(fallback_name)
+    if not safe_name:
+        raise ValueError("No project name available. Import a source document or enter a project name.")
+    return safe_name
+
+
+def _project_has_export_outputs():
+    for path in (
+        AUDIOBOOK_PATH,
+        OPTIMIZED_EXPORT_PATH,
+        _project_export_filesystem_path("audacity_export.zip"),
+        M4B_PATH,
+        _project_export_filesystem_path("m4b_cover.jpg"),
+    ):
+        if os.path.exists(path):
+            return True
+    return False
+
+
+def _project_has_durable_archive_state():
+    if _project_has_script_document():
+        return True
+    has_substantive_chunks = getattr(project_manager, "has_substantive_chunks", None)
+    if callable(has_substantive_chunks):
+        try:
+            if bool(has_substantive_chunks()):
+                return True
+        except Exception:
+            pass
+    has_voice_config = getattr(project_manager, "has_voice_config", None)
+    if callable(has_voice_config):
+        try:
+            if bool(has_voice_config()):
+                return True
+        except Exception:
+            pass
+    if bool((_load_project_paragraphs_document() or {}).get("paragraphs")):
+        return True
+    if _project_has_generated_audio() or _project_has_export_outputs():
+        return True
+    state = _archive_state_with_relative_paths()
+    return bool(str(state.get("input_file_path") or "").strip())
+
+
 def _save_current_script_snapshot(name: str, *, purge_existing: bool = False):
     if not _project_has_script_document():
         raise FileNotFoundError("No script to save. Generate a script first.")
@@ -617,14 +689,10 @@ def _autosave_current_script_for_workflow(*, purge_existing: bool, trigger: str)
 
 
 def _save_current_project_archive_snapshot(name: str):
-    if not _project_has_script_document():
-        has_substantive_chunks = getattr(project_manager, "has_substantive_chunks", None)
-        if not callable(has_substantive_chunks) or not bool(has_substantive_chunks()):
-            raise FileNotFoundError("No script to save. Generate a script first.")
+    if not _project_has_durable_archive_state():
+        raise FileNotFoundError("No durable project state to save.")
 
-    safe_name = _sanitize_name(name)
-    if not safe_name:
-        raise ValueError("Invalid project name.")
+    safe_name = _resolve_project_save_name(name)
 
     archive_path = _saved_project_archive_path(safe_name)
     existed = os.path.exists(archive_path)
@@ -1893,7 +1961,7 @@ def _clear_directory_contents(directory):
             os.remove(entry_path)
 
 
-def _clear_project_derived_state(preserve_input_file=True):
+def _clear_project_derived_state(preserve_input_file=True, preserve_reusable_voices=True):
     state = _load_project_state_payload()
     input_file_path = (state.get("input_file_path") or "").strip()
     manager_root = os.path.abspath(getattr(project_manager, "root_dir", ROOT_DIR))
@@ -1914,20 +1982,24 @@ def _clear_project_derived_state(preserve_input_file=True):
         AUDIOBOOK_PATH,
         M4B_PATH,
         AUDIO_QUEUE_STATE_PATH,
+        AUDIO_CANCEL_TOMBSTONE_PATH,
         PROCESSING_WORKFLOW_STATE_PATH,
         NEW_MODE_WORKFLOW_STATE_PATH,
         LAYOUT.script_generation_checkpoint_path,
         LAYOUT.script_review_checkpoint_path,
         LAYOUT.audacity_export_path,
         LAYOUT.m4b_cover_path,
+        os.path.join(ROOT_DIR, "logs", "llm_responses.log"),
+        os.path.join(ROOT_DIR, "logs", "review_responses.log"),
     ]
     for path in files_to_remove:
         if os.path.exists(path):
             os.remove(path)
 
     _clear_directory_contents(VOICELINES_DIR)
-    _clear_directory_contents(DESIGNED_VOICES_DIR)
-    _clear_directory_contents(CLONE_VOICES_DIR)
+    if not preserve_reusable_voices:
+        _clear_directory_contents(DESIGNED_VOICES_DIR)
+        _clear_directory_contents(CLONE_VOICES_DIR)
     if not preserve_input_file:
         _clear_directory_contents(UPLOADS_DIR)
 
@@ -2280,7 +2352,7 @@ def _project_archive_entries():
         if os.path.exists(absolute_path):
             entries[normalized] = absolute_path
 
-    for relative_path in sorted(PROJECT_ARCHIVE_ALLOWED_FILES - {"db/chunks.sqlite3"}):
+    for relative_path in sorted(PROJECT_ARCHIVE_DURABLE_FILES - {"db/chunks.sqlite3"}):
         add_relative_path(relative_path)
 
     state = _archive_state_with_relative_paths()
@@ -2323,14 +2395,6 @@ def _project_archive_entries():
 
     for relative_path in sorted(voice_assets):
         add_relative_path(relative_path)
-
-    discarded_dir = os.path.join(ROOT_DIR, "voicelines", "discarded")
-    if os.path.isdir(discarded_dir):
-        for current_root, _, filenames in os.walk(discarded_dir):
-            for filename in filenames:
-                absolute_path = os.path.join(current_root, filename)
-                relative_path = os.path.relpath(absolute_path, ROOT_DIR).replace(os.sep, "/")
-                add_relative_path(relative_path)
 
     return sorted(entries.items())
 
@@ -2435,6 +2499,13 @@ def _write_project_archive(zip_path: str):
 
 
 def _clear_project_archive_targets():
+    if hasattr(project_manager, "shutdown_script_store"):
+        try:
+            project_manager.shutdown_script_store(flush=True)
+        except Exception:
+            pass
+
+    logs_dir = os.path.join(ROOT_DIR, "logs")
     removable_files = [
         getattr(project_manager, "chunks_db_path", os.path.join(ROOT_DIR, "chunks.sqlite3")),
         f"{getattr(project_manager, 'chunks_db_path', os.path.join(ROOT_DIR, 'chunks.sqlite3'))}-wal",
@@ -2447,13 +2518,16 @@ def _clear_project_archive_targets():
         M4B_PATH,
         _project_export_filesystem_path("m4b_cover.jpg"),
         AUDIO_QUEUE_STATE_PATH,
+        AUDIO_CANCEL_TOMBSTONE_PATH,
         PROCESSING_WORKFLOW_STATE_PATH,
         NEW_MODE_WORKFLOW_STATE_PATH,
         LAYOUT.script_generation_checkpoint_path,
         LAYOUT.script_review_checkpoint_path,
         SCRIPT_REPAIR_TRACE_PATH,
+        os.path.join(logs_dir, "llm_responses.log"),
+        os.path.join(logs_dir, "review_responses.log"),
     ]
-    removable_dirs = [UPLOADS_DIR, CLONE_VOICES_DIR, DESIGNED_VOICES_DIR, VOICELINES_DIR]
+    removable_dirs = [UPLOADS_DIR, VOICELINES_DIR]
 
     for absolute_path in removable_files:
         if os.path.exists(absolute_path):
@@ -2463,6 +2537,147 @@ def _clear_project_archive_targets():
         if os.path.isdir(absolute_dir):
             shutil.rmtree(absolute_dir)
         os.makedirs(absolute_dir, exist_ok=True)
+
+
+def _archive_stage_marker(stage_name, completed_at):
+    return {
+        stage_name: {
+            "completed_at": float(completed_at or time.time()),
+        }
+    }
+
+
+def _upsert_manifest_entries(existing_entries, incoming_entries):
+    merged = []
+    index_by_key = {}
+
+    def entry_key(entry):
+        if not isinstance(entry, dict):
+            return None
+        for field in ("id", "filename", "name", "speaker"):
+            value = str(entry.get(field) or "").strip()
+            if value:
+                return f"{field}:{value}"
+        return None
+
+    for entry in list(existing_entries or []):
+        if not isinstance(entry, dict):
+            continue
+        key = entry_key(entry)
+        if key is None or key not in index_by_key:
+            index_by_key[key] = len(merged)
+            merged.append(dict(entry))
+
+    for entry in list(incoming_entries or []):
+        if not isinstance(entry, dict):
+            continue
+        key = entry_key(entry)
+        if key is not None and key in index_by_key:
+            merged[index_by_key[key]] = dict(entry)
+            continue
+        index_by_key[key] = len(merged)
+        merged.append(dict(entry))
+    return merged
+
+
+def _merge_reusable_voice_library(extracted_dir: str, dirname: str):
+    source_dir = os.path.join(extracted_dir, dirname)
+    target_dir = os.path.join(ROOT_DIR, dirname)
+    if not os.path.isdir(source_dir):
+        return
+
+    os.makedirs(target_dir, exist_ok=True)
+    for current_root, _, filenames in os.walk(source_dir):
+        for filename in filenames:
+            if filename == "manifest.json":
+                continue
+            source_path = os.path.join(current_root, filename)
+            relative_path = os.path.relpath(source_path, source_dir)
+            target_path = os.path.join(target_dir, relative_path)
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            shutil.copy2(source_path, target_path)
+
+    source_manifest_path = os.path.join(source_dir, "manifest.json")
+    target_manifest_path = os.path.join(target_dir, "manifest.json")
+    if not os.path.exists(source_manifest_path):
+        return
+    merged_manifest = _upsert_manifest_entries(
+        _load_manifest(target_manifest_path),
+        _load_manifest(source_manifest_path),
+    )
+    _save_manifest(target_manifest_path, merged_manifest)
+
+
+def _normalize_restored_project_state(restored_state=None, *, loaded_project_name: str = ""):
+    payload = dict(restored_state or {})
+    now = time.time()
+
+    input_file_path = str(payload.get("input_file_path") or "").strip()
+    if input_file_path and not os.path.exists(input_file_path):
+        input_file_path = ""
+
+    normalized_project_name = str(loaded_project_name or payload.get("loaded_project_name") or "").strip()
+    normalized_script_name = str(payload.get("loaded_script_name") or "").strip()
+    if not normalized_script_name:
+        if input_file_path:
+            normalized_script_name = os.path.splitext(os.path.basename(input_file_path))[0].strip()
+        elif normalized_project_name:
+            normalized_script_name = normalized_project_name
+
+    has_script = _project_has_script_document()
+    paragraphs_doc = _load_project_paragraphs_document()
+    has_paragraphs = bool((paragraphs_doc or {}).get("paragraphs"))
+    has_voice_config = bool(getattr(project_manager, "has_voice_config", lambda: False)())
+    has_audio = _project_has_generated_audio()
+    has_exports = _project_has_export_outputs()
+
+    process_markers = {}
+    if has_script:
+        process_markers.update(_archive_stage_marker("script", now))
+    if has_voice_config:
+        process_markers.update(_archive_stage_marker("voices", now))
+    if has_audio or has_exports:
+        process_markers.update(_archive_stage_marker("audio", now))
+
+    new_mode_markers = {}
+    if has_script:
+        for stage_name in ("process_paragraphs", "assign_dialogue", "extract_temperament", "create_script"):
+            new_mode_markers.update(_archive_stage_marker(stage_name, now))
+    else:
+        if has_paragraphs:
+            new_mode_markers.update(_archive_stage_marker("process_paragraphs", now))
+        if (paragraphs_doc or {}).get("dialogue_assignment_complete"):
+            new_mode_markers.update(_archive_stage_marker("assign_dialogue", now))
+        if (paragraphs_doc or {}).get("temperament_extraction_complete"):
+            new_mode_markers.update(_archive_stage_marker("extract_temperament", now))
+    if has_voice_config:
+        new_mode_markers.update(_archive_stage_marker("process_voices", now))
+    if has_audio or has_exports:
+        new_mode_markers.update(_archive_stage_marker("render_audio", now))
+
+    if input_file_path:
+        payload["input_file_path"] = input_file_path
+    else:
+        payload.pop("input_file_path", None)
+    if normalized_project_name:
+        payload["loaded_project_name"] = normalized_project_name
+    else:
+        payload.pop("loaded_project_name", None)
+    if normalized_script_name:
+        payload["loaded_script_name"] = normalized_script_name
+    else:
+        payload.pop("loaded_script_name", None)
+
+    payload["render_prep_complete"] = bool(has_audio or has_exports)
+    if process_markers:
+        payload[PROCESSING_STAGE_MARKERS_KEY] = process_markers
+    else:
+        payload.pop(PROCESSING_STAGE_MARKERS_KEY, None)
+    if new_mode_markers:
+        payload[NEW_MODE_STAGE_MARKERS_KEY] = new_mode_markers
+    else:
+        payload.pop(NEW_MODE_STAGE_MARKERS_KEY, None)
+    return payload
 
 
 def _reset_runtime_state_after_project_load():
@@ -2505,7 +2720,8 @@ def _reset_runtime_state_after_project_load():
 def _restore_project_archive(extracted_dir: str, *, loaded_project_name: str = ""):
     _clear_project_archive_targets()
 
-    for relative_path in sorted(PROJECT_ARCHIVE_ALLOWED_FILES):
+    restored_state = {}
+    for relative_path in sorted(PROJECT_ARCHIVE_DURABLE_FILES):
         source_path = _project_archive_source_path(extracted_dir, relative_path)
         target_path = _project_archive_filesystem_path(relative_path)
         if not os.path.exists(source_path):
@@ -2513,33 +2729,14 @@ def _restore_project_archive(extracted_dir: str, *, loaded_project_name: str = "
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
         if relative_path == "state.json":
             with open(source_path, "r", encoding="utf-8") as f:
-                state = json.load(f)
-            input_file_path = (state.get("input_file_path") or "").strip()
+                restored_state = json.load(f)
+            input_file_path = (restored_state.get("input_file_path") or "").strip()
             if input_file_path:
-                state["input_file_path"] = os.path.join(ROOT_DIR, input_file_path)
-            for key in ("narrator_threshold", "narrator_overrides", "auto_narrator_aliases"):
-                state.pop(key, None)
-            with open(target_path, "w", encoding="utf-8") as f:
-                json.dump(state, f, indent=2, ensure_ascii=False)
+                restored_state["input_file_path"] = os.path.join(ROOT_DIR, input_file_path)
         else:
             shutil.copy2(source_path, target_path)
 
-    if loaded_project_name:
-        state_path = os.path.join(ROOT_DIR, "state.json")
-        state = {}
-        if os.path.exists(state_path):
-            try:
-                with open(state_path, "r", encoding="utf-8") as f:
-                    payload = json.load(f)
-                if isinstance(payload, dict):
-                    state = payload
-            except (json.JSONDecodeError, ValueError, OSError):
-                state = {}
-        state["loaded_project_name"] = loaded_project_name
-        with open(state_path, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2, ensure_ascii=False)
-
-    for dirname in sorted(PROJECT_ARCHIVE_ALLOWED_DIRS):
+    for dirname in ("uploads", "voicelines"):
         source_dir = os.path.join(extracted_dir, dirname)
         target_dir = os.path.join(ROOT_DIR, dirname)
         if not os.path.isdir(source_dir):
@@ -2548,8 +2745,17 @@ def _restore_project_archive(extracted_dir: str, *, loaded_project_name: str = "
             shutil.rmtree(target_dir)
         shutil.copytree(source_dir, target_dir)
 
+    for dirname in ("clone_voices", "designed_voices"):
+        _merge_reusable_voice_library(extracted_dir, dirname)
+
     if hasattr(project_manager, "reload_script_store"):
         project_manager.reload_script_store()
+    _save_project_state_payload(
+        _normalize_restored_project_state(
+            restored_state,
+            loaded_project_name=loaded_project_name,
+        )
+    )
     if hasattr(project_manager, "log_voice_audit_event"):
         project_manager.log_voice_audit_event(
             "project_archive_restore",
