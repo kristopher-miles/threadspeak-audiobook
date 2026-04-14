@@ -13,7 +13,14 @@
         let audioQueuePollInFlight = null;
         let editorEventSource = null;
         let editorEventsConnected = false;
+        let loadChunksInFlight = null;
+        const queuedTrackedChunkUpdates = new Map();
+        let queuedChunkReloadRequested = false;
+        let queuedChunkReloadForceFullRedraw = false;
+        let queuedTrackedChunkFlushHandle = null;
+        let queuedTrackedChunkFlushPromise = null;
         let latestAudioState = null;
+        let latestAudioCoverage = null;
         let latestProofreadStatus = null;
         let renderPrepComplete = false;
         let _queueStatusToastShown = false;
@@ -221,6 +228,79 @@
             const proofreadUpdated = updateProofreadRow(updatedChunk);
             renderEditorProgressBar(cachedChunks, latestAudioState);
             return { chunkRef, editorUpdated, proofreadUpdated };
+        }
+
+        function scheduleQueuedTrackedChunkFlush() {
+            if (queuedTrackedChunkFlushHandle || queuedTrackedChunkFlushPromise) return;
+            const schedule = typeof requestAnimationFrame === 'function'
+                ? requestAnimationFrame
+                : (fn) => setTimeout(fn, 0);
+            queuedTrackedChunkFlushHandle = schedule(() => {
+                queuedTrackedChunkFlushHandle = null;
+                flushQueuedTrackedChunkUpdates().catch((error) => {
+                    console.warn('Failed to flush queued editor chunk updates', error);
+                });
+            });
+        }
+
+        async function flushQueuedTrackedChunkUpdates() {
+            if (queuedTrackedChunkFlushPromise) {
+                return queuedTrackedChunkFlushPromise;
+            }
+
+            const run = (async () => {
+                if (loadChunksInFlight) {
+                    try {
+                        await loadChunksInFlight;
+                    } catch (error) {
+                        console.warn('Queued editor updates waited on a failed chunk reload', error);
+                    }
+                }
+
+                if (queuedChunkReloadRequested) {
+                    const forceFullRedraw = queuedChunkReloadForceFullRedraw;
+                    queuedChunkReloadRequested = false;
+                    queuedChunkReloadForceFullRedraw = false;
+                    queuedTrackedChunkUpdates.clear();
+                    await loadChunks(forceFullRedraw);
+                    return;
+                }
+
+                if (queuedTrackedChunkUpdates.size === 0) {
+                    return;
+                }
+
+                const pendingUpdates = Array.from(queuedTrackedChunkUpdates.values());
+                queuedTrackedChunkUpdates.clear();
+                pendingUpdates.forEach((chunk) => {
+                    applyTrackedChunkUpdate(chunk);
+                });
+            })();
+
+            queuedTrackedChunkFlushPromise = run;
+            try {
+                await run;
+            } finally {
+                if (queuedTrackedChunkFlushPromise === run) {
+                    queuedTrackedChunkFlushPromise = null;
+                }
+                if (queuedChunkReloadRequested || queuedTrackedChunkUpdates.size > 0) {
+                    scheduleQueuedTrackedChunkFlush();
+                }
+            }
+        }
+
+        function enqueueTrackedChunkUpdate(updatedChunk) {
+            const chunkRef = getChunkRef(updatedChunk);
+            if (!chunkRef) return;
+            queuedTrackedChunkUpdates.set(chunkRef, updatedChunk);
+            scheduleQueuedTrackedChunkFlush();
+        }
+
+        function queueEditorChunkReload(forceFullRedraw = true) {
+            queuedChunkReloadRequested = true;
+            queuedChunkReloadForceFullRedraw = queuedChunkReloadForceFullRedraw || Boolean(forceFullRedraw);
+            scheduleQueuedTrackedChunkFlush();
         }
 
         function markChunkGeneratingLocally(chunkRef) {
@@ -1312,35 +1392,34 @@
             }
         };
 
-        function renderEditorProgressBar(chunks, audioState = latestAudioState) {
+        function normalizeAudioCoverageSummary(payload) {
+            const total = Math.max(0, Number(payload?.total_clips) || 0);
+            const valid = Math.max(0, Math.min(total, Number(payload?.valid_clips) || 0));
+            const invalid = Math.max(0, Number(payload?.invalid_clips) || Math.max(total - valid, 0));
+            const percentage = total > 0
+                ? Math.round((valid / total) * 100)
+                : 0;
+            return {
+                total_clips: total,
+                valid_clips: valid,
+                invalid_clips: invalid,
+                percentage,
+            };
+        }
+
+        function renderEditorProgressBar(_chunks, audioState = latestAudioState) {
             const progressBar = document.getElementById('full-progress-bar');
             if (!progressBar) return;
+            const coverage = normalizeAudioCoverageSummary(audioState?.audio_coverage || latestAudioCoverage);
+            latestAudioCoverage = coverage;
 
-            const allChunks = Array.isArray(chunks) ? chunks : [];
-            const nonEmptyChunks = allChunks.filter(chunk => (chunk.text || '').trim());
-            const completed = nonEmptyChunks.filter(chunk => chunk.status === 'done').length;
-            const total = nonEmptyChunks.length;
-            const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
-            const currentJob = audioState?.current_job || null;
-            const hasActiveAudioWork = Boolean(audioState?.running) && currentJob && (currentJob.total_chunks || 0) > 0;
-
-            if (hasActiveAudioWork) {
-                const processed = Number(currentJob.processed_clips) || 0;
-                const jobTotal = Number(currentJob.total_chunks) || 0;
-                const jobPercentage = jobTotal > 0 ? Math.round((processed / jobTotal) * 100) : 0;
-                progressBar.style.width = `${jobPercentage}%`;
-                progressBar.classList.add('progress-bar-animated', 'progress-bar-striped', 'bg-warning');
-                progressBar.classList.remove('bg-success');
-                progressBar.innerText = `${jobPercentage}% (${processed}/${jobTotal})`;
-                progressBar.title = `${currentJob.label || 'Rendering audio'} • current job ${processed}/${jobTotal}`;
-                return;
-            }
-
-            progressBar.style.width = `${percentage}%`;
+            progressBar.style.width = `${coverage.percentage}%`;
             progressBar.classList.remove('progress-bar-animated', 'bg-warning');
-            progressBar.classList.add('progress-bar-striped', 'bg-success');
-            progressBar.innerText = `${percentage}% (${completed}/${total})`;
-            progressBar.title = 'Completed audio coverage';
+            progressBar.classList.add('progress-bar-striped');
+            progressBar.classList.toggle('bg-success', coverage.percentage >= 100);
+            progressBar.classList.toggle('bg-info', coverage.percentage < 100);
+            progressBar.innerText = `${coverage.percentage}% (${coverage.valid_clips}/${coverage.total_clips})`;
+            progressBar.title = `${coverage.valid_clips} of ${coverage.total_clips} clips have valid audio across the whole book`;
         }
 
         function renderAudioEstimatePanel(audioState) {
@@ -1705,6 +1784,7 @@
         async function refreshAudioQueueUI() {
             const audioState = await API.get('/api/status/audio');
             latestAudioState = audioState;
+            latestAudioCoverage = normalizeAudioCoverageSummary(audioState?.audio_coverage);
             updateAudioQueueControls(audioState);
             renderAudioQueueStatus(audioState);
             renderAudioEstimatePanel(audioState);
@@ -1800,16 +1880,16 @@
             source.addEventListener('chunk_upsert', (event) => {
                 try {
                     const payload = JSON.parse(event.data || '{}');
-                    applyTrackedChunkUpdate(payload);
+                    enqueueTrackedChunkUpdate(payload);
                 } catch (e) {
                     console.warn('Failed to apply chunk_upsert event', e);
                 }
             });
             source.addEventListener('chunk_delete', () => {
-                loadChunks(true).catch(err => console.error('Chunk refetch after delete failed', err));
+                queueEditorChunkReload(true);
             });
             source.addEventListener('chapter_deleted', () => {
-                loadChunks(true).catch(err => console.error('Chapter refetch after delete failed', err));
+                queueEditorChunkReload(true);
             });
             source.addEventListener('chapter_list_changed', (event) => {
                 try {
@@ -1823,6 +1903,7 @@
             source.addEventListener('audio_status', (event) => {
                 try {
                     latestAudioState = JSON.parse(event.data || '{}');
+                    latestAudioCoverage = normalizeAudioCoverageSummary(latestAudioState?.audio_coverage);
                     updateAudioQueueControls(latestAudioState);
                     renderAudioQueueStatus(latestAudioState);
                     renderAudioEstimatePanel(latestAudioState);
@@ -1897,117 +1978,138 @@
         }
 
         async function loadChunks(forceFullRedraw = false) {
-            const tbody = document.getElementById('chunks-table-body');
-
-            // Show loading only if empty
-            if (tbody.children.length === 0 || (tbody.children.length === 1 && tbody.children[0].children.length === 1)) {
-                tbody.innerHTML = '<tr><td colspan="5" class="text-center">Loading chunks...</td></tr>';
-                forceFullRedraw = true;
+            if (loadChunksInFlight) {
+                try {
+                    await loadChunksInFlight;
+                } catch (error) {
+                    console.warn('Previous chunk reload failed before starting a new one', error);
+                }
             }
 
-            try {
-                const chapterPayload = await API.get('/api/chunks/chapters');
-                editorChapterSummaries = Array.isArray(chapterPayload?.chapters) ? chapterPayload.chapters : [];
-                syncEditorChapterState(cachedChunks);
+            const run = (async () => {
+                const tbody = document.getElementById('chunks-table-body');
 
-                const chunks = await API.get(
-                    selectedEditorChapter !== WHOLE_PROJECT_CHAPTER_ID
-                        ? `/api/chunks/view?chapter=${encodeURIComponent(selectedEditorChapter)}`
-                        : '/api/chunks/view'
-                );
-                const mergedChunks = pendingDeleteRefs.size > 0
-                    ? (chunks || []).filter(c => !pendingDeleteRefs.has(getChunkRef(c)))
-                    : (chunks || []);
-                if (mergedChunks.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="5" class="text-center">No chunks found. Please generate script first.</td></tr>';
-                    cachedChunks = [];
-                    cachedVisibleChunkIds = [];
-                    cachedProofreadVisibleChunkIds = [];
-                    syncEditorChapterState([]);
-                    syncProofreadChapterState([]);
-                    renderProofreadTable([]);
-                    refreshDictionaryCounts([]);
-                    return;
+                // Show loading only if empty
+                if (tbody.children.length === 0 || (tbody.children.length === 1 && tbody.children[0].children.length === 1)) {
+                    tbody.innerHTML = '<tr><td colspan="5" class="text-center">Loading chunks...</td></tr>';
+                    forceFullRedraw = true;
                 }
 
-                syncEditorChapterState(mergedChunks);
-                if (forceFullRedraw || cachedChunks.length === 0) {
-                    syncProofreadChapterState(mergedChunks);
-                    refreshDictionaryCounts(mergedChunks);
-                }
+                try {
+                    const chapterPayload = await API.get('/api/chunks/chapters');
+                    editorChapterSummaries = Array.isArray(chapterPayload?.chapters) ? chapterPayload.chapters : [];
+                    syncEditorChapterState(cachedChunks);
 
-                const proofreadVisibleChunks = getProofreadVisibleChunks(mergedChunks);
-                const proofreadRowIds = Array.from(
-                    document.querySelectorAll('#proofread-table-body tr[data-proofread-id]')
-                ).map(row => row.dataset.proofreadId || '');
-                const canIncrementProofread = !forceFullRedraw &&
-                    proofreadRowIds.length === proofreadVisibleChunks.length &&
-                    proofreadRowIds.every((id, index) => id === getChunkRef(proofreadVisibleChunks[index]));
+                    const chunks = await API.get(
+                        selectedEditorChapter !== WHOLE_PROJECT_CHAPTER_ID
+                            ? `/api/chunks/view?chapter=${encodeURIComponent(selectedEditorChapter)}`
+                            : '/api/chunks/view'
+                    );
+                    const mergedChunks = pendingDeleteRefs.size > 0
+                        ? (chunks || []).filter(c => !pendingDeleteRefs.has(getChunkRef(c)))
+                        : (chunks || []);
+                    if (mergedChunks.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="5" class="text-center">No chunks found. Please generate script first.</td></tr>';
+                        cachedChunks = [];
+                        cachedVisibleChunkIds = [];
+                        cachedProofreadVisibleChunkIds = [];
+                        syncEditorChapterState([]);
+                        syncProofreadChapterState([]);
+                        renderProofreadTable([]);
+                        refreshDictionaryCounts([]);
+                        return;
+                    }
 
-                if (canIncrementProofread) {
-                    const threshold = getProofreadThreshold();
-                    proofreadVisibleChunks.forEach(chunk => {
-                        const chunkRef = getChunkRef(chunk);
-                        const row = document.querySelector(`tr[data-proofread-id="${chunkRef}"]`);
-                        const nextFingerprint = getProofreadFingerprint(chunk, threshold);
-                        const currentFingerprint = row?.dataset?.proofreadFingerprint || '';
-                        if (!row || currentFingerprint !== nextFingerprint) {
-                            updateProofreadRow(chunk, threshold);
-                        }
-                    });
-                    cachedProofreadVisibleChunkIds = proofreadVisibleChunks.map(chunk => getChunkRef(chunk));
-                } else {
-                    renderProofreadTable(mergedChunks);
-                }
-                renderProofreadTaskStatus(latestProofreadStatus || { running: false, progress: {}, logs: [] });
-                const visibleChunks = getVisibleChunks(mergedChunks);
-                const tableRowIds = Array.from(tbody.querySelectorAll('tr[data-id]')).map(row => row.dataset.id || '');
+                    syncEditorChapterState(mergedChunks);
+                    if (forceFullRedraw || cachedChunks.length === 0) {
+                        syncProofreadChapterState(mergedChunks);
+                        refreshDictionaryCounts(mergedChunks);
+                    }
 
-                renderEditorProgressBar(mergedChunks, latestAudioState);
+                    const proofreadVisibleChunks = getProofreadVisibleChunks(mergedChunks);
+                    const proofreadRowIds = Array.from(
+                        document.querySelectorAll('#proofread-table-body tr[data-proofread-id]')
+                    ).map(row => row.dataset.proofreadId || '');
+                    const canIncrementProofread = !forceFullRedraw &&
+                        proofreadRowIds.length === proofreadVisibleChunks.length &&
+                        proofreadRowIds.every((id, index) => id === getChunkRef(proofreadVisibleChunks[index]));
 
-                // Skip redraw if playing audio (unless forced)
-                if (!forceFullRedraw && (isPlayingSequence || isAudioPlaying())) {
-                    // Only update status badges and progress indicators
-                    visibleChunks.forEach(chunk => updateChunkRow(chunk));
+                    if (canIncrementProofread) {
+                        const threshold = getProofreadThreshold();
+                        proofreadVisibleChunks.forEach(chunk => {
+                            const chunkRef = getChunkRef(chunk);
+                            const row = document.querySelector(`tr[data-proofread-id="${chunkRef}"]`);
+                            const nextFingerprint = getProofreadFingerprint(chunk, threshold);
+                            const currentFingerprint = row?.dataset?.proofreadFingerprint || '';
+                            if (!row || currentFingerprint !== nextFingerprint) {
+                                updateProofreadRow(chunk, threshold);
+                            }
+                        });
+                        cachedProofreadVisibleChunkIds = proofreadVisibleChunks.map(chunk => getChunkRef(chunk));
+                    } else {
+                        renderProofreadTable(mergedChunks);
+                    }
+                    renderProofreadTaskStatus(latestProofreadStatus || { running: false, progress: {}, logs: [] });
+                    const visibleChunks = getVisibleChunks(mergedChunks);
+                    const tableRowIds = Array.from(tbody.querySelectorAll('tr[data-id]')).map(row => row.dataset.id || '');
+
+                    renderEditorProgressBar(mergedChunks, latestAudioState);
+
+                    // Skip redraw if playing audio (unless forced)
+                    if (!forceFullRedraw && (isPlayingSequence || isAudioPlaying())) {
+                        // Only update status badges and progress indicators
+                        visibleChunks.forEach(chunk => updateChunkRow(chunk));
+                        cachedChunks = mergedChunks;
+                        cachedVisibleChunkIds = visibleChunks.map(chunk => getChunkRef(chunk));
+                        syncTrackedChunkPollers(visibleChunks);
+                        return;
+                    }
+
+                    // Check if we can do incremental update
+                    const canIncrement = !forceFullRedraw &&
+                                        tableRowIds.length === visibleChunks.length &&
+                                        tableRowIds.every((id, index) => id === getChunkRef(visibleChunks[index]));
+
+                    if (canIncrement) {
+                        // Incremental update - only update changed rows
+                        visibleChunks.forEach(chunk => {
+                            const chunkRef = getChunkRef(chunk);
+                            const cached = cachedChunks.find(candidate => getChunkRef(candidate) === chunkRef);
+                            const cachedError = cached && cached.audio_validation ? cached.audio_validation.error : null;
+                            const nextError = chunk.audio_validation ? chunk.audio_validation.error : null;
+                            if (!cached || cached.status !== chunk.status || cached.audio_path !== chunk.audio_path || cachedError !== nextError) {
+                                updateChunkRow(chunk);
+                            }
+                        });
+                    } else {
+                        // Full redraw needed
+                        const savedAudio = captureEditorAudioElements(tbody);
+                        tbody.innerHTML = visibleChunks.length === 0
+                            ? '<tr><td colspan="5" class="text-center text-muted">No segments in this chapter yet.</td></tr>'
+                            : visibleChunks.map(buildChunkRowHtml).join('');
+                        restoreEditorAudioElements(tbody, savedAudio);
+                    }
+
                     cachedChunks = mergedChunks;
                     cachedVisibleChunkIds = visibleChunks.map(chunk => getChunkRef(chunk));
                     syncTrackedChunkPollers(visibleChunks);
+                    connectEditorEventStream();
 
-                    return;
+                } catch (e) {
+                    console.error("Error loading chunks:", e);
                 }
+            })();
 
-                // Check if we can do incremental update
-                const canIncrement = !forceFullRedraw &&
-                                    tableRowIds.length === visibleChunks.length &&
-                                    tableRowIds.every((id, index) => id === getChunkRef(visibleChunks[index]));
-
-                if (canIncrement) {
-                    // Incremental update - only update changed rows
-                    visibleChunks.forEach(chunk => {
-                        const chunkRef = getChunkRef(chunk);
-                        const cached = cachedChunks.find(candidate => getChunkRef(candidate) === chunkRef);
-                        const cachedError = cached && cached.audio_validation ? cached.audio_validation.error : null;
-                        const nextError = chunk.audio_validation ? chunk.audio_validation.error : null;
-                        if (!cached || cached.status !== chunk.status || cached.audio_path !== chunk.audio_path || cachedError !== nextError) {
-                            updateChunkRow(chunk);
-                        }
-                    });
-                } else {
-                    // Full redraw needed
-                    const savedAudio = captureEditorAudioElements(tbody);
-                    tbody.innerHTML = visibleChunks.length === 0
-                        ? '<tr><td colspan="5" class="text-center text-muted">No segments in this chapter yet.</td></tr>'
-                        : visibleChunks.map(buildChunkRowHtml).join('');
-                    restoreEditorAudioElements(tbody, savedAudio);
+            loadChunksInFlight = run;
+            try {
+                return await run;
+            } finally {
+                if (loadChunksInFlight === run) {
+                    loadChunksInFlight = null;
                 }
-
-                cachedChunks = mergedChunks;
-                cachedVisibleChunkIds = visibleChunks.map(chunk => getChunkRef(chunk));
-                syncTrackedChunkPollers(visibleChunks);
-                connectEditorEventStream();
-
-            } catch (e) {
-                console.error("Error loading chunks:", e);
+                if (queuedChunkReloadRequested || queuedTrackedChunkUpdates.size > 0) {
+                    scheduleQueuedTrackedChunkFlush();
+                }
             }
         }
 

@@ -116,3 +116,56 @@ class ScriptProviderTests(unittest.TestCase):
             self.assertEqual([chunk["uid"] for chunk in targets], ["pending-1", "error-1"])
         finally:
             manager.shutdown_script_store(flush=True)
+
+    def test_audio_coverage_summary_counts_only_valid_audio(self):
+        root = self._make_root()
+        manager = ProjectManager(root)
+        try:
+            manager.save_chunks(
+                [
+                    {
+                        "id": 0,
+                        "uid": "valid-1",
+                        "speaker": "Narrator",
+                        "text": "Valid audio.",
+                        "status": "done",
+                        "audio_path": "voicelines/valid.wav",
+                        "audio_validation": {"is_valid": True, "file_size_bytes": 123, "actual_duration_sec": 1.0},
+                    },
+                    {
+                        "id": 1,
+                        "uid": "invalid-1",
+                        "speaker": "Narrator",
+                        "text": "Invalid audio.",
+                        "status": "done",
+                        "audio_path": "voicelines/invalid.wav",
+                        "audio_validation": {"is_valid": False, "error": "duration mismatch"},
+                    },
+                    {
+                        "id": 2,
+                        "uid": "pending-1",
+                        "speaker": "Narrator",
+                        "text": "Pending audio.",
+                        "status": "pending",
+                        "audio_path": None,
+                        "audio_validation": None,
+                    },
+                    {
+                        "id": 3,
+                        "uid": "blank-1",
+                        "speaker": "Narrator",
+                        "text": "   ",
+                        "status": "pending",
+                        "audio_path": None,
+                        "audio_validation": None,
+                    },
+                ]
+            )
+
+            summary = manager.get_audio_coverage_summary()
+            self.assertEqual(summary["total_clips"], 3)
+            self.assertEqual(summary["valid_clips"], 1)
+            self.assertEqual(summary["invalid_clips"], 2)
+            self.assertEqual(summary["percentage"], 33)
+        finally:
+            manager.shutdown_script_store(flush=True)

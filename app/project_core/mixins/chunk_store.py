@@ -47,6 +47,7 @@ from chunk_events import chunk_event_broker
 from source_document import load_source_document, iter_document_paragraphs
 from project_core.constants import *
 from project_core.chunking import _coerce_bool, get_speaker, _is_structural_text, _extract_chapter_name, _build_chunk, group_into_chunks, script_entries_to_chunks
+from runtime_layout import LAYOUT
 
 class ProjectChunkStoreMixin:
         _CHUNK_BACKUP_LATEST_KEY = "chunk_backup_latest"
@@ -206,8 +207,52 @@ class ProjectChunkStoreMixin:
                 pending_only=bool(pending_only),
             )
 
+        def _resolve_chunk_audio_full_path(self, audio_path, *, promote_legacy=True):
+            normalized = str(audio_path or "").strip().replace("\\", "/")
+            if not normalized:
+                return None
+
+            full_audio_path = os.path.join(self.root_dir, normalized)
+            if os.path.exists(full_audio_path):
+                return full_audio_path
+
+            if (
+                not promote_legacy
+                or not getattr(self, "_using_default_runtime_layout", False)
+                or os.path.isabs(normalized)
+                or not (
+                    normalized == "voicelines"
+                    or normalized.startswith("voicelines/")
+                )
+            ):
+                return None
+
+            parts = []
+            for part in normalized.split("/"):
+                if not part or part == ".":
+                    continue
+                if part == "..":
+                    return None
+                parts.append(part)
+            if not parts:
+                return None
+
+            legacy_audio_path = LAYOUT.legacy_path(*parts)
+            if not os.path.isfile(legacy_audio_path):
+                return None
+
+            os.makedirs(os.path.dirname(full_audio_path), exist_ok=True)
+            shutil.copy2(legacy_audio_path, full_audio_path)
+            return full_audio_path if os.path.exists(full_audio_path) else None
+
         def get_chunk_audio_ref(self, chunk_ref):
-            return self.script_store.get_chunk_audio_ref(chunk_ref)
+            payload = self.script_store.get_chunk_audio_ref(chunk_ref)
+            if payload is None:
+                return None
+            audio_path = str(payload.get("audio_path") or "").strip()
+            if audio_path:
+                self._resolve_chunk_audio_full_path(audio_path)
+            return payload
 
         def _publish_chunk_upsert(self, chunk_ref):
             chunk = self.script_store.get_chunk(chunk_ref)
@@ -359,8 +404,8 @@ class ProjectChunkStoreMixin:
                 if not audio_path or not uid:
                     continue
 
-                full_audio_path = os.path.join(self.root_dir, audio_path)
-                if not os.path.exists(full_audio_path):
+                full_audio_path = self._resolve_chunk_audio_full_path(audio_path)
+                if not full_audio_path or not os.path.exists(full_audio_path):
                     continue
 
                 try:
@@ -408,8 +453,8 @@ class ProjectChunkStoreMixin:
             return self._validate_audio_path_for_chunk(chunk, audio_path, dictionary_entries)
 
         def _validate_audio_path_for_chunk(self, chunk, audio_path, dictionary_entries):
-            full_audio_path = os.path.join(self.root_dir, audio_path)
-            if not os.path.exists(full_audio_path):
+            full_audio_path = self._resolve_chunk_audio_full_path(audio_path)
+            if not full_audio_path or not os.path.exists(full_audio_path):
                 return None
 
             transformed_text, _ = apply_dictionary_to_text(
@@ -765,6 +810,9 @@ class ProjectChunkStoreMixin:
 
         def get_chunk_chapter_summary(self):
             return self.script_store.chapter_summary()
+
+        def get_audio_coverage_summary(self):
+            return self.script_store.get_audio_coverage_summary()
 
         def has_generated_chunk_audio(self):
             return self.script_store.has_generated_audio()

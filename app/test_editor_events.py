@@ -35,6 +35,7 @@ class EditorEventsTests(unittest.IsolatedAsyncioTestCase):
         second = await iterator.__anext__()
         self.assertIn("event: chapter_list_changed", first)
         self.assertIn("event: audio_status", second)
+        self.assertIn('"audio_coverage"', second)
 
         router_module.chunk_event_broker.publish(
             "chunk_upsert",

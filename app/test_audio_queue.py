@@ -294,5 +294,112 @@ class AudioQueueMetricsTests(unittest.TestCase):
                 app_module.process_state["audio"]["cancel"] = False
                 app_module.audio_cancel_event.clear()
 
+    def test_effective_parallel_workers_clamps_local_mlx_to_one(self):
+        class FakeEngine:
+            mode = "local"
+
+            @property
+            def local_backend(self):
+                return "mlx"
+
+        original_get_engine = app_module.project_manager.get_engine
+        try:
+            app_module.project_manager.get_engine = lambda: FakeEngine()
+            workers = app_module._effective_parallel_workers(
+                {"workers": 4, "tts_cfg": {"mode": "local", "local_backend": "auto"}}
+            )
+            self.assertEqual(workers, 1)
+        finally:
+            app_module.project_manager.get_engine = original_get_engine
+
+    def test_normalize_restored_audio_job_runtime_requeues_stale_generation_finished_job(self):
+        original_list_finalize = app_module.project_manager.list_audio_finalize_tasks
+        try:
+            app_module.project_manager.list_audio_finalize_tasks = lambda generation_token=None, statuses=None: []
+            normalized = app_module._normalize_restored_audio_job_runtime(
+                {
+                    "run_token": "stale-run",
+                    "generation_finished": True,
+                    "generation_pending_uids": [],
+                    "pending_finalize_uids": ["u1"],
+                },
+                {"pending_uids": ["u1"]},
+            )
+            self.assertEqual(normalized["generation_pending_uids"], ["u1"])
+            self.assertEqual(normalized["pending_finalize_uids"], [])
+            self.assertFalse(normalized["generation_finished"])
+            self.assertIsNone(normalized["run_token"])
+        finally:
+            app_module.project_manager.list_audio_finalize_tasks = original_list_finalize
+
+    def test_audio_job_runner_skips_generation_when_only_finalization_remains(self):
+        original_parallel = app_module.project_manager.generate_chunks_parallel
+        original_batch = app_module.project_manager.generate_chunks_batch
+        original_register = app_module.project_manager.register_audio_finalization_listener
+        original_unregister = app_module.project_manager.unregister_audio_finalization_listener
+        done_event = threading.Event()
+        result_holder = {}
+        job = {
+            "id": 21,
+            "corr_id": "audio-00021-finalize-only",
+            "kind": "batch_fast",
+            "uids": ["u9"],
+            "pending_uids": ["u9"],
+            "generation_pending_uids": [],
+            "pending_finalize_uids": ["u9"],
+            "generation_finished": True,
+            "total_chunks": 1,
+            "total_words": 6,
+            "remaining_words": 6,
+            "processed_clips": 0,
+            "error_clips": 0,
+            "status": "running",
+            "label": "Finalize only",
+            "scope": "custom",
+            "run_token": "run-finalize-only",
+            "queued_at": 0.0,
+            "started_at": 1.0,
+        }
+
+        def fail_generate(*args, **kwargs):
+            raise AssertionError("generation should not rerun when only finalization remains")
+
+        try:
+            app_module.project_manager.generate_chunks_parallel = fail_generate
+            app_module.project_manager.generate_chunks_batch = fail_generate
+            app_module.project_manager.register_audio_finalization_listener = lambda *args, **kwargs: None
+            app_module.project_manager.unregister_audio_finalization_listener = lambda *args, **kwargs: None
+
+            with app_module.audio_queue_lock:
+                app_module.audio_current_job = job
+                app_module.process_state["audio"]["cancel"] = False
+                app_module.audio_cancel_event.clear()
+
+            app_module._audio_job_runner(
+                job,
+                {
+                    "workers": 4,
+                    "batch_seed": -1,
+                    "batch_size": 4,
+                    "batch_group_by_type": False,
+                    "tts_cfg": {"mode": "local", "local_backend": "auto"},
+                },
+                "run-finalize-only",
+                result_holder,
+                done_event,
+            )
+
+            self.assertTrue(done_event.is_set())
+            self.assertEqual(result_holder["results"], {"completed": [], "failed": [], "cancelled": 0})
+        finally:
+            app_module.project_manager.generate_chunks_parallel = original_parallel
+            app_module.project_manager.generate_chunks_batch = original_batch
+            app_module.project_manager.register_audio_finalization_listener = original_register
+            app_module.project_manager.unregister_audio_finalization_listener = original_unregister
+            with app_module.audio_queue_lock:
+                app_module.audio_current_job = self._backup_audio_current_job
+                app_module.process_state["audio"]["cancel"] = False
+                app_module.audio_cancel_event.clear()
+
 if __name__ == "__main__":
     unittest.main()

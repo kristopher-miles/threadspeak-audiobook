@@ -769,6 +769,52 @@ class SQLiteScriptStore(ScriptStore):
             "last_chapter": ordered_chapters[-1] if ordered_chapters else None,
         }
 
+    def get_audio_coverage_summary(self):
+        self._bootstrap_if_needed()
+        with self._connect() as conn:
+            total = int(conn.execute(
+                "SELECT COUNT(*) FROM chunks WHERE TRIM(COALESCE(text, '')) != ''"
+            ).fetchone()[0] or 0)
+            try:
+                valid = int(conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM chunks
+                    WHERE TRIM(COALESCE(text, '')) != ''
+                      AND TRIM(COALESCE(audio_path, '')) != ''
+                      AND COALESCE(json_extract(audio_validation_json, '$.is_valid'), 0) = 1
+                      AND COALESCE(json_extract(audio_validation_json, '$.error'), '') = ''
+                    """
+                ).fetchone()[0] or 0)
+            except sqlite3.OperationalError:
+                rows = conn.execute(
+                    """
+                    SELECT audio_validation_json
+                    FROM chunks
+                    WHERE TRIM(COALESCE(text, '')) != ''
+                      AND TRIM(COALESCE(audio_path, '')) != ''
+                    """
+                ).fetchall()
+                valid = 0
+                for row in rows:
+                    raw = row["audio_validation_json"]
+                    if not raw:
+                        continue
+                    try:
+                        payload = json.loads(raw)
+                    except Exception:
+                        continue
+                    if payload.get("is_valid") and not payload.get("error"):
+                        valid += 1
+        invalid = max(total - valid, 0)
+        percentage = int(round((valid / total) * 100)) if total > 0 else 0
+        return {
+            "total_clips": total,
+            "valid_clips": valid,
+            "invalid_clips": invalid,
+            "percentage": percentage,
+        }
+
     def has_generated_audio(self):
         self._bootstrap_if_needed()
         with self._connect() as conn:

@@ -28,6 +28,8 @@ class EditorTabChunkPollTests(unittest.TestCase):
                 setUpdateProofreadRow: (fn) => {{ updateProofreadRow = fn; }},
                 setSelectedEditorChapter: (value) => {{ selectedEditorChapter = value; }},
                 getNarratorSelections: () => getNarratorSelections(),
+                enqueueTrackedChunkUpdate: (chunk) => enqueueTrackedChunkUpdate(chunk),
+                flushQueuedTrackedChunkUpdates: () => flushQueuedTrackedChunkUpdates(),
             }};
             `;
 
@@ -546,6 +548,35 @@ class EditorTabChunkPollTests(unittest.TestCase):
             """
         )
 
+    def test_render_editor_progress_bar_uses_whole_book_audio_coverage_summary(self):
+        self._run_node_test(
+            """
+            (() => {
+                const context = createContext();
+                vm.createContext(context);
+                vm.runInContext(source, context);
+
+                context.renderEditorProgressBar([], {
+                    running: true,
+                    current_job: { processed_clips: 2, total_chunks: 9 },
+                    audio_coverage: {
+                        total_clips: 10,
+                        valid_clips: 7,
+                        invalid_clips: 3,
+                        percentage: 70,
+                    },
+                });
+
+                const progressBar = context.document.getElementById('full-progress-bar');
+                assert.strictEqual(progressBar.style.width, '70%');
+                assert.strictEqual(progressBar.innerText, '70% (7/10)');
+                assert.ok(progressBar.classList.contains('bg-info'));
+                assert.ok(!progressBar.classList.contains('bg-warning'));
+                assert.ok(String(progressBar.title || '').includes('7 of 10 clips'));
+            })();
+            """
+        )
+
     def test_generate_chunk_prefers_targeted_poll_results_over_stale_broad_state(self):
         self._run_node_test(
             """
@@ -594,6 +625,87 @@ class EditorTabChunkPollTests(unittest.TestCase):
                 assert.ok(row.classList.contains('status-done'));
                 assert.strictEqual(context.__editorTabTestHooks.getCachedChunks()[0].audio_path, 'voicelines/overlay.mp3');
                 assert.ok(row.__audioContainer.audio, 'audio player should be rendered from the targeted poll result');
+            })().catch((error) => {{
+                console.error(error);
+                process.exit(1);
+            }});
+            """
+        )
+
+    def test_queued_chunk_updates_apply_after_stale_reload_finishes(self):
+        self._run_node_test(
+            """
+            (async () => {
+                const context = createContext();
+                const initialChunk = {
+                    id: 8,
+                    speaker: 'Narrator',
+                    text: 'Burst updates should survive a stale reload.',
+                    instruct: '',
+                    chapter: 'Chapter 1',
+                    status: 'pending',
+                    audio_path: null,
+                    audio_validation: null,
+                };
+                const row = context.__createChunkRow(initialChunk);
+                context.__rows.set('8', row);
+
+                let resolveChunksView = null;
+                const staleChunksView = new Promise((resolve) => {
+                    resolveChunksView = resolve;
+                });
+
+                context.API.get = async (url) => {
+                    if (url === '/api/chunks/chapters') {
+                        return { chapters: [{ chapter: 'Chapter 1', chunk_count: 1, narrator_label: '' }] };
+                    }
+                    if (url === '/api/chunks/view' || url === '/api/chunks/view?chapter=Chapter%201') {
+                        return staleChunksView;
+                    }
+                    if (url === '/api/voices') {
+                        return [];
+                    }
+                    if (url === '/api/narrator_candidates?chapter=Chapter%201') {
+                        return { chapter: 'Chapter 1', voices: ['NARRATOR'] };
+                    }
+                    throw new Error(`Unexpected GET ${url}`);
+                };
+
+                vm.createContext(context);
+                vm.runInContext(source, context);
+                context.__editorTabTestHooks.setCachedChunks([initialChunk]);
+                const tbody = context.document.getElementById('chunks-table-body');
+                tbody.children = [row];
+                tbody.querySelectorAll = (selector) => {
+                    if (selector === 'tr[data-id]') return [row];
+                    return [];
+                };
+
+                const loadPromise = context.loadChunks(false);
+                await flushTicks(1);
+
+                context.__editorTabTestHooks.enqueueTrackedChunkUpdate({
+                    ...initialChunk,
+                    status: 'generating',
+                });
+                context.__editorTabTestHooks.enqueueTrackedChunkUpdate({
+                    ...initialChunk,
+                    status: 'done',
+                    audio_path: 'voicelines/final-8.wav',
+                    audio_validation: { file_size_bytes: 42, actual_duration_sec: 2.5 },
+                });
+
+                resolveChunksView([initialChunk]);
+                await loadPromise;
+                await flushTicks();
+
+                const finalChunk = context.__editorTabTestHooks.getCachedChunks()[0];
+                assert.strictEqual(finalChunk.status, 'done');
+                assert.strictEqual(finalChunk.audio_path, 'voicelines/final-8.wav');
+                assert.ok(row.classList.contains('status-done'));
+                assert.ok(!row.classList.contains('status-generating'));
+                assert.ok(row.__audioContainer.audio, 'audio player should be restored after queued completion');
+                assert.ok(String(row.__audioContainer.audio.src || '').includes('voicelines/final-8.wav'));
             })().catch((error) => {{
                 console.error(error);
                 process.exit(1);

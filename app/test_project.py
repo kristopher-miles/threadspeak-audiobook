@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from pydub import AudioSegment
 
 import project as project_module
+import project_core.mixins.chunk_store as chunk_store_module
 from project import ProjectManager
 
 
@@ -87,6 +88,37 @@ class ReconcileChunkAudioStatesTests(unittest.TestCase):
 
         self.assertEqual(reconciled[0]["status"], "done")
         self.assertTrue(reconciled[0]["audio_validation"]["is_valid"])
+
+    def test_get_chunk_audio_ref_promotes_legacy_voiceline_into_runtime_project(self):
+        legacy_root = os.path.join(self.root_dir, "legacy-root")
+        os.makedirs(os.path.join(legacy_root, "voicelines"), exist_ok=True)
+        legacy_clip = os.path.join(legacy_root, "voicelines", "clip.wav")
+        sample_rate = 24000
+        samples = np.zeros(int(sample_rate * 3.0), dtype=np.float32)
+        sf.write(legacy_clip, samples, sample_rate)
+
+        chunks = [{
+            "id": 0,
+            "speaker": "Narrator",
+            "text": "One two three four five six.",
+            "instruct": "",
+            "status": "done",
+            "audio_path": "voicelines/clip.wav",
+            "audio_validation": None,
+            "auto_regen_count": 0,
+        }]
+        self.manager.save_chunks(chunks)
+        self.manager._using_default_runtime_layout = True
+
+        fake_layout = SimpleNamespace(
+            legacy_path=lambda *parts: os.path.join(legacy_root, *parts),
+        )
+        with patch.object(chunk_store_module, "LAYOUT", fake_layout):
+            payload = self.manager.get_chunk_audio_ref(0)
+
+        runtime_clip = os.path.join(self.root_dir, "voicelines", "clip.wav")
+        self.assertEqual(payload["audio_path"], "voicelines/clip.wav")
+        self.assertTrue(os.path.exists(runtime_clip))
 
     def test_proofread_batch_commit_preserves_live_generation_token(self):
         chunks_disk = [{

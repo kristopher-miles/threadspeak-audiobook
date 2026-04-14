@@ -1159,6 +1159,7 @@ process_state = {
         "merge_progress": {},
         "metrics": {},
         "heartbeat": {},
+        "audio_coverage": {},
     },
     "audacity_export": {"running": False, "logs": []},
     "m4b_export": {"running": False, "logs": []},
@@ -1274,6 +1275,15 @@ def _new_audio_metrics():
         "estimated_remaining_seconds": None,
         "words_per_minute": None,
         "error_rate": 0.0,
+    }
+
+
+def _default_audio_coverage_summary():
+    return {
+        "total_clips": 0,
+        "valid_clips": 0,
+        "invalid_clips": 0,
+        "percentage": 0,
     }
 
 
@@ -1536,6 +1546,102 @@ def _job_word_counts(job):
     if raw is None:
         raw = job.get("word_counts") or {}
     return {str(uid).strip(): int(count or 0) for uid, count in dict(raw).items() if str(uid).strip()}
+
+
+def _live_pending_finalize_uids_for_job(raw_job, pending_uids):
+    normalized_pending = [str(uid).strip() for uid in (pending_uids or []) if str(uid).strip()]
+    if not normalized_pending:
+        return []
+
+    run_token = str((raw_job or {}).get("run_token") or "").strip()
+    if not run_token:
+        return []
+
+    try:
+        tasks = project_manager.list_audio_finalize_tasks(
+            generation_token=run_token,
+            statuses=("pending", "processing"),
+        )
+    except Exception:
+        return []
+
+    pending_lookup = set(normalized_pending)
+    live_uids = []
+    seen = set()
+    for task in tasks or []:
+        uid = str((task or {}).get("chunk_uid") or "").strip()
+        if not uid or uid not in pending_lookup or uid in seen:
+            continue
+        seen.add(uid)
+        live_uids.append(uid)
+    return live_uids
+
+
+def _normalize_restored_audio_job_runtime(raw_job, progress):
+    progress_pending = [str(uid).strip() for uid in (progress or {}).get("pending_uids", []) if str(uid).strip()]
+    live_finalize_uids = _live_pending_finalize_uids_for_job(raw_job, progress_pending)
+    live_finalize_lookup = set(live_finalize_uids)
+
+    raw_generation_pending = [
+        uid for uid in _job_generation_pending_uids(raw_job)
+        if uid in progress_pending and uid not in live_finalize_lookup
+    ]
+
+    if bool((raw_job or {}).get("generation_finished", False)):
+        generation_pending_uids = [uid for uid in progress_pending if uid not in live_finalize_lookup]
+    else:
+        generation_pending_uids = list(raw_generation_pending)
+        for uid in progress_pending:
+            if uid not in live_finalize_lookup and uid not in generation_pending_uids:
+                generation_pending_uids.append(uid)
+
+    generation_finished = (
+        bool((raw_job or {}).get("generation_finished", False))
+        or bool(live_finalize_uids)
+    ) and not generation_pending_uids
+    run_token = str((raw_job or {}).get("run_token") or "").strip() or None
+    if not live_finalize_uids:
+        run_token = None
+
+    return {
+        "generation_pending_uids": generation_pending_uids,
+        "pending_finalize_uids": live_finalize_uids,
+        "generation_finished": generation_finished,
+        "run_token": run_token,
+    }
+
+
+def _effective_parallel_workers(settings):
+    configured_workers = max(1, int((settings or {}).get("workers", 1) or 1))
+    tts_cfg = dict((settings or {}).get("tts_cfg") or {})
+    if str(tts_cfg.get("mode") or "").strip().lower() != "local":
+        return configured_workers
+
+    backend_hint = str(tts_cfg.get("local_backend") or "").strip().lower()
+    try:
+        engine = project_manager.get_engine()
+    except Exception:
+        engine = None
+
+    engine_mode = str(
+        getattr(engine, "mode", None)
+        or getattr(engine, "_mode", None)
+        or tts_cfg.get("mode")
+        or ""
+    ).strip().lower()
+    resolved_backend = None
+    resolver = getattr(engine, "_resolve_local_backend", None)
+    if callable(resolver):
+        try:
+            resolved_backend = resolver()
+        except Exception:
+            resolved_backend = None
+    if resolved_backend is None:
+        resolved_backend = getattr(engine, "local_backend", None) or backend_hint
+
+    if engine_mode == "local" and str(resolved_backend or "").strip().lower() == "mlx":
+        return 1
+    return configured_workers
 
 
 def _resolve_uid_ordinals(uids):
@@ -2834,6 +2940,11 @@ def _refresh_audio_process_state_locked(persist=False):
     process_state["audio"]["metrics"] = _format_audio_metrics_locked()
     process_state["audio"]["heartbeat"] = _format_audio_heartbeat_locked()
     process_state["audio"]["merge_progress"] = dict(process_state["audio"].get("merge_progress") or _new_audio_merge_progress())
+    try:
+        coverage = project_manager.get_audio_coverage_summary()
+    except Exception:
+        coverage = _default_audio_coverage_summary()
+    process_state["audio"]["audio_coverage"] = dict(coverage or _default_audio_coverage_summary())
     if persist:
         _persist_audio_queue_state_locked()
     chunk_event_broker.publish("audio_status", {
@@ -2845,6 +2956,7 @@ def _refresh_audio_process_state_locked(persist=False):
         "heartbeat": dict(process_state["audio"]["heartbeat"]),
         "merge_running": bool(process_state["audio"].get("merge_running")),
         "merge_progress": dict(process_state["audio"].get("merge_progress") or {}),
+        "audio_coverage": dict(process_state["audio"].get("audio_coverage") or _default_audio_coverage_summary()),
     })
 
 
@@ -3435,30 +3547,22 @@ def _restore_audio_queue_state():
             progress = _restore_job_progress_from_chunks(raw_job)
             if not progress["pending_uids"]:
                 continue
+            normalized_runtime = _normalize_restored_audio_job_runtime(raw_job, progress)
             restored_jobs.append({
                 "id": int(raw_job.get("id", 0) or 0),
                 "corr_id": (raw_job.get("corr_id") or f"audio-{int(raw_job.get('id', 0) or 0):05d}-{uuid.uuid4().hex[:8]}"),
                 "kind": raw_job.get("kind", "parallel"),
                 "uids": progress["uids"],
                 "pending_uids": progress["pending_uids"],
-                "generation_pending_uids": [
-                    uid for uid in (_job_generation_pending_uids(raw_job) or progress["pending_uids"])
-                    if uid in progress["pending_uids"]
-                ] if not raw_job.get("generation_finished") else [],
-                "pending_finalize_uids": [
-                    uid for uid in (_job_pending_finalize_uids(raw_job) or [])
-                    if uid in progress["pending_uids"]
-                ] if raw_job.get("generation_finished") else [
-                    uid for uid in (_job_pending_finalize_uids(raw_job) or [])
-                    if uid in progress["pending_uids"]
-                ],
+                "generation_pending_uids": normalized_runtime["generation_pending_uids"],
+                "pending_finalize_uids": normalized_runtime["pending_finalize_uids"],
                 "word_counts_by_uid": progress["word_counts_by_uid"],
                 "total_chunks": progress["total_chunks"],
                 "total_words": progress["total_words"],
                 "remaining_words": progress["remaining_words"],
                 "processed_clips": progress["processed_clips"],
                 "error_clips": progress["error_clips"],
-                "generation_finished": bool(raw_job.get("generation_finished", False)),
+                "generation_finished": normalized_runtime["generation_finished"],
                 "finalized_clips": int(raw_job.get("finalized_clips", 0) or progress["processed_clips"]),
                 "finalizer_failures": int(raw_job.get("finalizer_failures", 0) or 0),
                 "retry_uids": [uid for uid in (raw_job.get("retry_uids") or []) if uid in progress["pending_uids"]],
@@ -3474,7 +3578,7 @@ def _restore_audio_queue_state():
                 "last_output_at": None,
                 "last_generation_activity_at": raw_job.get("last_generation_activity_at"),
                 "last_finalize_activity_at": raw_job.get("last_finalize_activity_at"),
-                "run_token": raw_job.get("run_token"),
+                "run_token": normalized_runtime["run_token"],
             })
 
         raw_current = payload.get("current_job")
@@ -3482,27 +3586,22 @@ def _restore_audio_queue_state():
         if raw_current:
             progress = _restore_job_progress_from_chunks(raw_current)
             if progress["pending_uids"]:
+                normalized_runtime = _normalize_restored_audio_job_runtime(raw_current, progress)
                 resumed_job = {
                     "id": int(raw_current.get("id", 0) or 0),
                     "corr_id": (raw_current.get("corr_id") or f"audio-{int(raw_current.get('id', 0) or 0):05d}-{uuid.uuid4().hex[:8]}"),
                     "kind": raw_current.get("kind", "parallel"),
                     "uids": progress["uids"],
                     "pending_uids": progress["pending_uids"],
-                    "generation_pending_uids": [
-                        uid for uid in (_job_generation_pending_uids(raw_current) or progress["pending_uids"])
-                        if uid in progress["pending_uids"]
-                    ] if not raw_current.get("generation_finished") else [],
-                    "pending_finalize_uids": [
-                        uid for uid in (_job_pending_finalize_uids(raw_current) or [])
-                        if uid in progress["pending_uids"]
-                    ],
+                    "generation_pending_uids": normalized_runtime["generation_pending_uids"],
+                    "pending_finalize_uids": normalized_runtime["pending_finalize_uids"],
                     "word_counts_by_uid": progress["word_counts_by_uid"],
                     "total_chunks": progress["total_chunks"],
                     "total_words": progress["total_words"],
                     "remaining_words": progress["remaining_words"],
                     "processed_clips": progress["processed_clips"],
                     "error_clips": progress["error_clips"],
-                    "generation_finished": bool(raw_current.get("generation_finished", False)),
+                    "generation_finished": normalized_runtime["generation_finished"],
                     "finalized_clips": int(raw_current.get("finalized_clips", 0) or progress["processed_clips"]),
                     "finalizer_failures": int(raw_current.get("finalizer_failures", 0) or 0),
                     "retry_uids": [uid for uid in (raw_current.get("retry_uids") or []) if uid in progress["pending_uids"]],
@@ -3518,7 +3617,7 @@ def _restore_audio_queue_state():
                     "last_output_at": None,
                     "last_generation_activity_at": raw_current.get("last_generation_activity_at"),
                     "last_finalize_activity_at": raw_current.get("last_finalize_activity_at"),
-                    "run_token": raw_current.get("run_token"),
+                    "run_token": normalized_runtime["run_token"],
                 }
                 restored_jobs.insert(0, resumed_job)
                 _append_audio_log_locked(
@@ -3630,7 +3729,13 @@ def _abandon_audio_job_locked(job, run_token, reason, *, status="cancelled"):
 
 def _audio_job_runner(job, settings, run_token, result_holder, done_event):
     job_prefix = f"[JOB {job['id']}|{job.get('corr_id', 'no-cid')}]"
-    execution_uids = list(_job_generation_pending_uids(job) or _job_uids(job))
+    generation_pending_uids = _job_generation_pending_uids(job)
+    if generation_pending_uids:
+        execution_uids = list(generation_pending_uids)
+    elif job.get("generation_finished"):
+        execution_uids = []
+    else:
+        execution_uids = list(_job_uids(job))
     started_at_by_uid = {}
     generation_elapsed_by_uid = {}
 
@@ -3757,10 +3862,17 @@ def _audio_job_runner(job, settings, run_token, result_holder, done_event):
             item_callback=finalization_item_callback,
             activity_callback=activity_callback,
         )
-        if job["kind"] == "parallel":
+        if not execution_uids:
+            result_holder["results"] = {"completed": [], "failed": [], "cancelled": 0}
+        elif job["kind"] == "parallel":
+            effective_workers = _effective_parallel_workers(settings)
+            if effective_workers != settings["workers"]:
+                _append_audio_log(
+                    f"{job_prefix} Using {effective_workers} worker for local MLX stability (configured {settings['workers']})"
+                )
             result_holder["results"] = project_manager.generate_chunks_parallel(
                 execution_uids,
-                settings["workers"],
+                effective_workers,
                 progress_callback,
                 cancel_check=cancel_check,
                 item_callback=item_callback,

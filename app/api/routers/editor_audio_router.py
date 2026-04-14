@@ -86,6 +86,7 @@ def _audio_status_payload():
             "merge_progress": dict(process_state["audio"].get("merge_progress") or {}),
             "metrics": dict(process_state["audio"].get("metrics") or {}),
             "heartbeat": dict(process_state["audio"].get("heartbeat") or {}),
+            "audio_coverage": dict(process_state["audio"].get("audio_coverage") or {}),
         }
 
 
