@@ -52,6 +52,7 @@
         function getChunkStatusMeta(chunk) {
             const validationError = chunk.audio_validation && chunk.audio_validation.error;
             const statusColor = chunk.status === 'done' ? 'success' :
+                              chunk.status === 'finalizing' ? 'info' :
                               chunk.status === 'generating' ? 'warning' :
                               chunk.status === 'error' ? 'danger' : 'secondary';
             const statusDetail = validationError
@@ -62,6 +63,7 @@
 
         function getEditorRowStatusClass(chunk) {
             if (chunk?.status === 'done') return 'status-done';
+            if (chunk?.status === 'finalizing') return 'status-finalizing';
             if (chunk?.status === 'generating') return 'status-generating';
             return '';
         }
@@ -74,6 +76,14 @@
             return `
                 <div class="progress chunk-generate-progress" style="width: 100%; height: 16px;">
                     <div class="progress-bar progress-bar-striped progress-bar-animated bg-warning" role="progressbar" style="width: 100%"></div>
+                </div>
+            `;
+        }
+
+        function buildFinalizingProgressHtml() {
+            return `
+                <div class="progress chunk-generate-progress" style="width: 100%; height: 16px;" title="Saving generated audio">
+                    <div class="progress-bar progress-bar-striped progress-bar-animated bg-info" role="progressbar" style="width: 100%"></div>
                 </div>
             `;
         }
@@ -501,7 +511,7 @@
             const tr = document.querySelector(`tr[data-id="${chunkRef}"]`);
             if (!tr) return false;
 
-            tr.classList.remove('status-done', 'status-generating');
+            tr.classList.remove('status-done', 'status-generating', 'status-finalizing');
             const rowStatusClass = getEditorRowStatusClass(chunk);
             if (rowStatusClass) {
                 tr.classList.add(rowStatusClass);
@@ -515,6 +525,10 @@
                 if (chunk.status === 'generating') {
                     if (!existingProgress) {
                         generateSlot.innerHTML = buildGeneratingProgressHtml();
+                    }
+                } else if (chunk.status === 'finalizing') {
+                    if (!existingProgress || !generateSlot.querySelector('.bg-info')) {
+                        generateSlot.innerHTML = buildFinalizingProgressHtml();
                     }
                 } else if (!existingBtn || existingProgress) {
                     generateSlot.innerHTML = buildGenerateButtonHtml(chunkRef);
@@ -1955,9 +1969,11 @@
                 })
                 : '';
 
-            const actionArea = chunk.status === 'generating' ?
-                buildGeneratingProgressHtml() :
-                buildGenerateButtonHtml(chunkRef);
+            const actionArea = chunk.status === 'generating'
+                ? buildGeneratingProgressHtml()
+                : chunk.status === 'finalizing'
+                    ? buildFinalizingProgressHtml()
+                    : buildGenerateButtonHtml(chunkRef);
 
             return `
                 <tr data-id="${escapeHtml(chunkRef)}" data-chapter="${escapeHtml(getChunkChapterName(chunk) || '')}" class="chunk-row${rowStatusClass ? ` ${rowStatusClass}` : ''}">

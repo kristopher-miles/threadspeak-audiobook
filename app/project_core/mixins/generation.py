@@ -41,6 +41,7 @@ from pydub.silence import detect_nonsilent
 from ffmpeg_utils import configure_pydub, get_ffmpeg_exe, get_ffprobe_exe
 from script_store import apply_dictionary_to_text
 from source_document import load_source_document, iter_document_paragraphs
+from audio_perf import record_audio_perf
 from project_core.constants import *
 from project_core.chunking import _coerce_bool, get_speaker, _is_structural_text, _extract_chapter_name, _build_chunk, group_into_chunks, script_entries_to_chunks
 
@@ -422,7 +423,6 @@ class ProjectGenerationMixin:
                     success, msg, elapsed_seconds = future.result()
                     if success:
                         results["completed"].append(uid)
-                        print(f"Chunk {uid} submitted for finalization: {msg}")
                         if item_callback:
                             item_callback(uid, True, elapsed_seconds, word_counts.get(uid, 0), word_counts.get(uid, 0))
                     else:
@@ -622,8 +622,6 @@ class ProjectGenerationMixin:
                     results["failed"].append((uid, "TTS engine not initialized"))
                 return results
 
-            self._claim_chunks_generation(target_uids, generation_token)
-
             # Optionally reorder indices so same voice-type chunks are contiguous.
             # This produces larger homogeneous batches (e.g. all custom voices
             # together) instead of fragmenting each batch across voice types.
@@ -642,6 +640,20 @@ class ProjectGenerationMixin:
                     print(f"[CANCEL] Cancellation requested before batch {batch_num + 1}")
                     break
 
+                claimed_rows = self.claim_generation_many(batch_uids, generation_token)
+                claimed_uids = [
+                    str((chunk or {}).get("uid") or "").strip()
+                    for chunk in (claimed_rows or [])
+                    if str((chunk or {}).get("uid") or "").strip()
+                ]
+                if not claimed_uids:
+                    print(
+                        f"Batch {batch_num + 1}/{len(batches)}: "
+                        f"{len(batch_uids)} requested chunks skipped (none claimable)"
+                    )
+                    continue
+
+                batch_uids = claimed_uids
                 print(f"Batch {batch_num + 1}/{len(batches)}: {len(batch_uids)} chunks")
 
                 # Build batch request data
@@ -678,12 +690,21 @@ class ProjectGenerationMixin:
                     f"batch_{batch_num + 1:04d}",
                 )
                 os.makedirs(batch_output_dir, exist_ok=True)
+                batch_generate_started = time.perf_counter()
                 batch_results = engine.generate_batch(
                     batch_chunks,
                     voice_config,
                     batch_output_dir,
                     batch_seed,
                     cancel_check=cancel_check,
+                )
+                record_audio_perf(
+                    "audio_batch_generate",
+                    generation_token=generation_token,
+                    batch_num=batch_num + 1,
+                    total_batches=len(batches),
+                    batch_size=len(batch_uids),
+                    elapsed_ms=round((time.perf_counter() - batch_generate_started) * 1000.0, 3),
                 )
 
                 # Some backends have been observed to materialize temp audio
@@ -718,6 +739,7 @@ class ProjectGenerationMixin:
 
                 processed_in_batch = len(batch_results["completed"]) + len(batch_results["failed"])
                 shared_elapsed = (time.time() - batch_start) / processed_in_batch if processed_in_batch > 0 else 0.0
+                batch_postprocess_started = time.perf_counter()
 
                 for uid in batch_results["completed"]:
                     if cancel_check and cancel_check():
@@ -762,7 +784,6 @@ class ProjectGenerationMixin:
                             results["failed"].append((uid, "Generation abandoned"))
                             continue
                         results["completed"].append(uid)
-                        print(f"Chunk {uid} submitted for finalization")
                         if item_callback:
                             item_callback(uid, True, shared_elapsed, word_counts.get(uid, 0), word_counts.get(uid, 0))
                     except Exception as e:
@@ -778,6 +799,15 @@ class ProjectGenerationMixin:
                         self._cleanup_temp_file(temp_path)
                         if item_callback:
                             item_callback(uid, False, shared_elapsed, word_counts.get(uid, 0), 0)
+                record_audio_perf(
+                    "audio_batch_postprocess",
+                    generation_token=generation_token,
+                    batch_num=batch_num + 1,
+                    total_batches=len(batches),
+                    completed=len(batch_results["completed"]),
+                    failed=len(batch_results["failed"]),
+                    elapsed_ms=round((time.perf_counter() - batch_postprocess_started) * 1000.0, 3),
+                )
 
                 for uid, error in batch_results["failed"]:
                     if self.get_chunk_raw(uid) is not None:

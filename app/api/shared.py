@@ -27,6 +27,7 @@ import urllib.error
 import sqlite3
 from openai import OpenAI
 from chunk_events import chunk_event_broker
+from audio_perf import record_audio_perf
 
 # Import ProjectManager
 from project import ProjectManager
@@ -1548,33 +1549,104 @@ def _job_word_counts(job):
     return {str(uid).strip(): int(count or 0) for uid, count in dict(raw).items() if str(uid).strip()}
 
 
-def _live_pending_finalize_uids_for_job(raw_job, pending_uids):
-    normalized_pending = [str(uid).strip() for uid in (pending_uids or []) if str(uid).strip()]
-    if not normalized_pending:
-        return []
-
+def _live_pending_finalize_uids_for_job(raw_job, candidate_uids=None):
     run_token = str((raw_job or {}).get("run_token") or "").strip()
     if not run_token:
         return []
 
+    normalized_candidates = [str(uid).strip() for uid in (candidate_uids or []) if str(uid).strip()]
+    candidate_lookup = set(normalized_candidates) if normalized_candidates else None
+
     try:
         tasks = project_manager.list_audio_finalize_tasks(
             generation_token=run_token,
-            statuses=("pending", "processing"),
+            statuses=("queued", "processing"),
         )
     except Exception:
         return []
 
-    pending_lookup = set(normalized_pending)
     live_uids = []
     seen = set()
     for task in tasks or []:
         uid = str((task or {}).get("chunk_uid") or "").strip()
-        if not uid or uid not in pending_lookup or uid in seen:
+        if not uid or uid in seen:
+            continue
+        if candidate_lookup is not None and uid not in candidate_lookup:
             continue
         seen.add(uid)
         live_uids.append(uid)
-    return live_uids
+
+    if not live_uids:
+        return []
+
+    try:
+        rows = project_manager.get_chunks_by_uids(live_uids)
+    except Exception:
+        return live_uids
+
+    row_by_uid = {
+        str((row or {}).get("uid") or "").strip(): row
+        for row in rows or []
+        if str((row or {}).get("uid") or "").strip()
+    }
+    return [
+        uid for uid in live_uids
+        if (row_by_uid.get(uid) or {}).get("status") not in {"done", "error"}
+    ]
+
+
+def _reconcile_audio_job_runtime_locked(job):
+    if not job:
+        return job
+
+    tracked_uids = []
+    for uid in _job_pending_uids(job) + _job_generation_pending_uids(job) + _job_pending_finalize_uids(job):
+        normalized_uid = str(uid).strip()
+        if normalized_uid and normalized_uid not in tracked_uids:
+            tracked_uids.append(normalized_uid)
+
+    live_finalize_uids = _live_pending_finalize_uids_for_job(job)
+    for uid in live_finalize_uids:
+        if uid not in tracked_uids:
+            tracked_uids.append(uid)
+
+    row_by_uid = {}
+    if tracked_uids:
+        try:
+            rows = project_manager.get_chunks_by_uids(tracked_uids)
+        except Exception:
+            rows = []
+        row_by_uid = {
+            str((row or {}).get("uid") or "").strip(): row
+            for row in rows or []
+            if str((row or {}).get("uid") or "").strip()
+        }
+
+    def _is_pending(uid):
+        row = row_by_uid.get(uid)
+        if row is None:
+            return False
+        return str((row or {}).get("status") or "").strip() not in {"done", "error"}
+
+    live_finalize_lookup = set(live_finalize_uids)
+    generation_pending = [
+        uid for uid in _job_generation_pending_uids(job)
+        if uid not in live_finalize_lookup and _is_pending(uid)
+    ]
+    pending_lookup = set(generation_pending) | live_finalize_lookup
+    for uid in _job_pending_uids(job):
+        if _is_pending(uid):
+            pending_lookup.add(uid)
+
+    job["generation_pending_uids"] = generation_pending
+    job["pending_finalize_uids"] = [uid for uid in live_finalize_uids if _is_pending(uid)]
+    job["pending_uids"] = [
+        uid for uid in _job_uids(job)
+        if uid in pending_lookup and _is_pending(uid)
+    ]
+    if bool(job.get("generation_finished")) and job["generation_pending_uids"]:
+        job["generation_finished"] = False
+    return job
 
 
 def _normalize_restored_audio_job_runtime(raw_job, progress):
@@ -1654,6 +1726,7 @@ def _resolve_uid_ordinals(uids):
 
 
 def _serialize_audio_job(job):
+    _reconcile_audio_job_runtime_locked(job)
     uids = _job_uids(job)
     pending_uids = _job_pending_uids(job)
     generation_pending_uids = _job_generation_pending_uids(job)
@@ -1684,6 +1757,77 @@ def _serialize_audio_job(job):
         "retry_uids": [str(uid).strip() for uid in (job.get("retry_uids") or []) if str(uid).strip()],
         "pending_indices": [ordinals[uid] for uid in pending_uids if uid in ordinals],
         "recovery_count": job.get("recovery_count", 0),
+        "queued_at": job.get("queued_at"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "last_output_at": job.get("last_output_at"),
+        "last_generation_activity_at": job.get("last_generation_activity_at"),
+        "last_finalize_activity_at": job.get("last_finalize_activity_at"),
+        "run_token": job.get("run_token"),
+    }
+
+
+def _serialize_audio_job_checkpoint(job):
+    return {
+        "id": job["id"],
+        "corr_id": job.get("corr_id"),
+        "kind": job["kind"],
+        "status": job["status"],
+        "label": job["label"],
+        "scope": job["scope"],
+        "scope_mode": job.get("scope_mode"),
+        "chapter": job.get("chapter"),
+        "uids": _job_uids(job),
+        "pending_uids": _job_pending_uids(job),
+        "generation_pending_uids": _job_generation_pending_uids(job),
+        "pending_finalize_uids": _job_pending_finalize_uids(job),
+        "total_chunks": job["total_chunks"],
+        "total_words": job.get("total_words", 0),
+        "remaining_words": job.get("remaining_words", 0),
+        "processed_clips": job.get("processed_clips", 0),
+        "error_clips": job.get("error_clips", 0),
+        "generation_finished": bool(job.get("generation_finished", False)),
+        "finalized_clips": int(job.get("finalized_clips", 0) or 0),
+        "finalizer_failures": int(job.get("finalizer_failures", 0) or 0),
+        "retry_uids": [str(uid).strip() for uid in (job.get("retry_uids") or []) if str(uid).strip()],
+        "recovery_count": job.get("recovery_count", 0),
+        "queued_at": job.get("queued_at"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "last_output_at": job.get("last_output_at"),
+        "last_generation_activity_at": job.get("last_generation_activity_at"),
+        "last_finalize_activity_at": job.get("last_finalize_activity_at"),
+        "run_token": job.get("run_token"),
+    }
+
+
+def _serialize_audio_job_summary(job):
+    pending_uids = _job_pending_uids(job)
+    generation_pending_uids = _job_generation_pending_uids(job)
+    pending_finalize_uids = _job_pending_finalize_uids(job)
+    retry_uids = [str(uid).strip() for uid in (job.get("retry_uids") or []) if str(uid).strip()]
+    return {
+        "id": job["id"],
+        "corr_id": job.get("corr_id"),
+        "kind": job["kind"],
+        "status": job["status"],
+        "label": job["label"],
+        "scope": job["scope"],
+        "scope_mode": job.get("scope_mode"),
+        "chapter": job.get("chapter"),
+        "total_chunks": job["total_chunks"],
+        "total_words": job.get("total_words", 0),
+        "remaining_words": job.get("remaining_words", 0),
+        "processed_clips": job.get("processed_clips", 0),
+        "error_clips": job.get("error_clips", 0),
+        "generation_finished": bool(job.get("generation_finished", False)),
+        "finalized_clips": int(job.get("finalized_clips", 0) or 0),
+        "finalizer_failures": int(job.get("finalizer_failures", 0) or 0),
+        "recovery_count": job.get("recovery_count", 0),
+        "pending_chunks": len(pending_uids),
+        "generation_pending_chunks": len(generation_pending_uids),
+        "pending_finalize_chunks": len(pending_finalize_uids),
+        "retry_chunks": len(retry_uids),
         "queued_at": job.get("queued_at"),
         "started_at": job.get("started_at"),
         "finished_at": job.get("finished_at"),
@@ -2921,8 +3065,8 @@ def _persist_audio_queue_state_locked():
 
     payload = {
         "job_counter": audio_job_counter,
-        "queue": [_serialize_audio_job(job) | {"word_counts_by_uid": _job_word_counts(job)} for job in audio_queue],
-        "current_job": (_serialize_audio_job(audio_current_job) | {"word_counts_by_uid": _job_word_counts(audio_current_job)}) if audio_current_job else None,
+        "queue": [_serialize_audio_job_checkpoint(job) | {"word_counts_by_uid": _job_word_counts(job)} for job in audio_queue],
+        "current_job": (_serialize_audio_job_checkpoint(audio_current_job) | {"word_counts_by_uid": _job_word_counts(audio_current_job)}) if audio_current_job else None,
         "metrics": _format_audio_metrics_locked(),
         "heartbeat": _format_audio_heartbeat_locked(),
         "updated_at": time.time(),
@@ -2934,19 +3078,35 @@ def _persist_audio_queue_state_locked():
 
 
 def _refresh_audio_process_state_locked(persist=False):
-    process_state["audio"]["queue"] = [_serialize_audio_job(job) for job in audio_queue]
-    process_state["audio"]["current_job"] = _serialize_audio_job(audio_current_job) if audio_current_job else None
+    refresh_started = time.perf_counter()
+
+    serialize_started = time.perf_counter()
+    process_state["audio"]["queue"] = [_serialize_audio_job_summary(job) for job in audio_queue]
+    process_state["audio"]["current_job"] = _serialize_audio_job_summary(audio_current_job) if audio_current_job else None
+    serialize_ms = (time.perf_counter() - serialize_started) * 1000.0
+
+    metrics_started = time.perf_counter()
     process_state["audio"]["running"] = audio_current_job is not None or process_state["audio"].get("merge_running", False)
     process_state["audio"]["metrics"] = _format_audio_metrics_locked()
     process_state["audio"]["heartbeat"] = _format_audio_heartbeat_locked()
     process_state["audio"]["merge_progress"] = dict(process_state["audio"].get("merge_progress") or _new_audio_merge_progress())
+    metrics_ms = (time.perf_counter() - metrics_started) * 1000.0
+
+    coverage_started = time.perf_counter()
     try:
         coverage = project_manager.get_audio_coverage_summary()
     except Exception:
         coverage = _default_audio_coverage_summary()
     process_state["audio"]["audio_coverage"] = dict(coverage or _default_audio_coverage_summary())
+    coverage_ms = (time.perf_counter() - coverage_started) * 1000.0
+
+    persist_ms = 0.0
     if persist:
+        persist_started = time.perf_counter()
         _persist_audio_queue_state_locked()
+        persist_ms = (time.perf_counter() - persist_started) * 1000.0
+
+    publish_started = time.perf_counter()
     chunk_event_broker.publish("audio_status", {
         "running": process_state["audio"]["running"],
         "queue": list(process_state["audio"]["queue"]),
@@ -2958,6 +3118,19 @@ def _refresh_audio_process_state_locked(persist=False):
         "merge_progress": dict(process_state["audio"].get("merge_progress") or {}),
         "audio_coverage": dict(process_state["audio"].get("audio_coverage") or _default_audio_coverage_summary()),
     })
+    publish_ms = (time.perf_counter() - publish_started) * 1000.0
+    record_audio_perf(
+        "refresh_audio_process_state",
+        persist=bool(persist),
+        queue_len=len(audio_queue),
+        current_job_id=(audio_current_job or {}).get("id"),
+        serialize_ms=round(serialize_ms, 3),
+        metrics_ms=round(metrics_ms, 3),
+        coverage_ms=round(coverage_ms, 3),
+        persist_ms=round(persist_ms, 3),
+        publish_ms=round(publish_ms, 3),
+        total_ms=round((time.perf_counter() - refresh_started) * 1000.0, 3),
+    )
 
 
 def _write_audio_cancel_tombstone_locked(reason, job=None):
@@ -3062,7 +3235,7 @@ def _load_export_config() -> ExportConfig:
 
 
 def _record_audio_recent_job_locked(job):
-    process_state["audio"]["recent_jobs"].insert(0, _serialize_audio_job(job))
+    process_state["audio"]["recent_jobs"].insert(0, _serialize_audio_job_summary(job))
     del process_state["audio"]["recent_jobs"][10:]
 
 
@@ -3160,6 +3333,7 @@ def _record_audio_finalize_result_locked(job, chunk_uid, success, meta=None):
 
 
 def _audio_job_ready_to_finish_locked(job):
+    _reconcile_audio_job_runtime_locked(job)
     return bool(
         job
         and job.get("generation_finished")
@@ -3786,14 +3960,27 @@ def _audio_job_runner(job, settings, run_token, result_holder, done_event):
         return max(0.0, time.time() - started_at)
 
     def item_started_callback(uid, started_at):
+        callback_started = time.perf_counter()
+        refresh_ms = 0.0
         with audio_queue_lock:
             if not is_active():
                 return
             _remember_started_at(uid, started_at)
             _mark_audio_generation_activity_locked(job)
-            _refresh_audio_process_state_locked(persist=True)
+            refresh_started = time.perf_counter()
+            _refresh_audio_process_state_locked(persist=False)
+            refresh_ms = (time.perf_counter() - refresh_started) * 1000.0
+        record_audio_perf(
+            "audio_callback_item_started",
+            job_id=job["id"],
+            uid=uid,
+            refresh_ms=round(refresh_ms, 3),
+            total_ms=round((time.perf_counter() - callback_started) * 1000.0, 3),
+        )
 
     def progress_callback(completed, failed, total):
+        callback_started = time.perf_counter()
+        refresh_ms = 0.0
         with audio_queue_lock:
             if not is_active():
                 return
@@ -3801,9 +3988,22 @@ def _audio_job_runner(job, settings, run_token, result_holder, done_event):
             _append_audio_log_locked(
                 f"{job_prefix} Progress: {completed + failed}/{total} ({completed} submitted, {failed} failed)"
             )
-            _refresh_audio_process_state_locked(persist=True)
+            refresh_started = time.perf_counter()
+            _refresh_audio_process_state_locked(persist=False)
+            refresh_ms = (time.perf_counter() - refresh_started) * 1000.0
+        record_audio_perf(
+            "audio_callback_progress",
+            job_id=job["id"],
+            completed=int(completed or 0),
+            failed=int(failed or 0),
+            total=int(total or 0),
+            refresh_ms=round(refresh_ms, 3),
+            total_ms=round((time.perf_counter() - callback_started) * 1000.0, 3),
+        )
 
     def item_callback(uid, success, elapsed_seconds, input_words, output_words):
+        callback_started = time.perf_counter()
+        refresh_ms = 0.0
         with audio_queue_lock:
             if not is_active():
                 return
@@ -3814,21 +4014,49 @@ def _audio_job_runner(job, settings, run_token, result_holder, done_event):
             _mark_audio_generation_activity_locked(job)
             if success:
                 _remember_generation_elapsed(uid, elapsed_seconds)
-                _refresh_audio_process_state_locked(persist=True)
-                return
-            effective_elapsed = _consume_elapsed_seconds(uid, elapsed_seconds)
-            _record_audio_sample_locked(job, uid, effective_elapsed, input_words, output_words, success)
-            _refresh_audio_process_state_locked(persist=True)
+                refresh_started = time.perf_counter()
+                _refresh_audio_process_state_locked(persist=False)
+                refresh_ms = (time.perf_counter() - refresh_started) * 1000.0
+            else:
+                effective_elapsed = _consume_elapsed_seconds(uid, elapsed_seconds)
+                _record_audio_sample_locked(job, uid, effective_elapsed, input_words, output_words, success)
+                refresh_started = time.perf_counter()
+                _refresh_audio_process_state_locked(persist=False)
+                refresh_ms = (time.perf_counter() - refresh_started) * 1000.0
+        record_audio_perf(
+            "audio_callback_item",
+            job_id=job["id"],
+            uid=uid,
+            success=bool(success),
+            refresh_ms=round(refresh_ms, 3),
+            total_ms=round((time.perf_counter() - callback_started) * 1000.0, 3),
+        )
+        if success:
+            return
 
     def submission_callback(uid, task):
+        callback_started = time.perf_counter()
+        refresh_ms = 0.0
         with audio_queue_lock:
             if not is_active():
                 return
             _record_audio_finalize_submission_locked(job, uid)
-            _refresh_audio_process_state_locked(persist=True)
+            refresh_started = time.perf_counter()
+            _refresh_audio_process_state_locked(persist=False)
+            refresh_ms = (time.perf_counter() - refresh_started) * 1000.0
             audio_queue_condition.notify_all()
+        record_audio_perf(
+            "audio_callback_submission",
+            job_id=job["id"],
+            uid=uid,
+            task_id=(task or {}).get("id"),
+            refresh_ms=round(refresh_ms, 3),
+            total_ms=round((time.perf_counter() - callback_started) * 1000.0, 3),
+        )
 
     def finalization_item_callback(uid, success, elapsed_seconds, input_words, output_words, meta):
+        callback_started = time.perf_counter()
+        refresh_ms = 0.0
         with audio_queue_lock:
             if not is_active():
                 return
@@ -3836,10 +4064,22 @@ def _audio_job_runner(job, settings, run_token, result_holder, done_event):
             effective_elapsed = _consume_generation_elapsed(uid, 0.0) + max(0.0, float(elapsed_seconds or 0.0))
             started_at_by_uid.pop(str(uid or "").strip(), None)
             _record_audio_sample_locked(job, uid, effective_elapsed, input_words, output_words, success)
-            _refresh_audio_process_state_locked(persist=True)
+            refresh_started = time.perf_counter()
+            _refresh_audio_process_state_locked(persist=False)
+            refresh_ms = (time.perf_counter() - refresh_started) * 1000.0
             audio_queue_condition.notify_all()
+        record_audio_perf(
+            "audio_callback_finalization_result",
+            job_id=job["id"],
+            uid=uid,
+            success=bool(success),
+            refresh_ms=round(refresh_ms, 3),
+            total_ms=round((time.perf_counter() - callback_started) * 1000.0, 3),
+        )
 
     def activity_callback(kind, uid):
+        callback_started = time.perf_counter()
+        refresh_ms = 0.0
         with audio_queue_lock:
             if not is_active():
                 return
@@ -3847,7 +4087,17 @@ def _audio_job_runner(job, settings, run_token, result_holder, done_event):
                 _mark_audio_finalize_activity_locked(job)
             else:
                 _mark_audio_generation_activity_locked(job)
-            _refresh_audio_process_state_locked(persist=True)
+            refresh_started = time.perf_counter()
+            _refresh_audio_process_state_locked(persist=False)
+            refresh_ms = (time.perf_counter() - refresh_started) * 1000.0
+        record_audio_perf(
+            "audio_callback_activity",
+            job_id=job["id"],
+            uid=uid,
+            kind=kind,
+            refresh_ms=round(refresh_ms, 3),
+            total_ms=round((time.perf_counter() - callback_started) * 1000.0, 3),
+        )
 
     def cancel_check():
         with audio_queue_lock:

@@ -342,6 +342,15 @@ class WorkflowEntrypointAccessibilityTests(unittest.TestCase):
                             conn.execute("CREATE TABLE IF NOT EXISTS chunks (id INTEGER PRIMARY KEY)")
                             conn.commit()
 
+                    def reset_generating_chunks(self, indices=None, generation_token=None, target_status="pending"):
+                        return len(list(indices or []))
+
+                    def clear_audio_finalize_tasks(self, generation_token=None):
+                        return 0
+
+                    def unregister_audio_finalization_listener(self, generation_token):
+                        return None
+
                 stub_manager = ResetStubManager(temp_root)
 
                 app_module.ROOT_DIR = temp_root

@@ -137,9 +137,17 @@ class ProjectManager(
         self._chunk_state_flush_batch_size = runtime_settings["chunk_state_flush_batch_size"]
         self._audio_finalize_listener_lock = threading.Lock()
         self._audio_finalize_listeners = {}
+        self._audio_finalize_queue = queue.Queue()
+        self._audio_finalize_tasks_lock = threading.Lock()
+        self._audio_finalize_tasks = {}
+        self._audio_finalize_persist_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix=f"audio-finalize-ledger-{os.path.basename(self.root_dir)}",
+        )
         self._audio_finalize_threads = []
         self.script_store = None
         self._init_script_store()
+        self._restore_audio_finalize_tasks_from_store()
         self._chunks_flush_thread = threading.Thread(
             target=self._chunks_flush_loop,
             daemon=True,
@@ -169,6 +177,10 @@ class ProjectManager(
         self.script_store.start()
 
     def shutdown_script_store(self, flush=True):
+        executor = getattr(self, "_audio_finalize_persist_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=flush, cancel_futures=False)
+            self._audio_finalize_persist_executor = None
         if self.script_store is None:
             return
         self.script_store.stop(flush=flush)
@@ -182,3 +194,8 @@ class ProjectManager(
                 self._chunk_runtime = {}
                 self._dirty_chunk_uids.clear()
         self._init_script_store()
+        self._audio_finalize_persist_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix=f"audio-finalize-ledger-{os.path.basename(self.root_dir)}",
+        )
+        self._restore_audio_finalize_tasks_from_store()

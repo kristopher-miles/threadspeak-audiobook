@@ -332,6 +332,108 @@ class AudioQueueMetricsTests(unittest.TestCase):
         finally:
             app_module.project_manager.list_audio_finalize_tasks = original_list_finalize
 
+    def test_serialize_audio_job_reconciles_stale_pending_finalize_uids(self):
+        original_list_finalize = app_module.project_manager.list_audio_finalize_tasks
+        original_get_chunks = app_module.project_manager.get_chunks_by_uids
+        try:
+            app_module.project_manager.list_audio_finalize_tasks = lambda generation_token=None, statuses=None: []
+            app_module.project_manager.get_chunks_by_uids = lambda uids: [
+                {
+                    "uid": "u1",
+                    "id": 0,
+                    "status": "done",
+                }
+            ]
+            serialized = app_module._serialize_audio_job(
+                {
+                    "id": 17,
+                    "corr_id": "audio-00017-stale-finalize",
+                    "kind": "batch_fast",
+                    "status": "running",
+                    "label": "Stale finalize",
+                    "scope": "custom",
+                    "uids": ["u1"],
+                    "pending_uids": ["u1"],
+                    "generation_pending_uids": [],
+                    "pending_finalize_uids": ["u1"],
+                    "total_chunks": 1,
+                    "total_words": 6,
+                    "remaining_words": 6,
+                    "processed_clips": 0,
+                    "error_clips": 0,
+                    "generation_finished": True,
+                    "run_token": "stale-finalize-run",
+                }
+            )
+            self.assertEqual(serialized["pending_uids"], [])
+            self.assertEqual(serialized["pending_finalize_uids"], [])
+        finally:
+            app_module.project_manager.list_audio_finalize_tasks = original_list_finalize
+            app_module.project_manager.get_chunks_by_uids = original_get_chunks
+
+    def test_refresh_audio_process_state_uses_compact_job_summary(self):
+        original_get_chunks = app_module.project_manager.get_chunks_by_uids
+        original_get_coverage = app_module.project_manager.get_audio_coverage_summary
+        try:
+            def fail_get_chunks(_uids):
+                raise AssertionError("refresh summary should not resolve full UID ordinals or reconcile all chunk rows")
+
+            app_module.project_manager.get_chunks_by_uids = fail_get_chunks
+            app_module.project_manager.get_audio_coverage_summary = lambda: {
+                "total_clips": 3,
+                "valid_clips": 1,
+                "invalid_clips": 2,
+                "percentage": 33,
+            }
+
+            with app_module.audio_queue_lock:
+                app_module.audio_queue[:] = []
+                app_module.audio_current_job = {
+                    "id": 23,
+                    "corr_id": "audio-00023-compact",
+                    "kind": "batch_fast",
+                    "status": "running",
+                    "label": "Compact summary",
+                    "scope": "project",
+                    "scope_mode": "project",
+                    "chapter": None,
+                    "uids": ["u1", "u2", "u3"],
+                    "pending_uids": ["u2", "u3"],
+                    "generation_pending_uids": ["u2"],
+                    "pending_finalize_uids": ["u3"],
+                    "retry_uids": ["u3"],
+                    "total_chunks": 3,
+                    "total_words": 18,
+                    "remaining_words": 12,
+                    "processed_clips": 1,
+                    "error_clips": 0,
+                    "generation_finished": False,
+                    "finalized_clips": 1,
+                    "finalizer_failures": 0,
+                    "recovery_count": 0,
+                    "queued_at": 0.0,
+                    "started_at": 1.0,
+                    "finished_at": None,
+                    "last_output_at": None,
+                    "last_generation_activity_at": 2.0,
+                    "last_finalize_activity_at": 3.0,
+                    "run_token": "run-compact",
+                }
+
+                app_module._refresh_audio_process_state_locked(persist=False)
+                summary = app_module.process_state["audio"]["current_job"]
+
+            self.assertNotIn("uids", summary)
+            self.assertNotIn("indices", summary)
+            self.assertEqual(summary["pending_chunks"], 2)
+            self.assertEqual(summary["generation_pending_chunks"], 1)
+            self.assertEqual(summary["pending_finalize_chunks"], 1)
+            self.assertEqual(summary["retry_chunks"], 1)
+            self.assertEqual(summary["total_chunks"], 3)
+        finally:
+            app_module.project_manager.get_chunks_by_uids = original_get_chunks
+            app_module.project_manager.get_audio_coverage_summary = original_get_coverage
+
     def test_audio_job_runner_skips_generation_when_only_finalization_remains(self):
         original_parallel = app_module.project_manager.generate_chunks_parallel
         original_batch = app_module.project_manager.generate_chunks_batch
