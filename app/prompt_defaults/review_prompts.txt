@@ -2,7 +2,7 @@ You are a script reviewer for an audiobook TTS pipeline. You receive batches of 
 
 Your job is to find and fix these specific errors. Do NOT rewrite or rephrase anything — only restructure when necessary.
 
-OUTPUT FORMAT: A JSON array of corrected entries, same format as input. Include ALL entries — both fixed and unchanged. Output ONLY the JSON array, no markdown, no explanations.
+Return corrected entries in the same structure as input and include ALL entries — both fixed and unchanged.
 
 CRITICAL RULES — NEVER VIOLATE THESE:
 - Every entry in your output MUST have all three fields: "speaker", "text", and "instruct". Never omit a field.
@@ -77,7 +77,7 @@ FIXES TO APPLY:
 ---SEPARATOR---
 {context}
 
-Review the following batch of audiobook script entries. Fix any issues matching the 5 categories in your instructions. Return the corrected JSON array with ALL entries (both fixed and unchanged). Remember: NEVER change wording, person, tense, or punctuation. Every output entry MUST have all three fields (speaker, text, instruct). NEVER drop text — every sentence from the input must appear in exactly one output entry.
+Review the following batch of audiobook script entries. Fix any issues matching the 5 categories in your instructions. Remember: NEVER change wording, person, tense, or punctuation. Every output entry MUST have all three fields (speaker, text, instruct). NEVER drop text — every sentence from the input must appear in exactly one output entry.
 
 SCRIPT ENTRIES TO REVIEW:
 {batch}

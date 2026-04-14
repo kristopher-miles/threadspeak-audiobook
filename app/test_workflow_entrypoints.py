@@ -262,6 +262,19 @@ class WorkflowEntrypointAccessibilityTests(unittest.TestCase):
             self.assertFalse(bool(manager._load_voice_config()))
             self.assertEqual(os.listdir(voicelines_dir), [])
 
+    def test_reset_new_mode_refuses_default_runtime_voicelines_under_pytest(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            original_root = app_module.ROOT_DIR
+            original_voicelines = app_module.VOICELINES_DIR
+            try:
+                app_module.ROOT_DIR = temp_root
+                with self.assertRaises(RuntimeError) as ctx:
+                    asyncio.run(app_module.reset_new_mode())
+                self.assertIn("default runtime project", str(ctx.exception))
+            finally:
+                app_module.ROOT_DIR = original_root
+                app_module.VOICELINES_DIR = original_voicelines
+
     def test_reset_project_clears_db_runtime_artifacts_and_reinitializes_store(self):
         with tempfile.TemporaryDirectory() as temp_root:
             voicelines_dir = os.path.join(temp_root, "voicelines")

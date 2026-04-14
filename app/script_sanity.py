@@ -2,6 +2,14 @@ import re
 import time
 from difflib import SequenceMatcher
 
+from llm import (
+    ATTRIBUTION_DECISION_CONTRACT,
+    ChatCompletionParams,
+    ChatCompletionService,
+    LLMRuntimeConfig,
+    StructuredLLMService,
+)
+
 
 _WORD_RE = re.compile(r"[A-Za-z]+")
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -442,7 +450,19 @@ def _rebuild_result(base_result, chapter_results):
     return base_result
 
 
-def build_attribution_classifier(client, model_name, system_prompt, user_prompt_template, max_tokens=256):
+def build_attribution_classifier(
+    client,
+    model_name,
+    system_prompt,
+    user_prompt_template,
+    max_tokens=256,
+    completion_service=None,
+    structured_service=None,
+    runtime=None,
+):
+    chat_service = completion_service or ChatCompletionService()
+    adaptive_service = structured_service or StructuredLLMService()
+
     def classify(payload):
         user_prompt = (user_prompt_template or "")
         replacements = {
@@ -453,24 +473,62 @@ def build_attribution_classifier(client, model_name, system_prompt, user_prompt_
         }
         for placeholder, value in replacements.items():
             user_prompt = user_prompt.replace(placeholder, value)
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0,
-            top_p=1,
-            max_tokens=max_tokens,
-        )
-        choice = response.choices[0] if getattr(response, "choices", None) else None
-        text = ((choice.message.content if choice and getattr(choice, "message", None) else "") or "").strip()
+        effective_runtime = runtime
+        if effective_runtime is None:
+            effective_runtime = LLMRuntimeConfig(
+                base_url="unknown://runtime",
+                api_key="",
+                model_name=model_name,
+                timeout=None,
+                llm_workers=1,
+            )
+
+        text = ""
+        llm_mode = ""
+        llm_tool_call_observed = False
+        try:
+            result = adaptive_service.run(
+                client=client,
+                runtime=effective_runtime,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                contract=ATTRIBUTION_DECISION_CONTRACT,
+                temperature=0,
+                top_p=1,
+                max_tokens=max_tokens,
+            )
+            payload = result.parsed if isinstance(result.parsed, dict) else None
+            text = str((payload or {}).get("result") or "").strip()
+            if not text:
+                text = (result.text or "").strip()
+            llm_mode = str(result.mode or "").strip()
+            llm_tool_call_observed = bool(result.tool_call_observed)
+        except Exception:
+            completion = chat_service.complete(
+                client=client,
+                model_name=model_name,
+                params=ChatCompletionParams(
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0,
+                    top_p=1,
+                    max_tokens=max_tokens,
+                ),
+            )
+            text = (completion.text or "").strip()
+            llm_mode = "chat"
+            llm_tool_call_observed = False
+
         normalized = text.upper()
         if _AFFIRMATIVE_RE.search(text) and not _NEGATIVE_RE.search(text):
-            return True, text, normalized
+            return True, text, normalized, llm_mode, llm_tool_call_observed
         if _NEGATIVE_RE.search(text) and not _AFFIRMATIVE_RE.search(text):
-            return False, text, normalized
-        return False, text, normalized
+            return False, text, normalized, llm_mode, llm_tool_call_observed
+        return False, text, normalized, llm_mode, llm_tool_call_observed
 
     return classify
 
@@ -628,14 +686,25 @@ def run_script_sanity_check(
             continue
         if attribution_resolver is None:
             continue
-        accepted, reply, normalized_reply = attribution_resolver(payload)
+        resolved = attribution_resolver(payload)
+        if isinstance(resolved, tuple) and len(resolved) >= 5:
+            accepted, reply, normalized_reply, llm_mode, llm_tool_call_observed = resolved[:5]
+        else:
+            accepted, reply, normalized_reply = resolved
+            llm_mode = ""
+            llm_tool_call_observed = False
         payload["decision"] = "accepted" if accepted else "rejected"
         payload["source"] = "model"
         payload["reply"] = reply
+        if llm_mode:
+            payload["llm_mode"] = llm_mode
+        payload["llm_tool_call_observed"] = bool(llm_tool_call_observed)
         phrase_decisions[phrase_key] = {
             "phrase": payload["source_text"],
             "decision": payload["decision"],
             "reply": normalized_reply[:500],
+            "llm_mode": llm_mode,
+            "llm_tool_call_observed": bool(llm_tool_call_observed),
             "checked_at": time.time(),
         }
         if callable(attribution_decision_persist):

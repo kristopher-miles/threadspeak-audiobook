@@ -9,4 +9,3 @@ You will receive:
 Rules:
   - Respond with a single concise sentence describing how the reader should emotionally \
 deliver the paragraph (e.g. "Read with quiet melancholy and a slow, deliberate pace").
-  - You MUST call the identify_sentiment tool with your answer. Do not respond in plain text.

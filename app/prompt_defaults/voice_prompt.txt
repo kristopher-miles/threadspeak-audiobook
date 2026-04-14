@@ -5,5 +5,4 @@ Review the source paragraphs above and infer how this character should sound in 
 Compact prompt template
 A [age] [gender/neutral] voice with [timbre/pitch], [accent strength + accent], [character archetype], [baseline emotional/vibe] quality. [Pacing/cadence if identity-critical]. [Optional extra vocal texture/weight/resonance notes].
 
-Return your final answer as JSON with exactly one field: {"voice":"..."}.
-Make sure the value of "voice" is the finished voice prompt for "{character_name}".
+Return a single production-ready voice description for "{character_name}".

@@ -34,6 +34,15 @@ async def release_nav_task(request: NavTaskRequest = NavTaskRequest()):
 @router.post("/api/reset_project")
 async def reset_project():
     global audio_current_job, audio_recovery_request
+    _assert_test_safe_runtime_target(
+        "reset_project",
+        ROOT_DIR=ROOT_DIR,
+        VOICELINES_DIR=VOICELINES_DIR,
+        UPLOADS_DIR=UPLOADS_DIR,
+        PROCESSING_WORKFLOW_STATE_PATH=PROCESSING_WORKFLOW_STATE_PATH,
+        NEW_MODE_WORKFLOW_STATE_PATH=NEW_MODE_WORKFLOW_STATE_PATH,
+        AUDIO_QUEUE_STATE_PATH=AUDIO_QUEUE_STATE_PATH,
+    )
     _release_nav_task_tab()
     # Hard-stop everything before nuking project artifacts.
     with task_state_lock:
@@ -64,14 +73,17 @@ async def reset_project():
 
         process_state["audio"]["cancel"] = True
         audio_cancel_event.set()
-        if audio_current_job is not None:
+        active_audio_job = _shared.audio_current_job
+        if active_audio_job is not None:
             _abandon_audio_job_locked(
-                audio_current_job,
-                audio_current_job.get("run_token"),
+                active_audio_job,
+                active_audio_job.get("run_token"),
                 "Project reset requested",
                 status="cancelled",
             )
         # Ensure reset always clears worker pointers, even if abandon raced.
+        _shared.audio_current_job = None
+        _shared.audio_recovery_request = None
         audio_current_job = None
         audio_recovery_request = None
         audio_cancel_event.clear()
@@ -135,6 +147,8 @@ async def reset_project():
 
     with audio_queue_condition:
         audio_queue.clear()
+        _shared.audio_current_job = None
+        _shared.audio_recovery_request = None
         audio_current_job = None
         audio_recovery_request = None
         process_state["audio"]["cancel"] = False
@@ -344,6 +358,11 @@ async def get_pipeline_step_status():
 @router.post("/api/reset_new_mode")
 async def reset_new_mode(request: ResetNewModeRequest = ResetNewModeRequest()):
     """Clear script artifacts so Create Script can start fresh."""
+    _assert_test_safe_runtime_target(
+        "reset_new_mode",
+        ROOT_DIR=ROOT_DIR,
+        VOICELINES_DIR=VOICELINES_DIR,
+    )
     removed = []
     if getattr(project_manager, "script_store", None) is not None:
         project_manager.script_store.replace_script_document(

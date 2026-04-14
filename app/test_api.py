@@ -2,9 +2,8 @@
 """Automated API test script.
 
 Usage:
-    python test_api.py                    # Quick tests only
-    python test_api.py --full             # Include TTS/LLM-dependent tests
-    python test_api.py --url http://host:port
+    python test_api.py        # Quick tests only, always against an isolated server
+    python test_api.py --full # Include TTS/LLM-dependent tests
 """
 
 import argparse
@@ -59,6 +58,20 @@ def _discover_base_url():
 
     # Legacy fallback.
     return "http://127.0.0.1:4200"
+
+
+def _assert_no_external_server_target():
+    forbidden = []
+    for key in ("THREADSPEAK_TEST_URL", "BASE_URL", "THREADSPEAK_TEST_USE_EXTERNAL_SERVER"):
+        value = (os.getenv(key) or "").strip()
+        if value:
+            forbidden.append(f"{key}={value}")
+    if forbidden:
+        joined = ", ".join(forbidden)
+        raise RuntimeError(
+            "test_api.py no longer allows targeting an external/live server. "
+            f"Unset: {joined}"
+        )
 
 
 BASE_URL = _discover_base_url()
@@ -182,9 +195,8 @@ def _stop_isolated_test_server():
 if pytest is not None:
     @pytest.fixture(scope="module", autouse=True)
     def _isolated_api_server():
-        use_external = (os.getenv("THREADSPEAK_TEST_USE_EXTERNAL_SERVER", "").strip().lower() in {"1", "true", "yes", "on"})
-        if not use_external:
-            _start_isolated_test_server()
+        _assert_no_external_server_target()
+        _start_isolated_test_server()
         try:
             yield
         finally:
@@ -192,8 +204,7 @@ if pytest is not None:
                 cleanup()
             except Exception:
                 pass
-            if not use_external:
-                _stop_isolated_test_server()
+            _stop_isolated_test_server()
 
 
 # ── Helpers ──────────────────────────────────────────────────
@@ -1716,14 +1727,14 @@ def main():
     global BASE_URL, FULL_MODE
 
     parser = argparse.ArgumentParser(description="Threadspeak API test suite")
-    parser.add_argument("--url", default=BASE_URL,
-                        help=f"Server URL (default: {BASE_URL})")
     parser.add_argument("--full", action="store_true",
                         help="Include TTS/LLM-dependent tests")
     args = parser.parse_args()
 
-    BASE_URL = _normalize_http_url(args.url)
+    _assert_no_external_server_target()
     FULL_MODE = args.full
+
+    _start_isolated_test_server()
 
     print(f"Threadspeak API Tests")
     print(f"Server: {BASE_URL}")
@@ -1735,6 +1746,7 @@ def main():
         run_all_tests()
     finally:
         cleanup()
+        _stop_isolated_test_server()
 
     # Summary
     total = results["passed"] + results["failed"] + results["skipped"]

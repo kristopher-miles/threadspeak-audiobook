@@ -294,6 +294,63 @@ class AudioQueueMetricsTests(unittest.TestCase):
                 app_module.process_state["audio"]["cancel"] = False
                 app_module.audio_cancel_event.clear()
 
+    def test_recompute_uses_cumulative_project_average_instead_of_rolling_window(self):
+        with app_module.audio_queue_lock:
+            app_module.process_state["audio"]["metrics"] = app_module._new_audio_metrics()
+            app_module.audio_queue[:] = [{"remaining_words": 300}]
+            app_module.audio_current_job = {"remaining_words": 200}
+
+            metrics = app_module.process_state["audio"]["metrics"]
+            metrics["rolling_seconds"] = 2.0
+            metrics["rolling_input_words"] = 400
+            metrics["rolling_output_words"] = 400
+            metrics["total_elapsed_seconds"] = 100.0
+            metrics["total_input_words"] = 1000
+            metrics["total_output_words"] = 1000
+
+            app_module._recompute_audio_metrics_locked()
+
+            self.assertAlmostEqual(metrics["words_per_minute"], 600.0)
+            self.assertAlmostEqual(metrics["estimated_remaining_seconds"], 50.0)
+
+    def test_enqueue_preserves_project_metrics_when_restarting_from_idle(self):
+        original_get_chunk_raw = app_module.project_manager.get_chunk_raw
+        original_persist = app_module._persist_audio_queue_state_locked
+
+        try:
+            app_module.project_manager.get_chunk_raw = lambda ref: {
+                "uid": str(ref),
+                "text": "word " * 60,
+            }
+            app_module._persist_audio_queue_state_locked = lambda: None
+
+            with app_module.audio_queue_lock:
+                app_module.audio_queue[:] = []
+                app_module.audio_current_job = None
+                app_module.process_state["audio"]["metrics"] = app_module._new_audio_metrics()
+                metrics = app_module.process_state["audio"]["metrics"]
+                metrics["processed_clips"] = 10
+                metrics["successful_clips"] = 10
+                metrics["total_elapsed_seconds"] = 60.0
+                metrics["total_input_words"] = 600
+                metrics["total_output_words"] = 600
+                app_module.process_state["audio"]["logs"] = ["existing log"]
+                app_module.process_state["audio"]["recent_jobs"] = [{"id": 999}]
+
+            result = app_module._enqueue_audio_job("parallel", ["u1"], label="Next pass")
+
+            with app_module.audio_queue_lock:
+                metrics = app_module.process_state["audio"]["metrics"]
+                self.assertEqual(metrics["processed_clips"], 10)
+                self.assertEqual(metrics["total_elapsed_seconds"], 60.0)
+                self.assertEqual(metrics["total_input_words"], 600)
+                self.assertAlmostEqual(metrics["words_per_minute"], 600.0)
+                self.assertAlmostEqual(metrics["estimated_remaining_seconds"], 6.0)
+                self.assertAlmostEqual(result["estimated_remaining_seconds"], 6.0)
+        finally:
+            app_module.project_manager.get_chunk_raw = original_get_chunk_raw
+            app_module._persist_audio_queue_state_locked = original_persist
+
     def test_effective_parallel_workers_clamps_local_mlx_to_one(self):
         class FakeEngine:
             mode = "local"

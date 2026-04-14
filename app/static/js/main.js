@@ -21,7 +21,6 @@ const LEGACY_SCRIPTS = [
   '/static/js/legacy/03_setup_tab.js',
   '/static/js/legacy/04_script_tab.js',
   '/static/js/legacy/05_advanced_controls.js',
-  '/static/js/legacy/06_auto_proofread.js',
   '/static/js/legacy/07_legacy_mode_toggle.js',
   '/static/js/legacy/08_new_mode.js',
   '/static/js/legacy/09_voices_tab.js',

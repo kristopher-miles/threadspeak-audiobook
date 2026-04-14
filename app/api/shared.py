@@ -25,7 +25,7 @@ import uuid
 import urllib.request
 import urllib.error
 import sqlite3
-from openai import OpenAI
+from llm import LLMClientFactory, LLMRuntimeConfig
 from chunk_events import chunk_event_broker
 from audio_perf import record_audio_perf
 
@@ -54,6 +54,7 @@ from runtime_layout import LAYOUT, REPO_ROOT
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ThreadspeakUI")
+_LLM_CLIENT_FACTORY = LLMClientFactory()
 
 app = FastAPI(title="Threadspeak Audiobook")
 
@@ -187,6 +188,52 @@ def _make_runtime_temp_file(prefix: str, suffix: str = "", *, run_id: Optional[s
     path = handle.name
     handle.close()
     return path
+
+
+def _running_under_test_process():
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return True
+    argv0 = os.path.basename(str(sys.argv[0] or "")).strip().lower()
+    return "pytest" in argv0
+
+
+def _assert_test_safe_runtime_target(operation: str, **paths):
+    """Refuse destructive test operations that still point at the live runtime project."""
+    if not _running_under_test_process():
+        return
+
+    protected = {
+        "ROOT_DIR": os.path.abspath(LAYOUT.project_dir),
+        "VOICELINES_DIR": os.path.abspath(LAYOUT.voicelines_dir),
+        "UPLOADS_DIR": os.path.abspath(LAYOUT.uploads_dir),
+        "SCRIPTS_DIR": os.path.abspath(LAYOUT.script_snapshots_dir),
+        "SAVED_PROJECTS_DIR": os.path.abspath(LAYOUT.project_archives_dir),
+        "CLONE_VOICES_DIR": os.path.abspath(LAYOUT.clone_voices_dir),
+        "DESIGNED_VOICES_DIR": os.path.abspath(LAYOUT.designed_voices_dir),
+    }
+    violations = []
+    for label, path in paths.items():
+        normalized = os.path.abspath(str(path or ""))
+        protected_path = protected.get(label)
+        if protected_path and normalized == protected_path:
+            violations.append(f"{label}={normalized}")
+    if violations:
+        joined = ", ".join(violations)
+        raise RuntimeError(
+            f"{operation} refused to target the default runtime project during tests: {joined}"
+        )
+
+
+def _project_workflow_state_path(filename: str) -> str:
+    if os.path.abspath(ROOT_DIR) == os.path.abspath(LAYOUT.project_dir):
+        return os.path.join(LAYOUT.workflow_dir, filename)
+    return os.path.join(ROOT_DIR, "workflow", filename)
+
+
+def _project_repair_trace_path() -> str:
+    if os.path.abspath(ROOT_DIR) == os.path.abspath(LAYOUT.project_dir):
+        return SCRIPT_REPAIR_TRACE_PATH
+    return os.path.join(ROOT_DIR, "repair", "script_repair_trace.jsonl")
 
 
 def _get_media_static_origin():
@@ -1279,6 +1326,69 @@ def _new_audio_metrics():
     }
 
 
+def _normalize_audio_metrics(raw_metrics=None):
+    metrics = _new_audio_metrics()
+    raw_metrics = raw_metrics or {}
+
+    try:
+        sample_window_size = max(1, int(raw_metrics.get("sample_window_size") or metrics["sample_window_size"]))
+    except (TypeError, ValueError):
+        sample_window_size = metrics["sample_window_size"]
+    metrics["sample_window_size"] = sample_window_size
+
+    normalized_samples = []
+    for raw_sample in list(raw_metrics.get("samples") or [])[-sample_window_size:]:
+        if not isinstance(raw_sample, dict):
+            continue
+        try:
+            normalized_samples.append({
+                "job_id": int(raw_sample.get("job_id", 0) or 0),
+                "chunk_uid": str(raw_sample.get("chunk_uid") or "").strip(),
+                "elapsed_seconds": max(0.0, float(raw_sample.get("elapsed_seconds", 0.0) or 0.0)),
+                "input_words": max(0, int(raw_sample.get("input_words", 0) or 0)),
+                "output_words": max(0, int(raw_sample.get("output_words", 0) or 0)),
+                "success": bool(raw_sample.get("success")),
+            })
+        except (TypeError, ValueError):
+            continue
+    metrics["samples"] = normalized_samples
+    metrics["rolling_seconds"] = sum(sample["elapsed_seconds"] for sample in normalized_samples)
+    metrics["rolling_input_words"] = sum(sample["input_words"] for sample in normalized_samples)
+    metrics["rolling_output_words"] = sum(sample["output_words"] for sample in normalized_samples)
+
+    try:
+        processed_clips = max(0, int(raw_metrics.get("processed_clips", 0) or 0))
+    except (TypeError, ValueError):
+        processed_clips = 0
+    try:
+        error_clips = max(0, int(raw_metrics.get("error_clips", 0) or 0))
+    except (TypeError, ValueError):
+        error_clips = 0
+    error_clips = min(error_clips, processed_clips)
+    metrics["processed_clips"] = processed_clips
+    metrics["error_clips"] = error_clips
+    metrics["successful_clips"] = processed_clips - error_clips
+
+    try:
+        metrics["total_elapsed_seconds"] = max(0.0, float(raw_metrics.get("total_elapsed_seconds", 0.0) or 0.0))
+    except (TypeError, ValueError):
+        metrics["total_elapsed_seconds"] = 0.0
+    try:
+        metrics["total_output_words"] = max(0, int(raw_metrics.get("total_output_words", 0) or 0))
+    except (TypeError, ValueError):
+        metrics["total_output_words"] = 0
+    try:
+        metrics["total_input_words"] = max(0, int(raw_metrics.get("total_input_words", 0) or 0))
+    except (TypeError, ValueError):
+        metrics["total_input_words"] = 0
+    try:
+        metrics["remaining_words"] = max(0, int(raw_metrics.get("remaining_words", 0) or 0))
+    except (TypeError, ValueError):
+        metrics["remaining_words"] = 0
+
+    return metrics
+
+
 def _default_audio_coverage_summary():
     return {
         "total_clips": 0,
@@ -1501,8 +1611,8 @@ def _recompute_audio_metrics_locked():
     if audio_current_job is not None:
         metrics["remaining_words"] += audio_current_job.get("remaining_words", 0)
 
-    if metrics["rolling_seconds"] > 0 and metrics["rolling_output_words"] > 0:
-        words_per_second = metrics["rolling_output_words"] / metrics["rolling_seconds"]
+    if metrics["total_elapsed_seconds"] > 0 and metrics["total_input_words"] > 0:
+        words_per_second = metrics["total_input_words"] / metrics["total_elapsed_seconds"]
         metrics["words_per_minute"] = words_per_second * 60.0
         metrics["estimated_remaining_seconds"] = metrics["remaining_words"] / words_per_second if metrics["remaining_words"] > 0 else 0.0
     else:
@@ -2212,6 +2322,14 @@ def _clear_directory_contents(directory):
 
 
 def _clear_project_derived_state(preserve_input_file=True, preserve_reusable_voices=True):
+    _assert_test_safe_runtime_target(
+        "_clear_project_derived_state",
+        ROOT_DIR=ROOT_DIR,
+        VOICELINES_DIR=VOICELINES_DIR,
+        UPLOADS_DIR=UPLOADS_DIR,
+        CLONE_VOICES_DIR=CLONE_VOICES_DIR,
+        DESIGNED_VOICES_DIR=DESIGNED_VOICES_DIR,
+    )
     state = _load_project_state_payload()
     input_file_path = (state.get("input_file_path") or "").strip()
     manager_root = os.path.abspath(getattr(project_manager, "root_dir", ROOT_DIR))
@@ -2228,15 +2346,15 @@ def _clear_project_derived_state(preserve_input_file=True, preserve_reusable_voi
         f"{chunks_db_path}-wal",
         f"{chunks_db_path}-shm",
         chunks_queue_log_path,
-        SCRIPT_REPAIR_TRACE_PATH,
+        _project_repair_trace_path(),
         AUDIOBOOK_PATH,
         M4B_PATH,
-        AUDIO_QUEUE_STATE_PATH,
-        AUDIO_CANCEL_TOMBSTONE_PATH,
-        PROCESSING_WORKFLOW_STATE_PATH,
-        NEW_MODE_WORKFLOW_STATE_PATH,
-        LAYOUT.script_generation_checkpoint_path,
-        LAYOUT.script_review_checkpoint_path,
+        _project_workflow_state_path("audio_queue_state.json"),
+        _project_workflow_state_path("audio_cancel_tombstone.json"),
+        _project_workflow_state_path("processing_workflow_state.json"),
+        _project_workflow_state_path("new_mode_workflow_state.json"),
+        _project_workflow_state_path("script_generation_checkpoint.json"),
+        _project_workflow_state_path("script_review_checkpoint.json"),
         LAYOUT.audacity_export_path,
         LAYOUT.m4b_cover_path,
         os.path.join(ROOT_DIR, "logs", "llm_responses.log"),
@@ -2749,6 +2867,16 @@ def _write_project_archive(zip_path: str):
 
 
 def _clear_project_archive_targets():
+    _assert_test_safe_runtime_target(
+        "_clear_project_archive_targets",
+        ROOT_DIR=ROOT_DIR,
+        VOICELINES_DIR=VOICELINES_DIR,
+        UPLOADS_DIR=UPLOADS_DIR,
+        SCRIPTS_DIR=SCRIPTS_DIR,
+        SAVED_PROJECTS_DIR=SAVED_PROJECTS_DIR,
+        CLONE_VOICES_DIR=CLONE_VOICES_DIR,
+        DESIGNED_VOICES_DIR=DESIGNED_VOICES_DIR,
+    )
     if hasattr(project_manager, "shutdown_script_store"):
         try:
             project_manager.shutdown_script_store(flush=True)
@@ -2767,13 +2895,13 @@ def _clear_project_archive_targets():
         _project_export_filesystem_path("audacity_export.zip"),
         M4B_PATH,
         _project_export_filesystem_path("m4b_cover.jpg"),
-        AUDIO_QUEUE_STATE_PATH,
-        AUDIO_CANCEL_TOMBSTONE_PATH,
-        PROCESSING_WORKFLOW_STATE_PATH,
-        NEW_MODE_WORKFLOW_STATE_PATH,
-        LAYOUT.script_generation_checkpoint_path,
-        LAYOUT.script_review_checkpoint_path,
-        SCRIPT_REPAIR_TRACE_PATH,
+        _project_workflow_state_path("audio_queue_state.json"),
+        _project_workflow_state_path("audio_cancel_tombstone.json"),
+        _project_workflow_state_path("processing_workflow_state.json"),
+        _project_workflow_state_path("new_mode_workflow_state.json"),
+        _project_workflow_state_path("script_generation_checkpoint.json"),
+        _project_workflow_state_path("script_review_checkpoint.json"),
+        _project_repair_trace_path(),
         os.path.join(logs_dir, "llm_responses.log"),
         os.path.join(logs_dir, "review_responses.log"),
     ]
@@ -3087,6 +3215,7 @@ def _refresh_audio_process_state_locked(persist=False):
 
     metrics_started = time.perf_counter()
     process_state["audio"]["running"] = audio_current_job is not None or process_state["audio"].get("merge_running", False)
+    _recompute_audio_metrics_locked()
     process_state["audio"]["metrics"] = _format_audio_metrics_locked()
     process_state["audio"]["heartbeat"] = _format_audio_heartbeat_locked()
     process_state["audio"]["merge_progress"] = dict(process_state["audio"].get("merge_progress") or _new_audio_merge_progress())
@@ -3456,18 +3585,6 @@ def _restore_job_progress_from_chunks(raw_job, chunks=None):
     }
 
 
-def _seed_audio_metrics_from_jobs_locked(*jobs):
-    metrics = _new_audio_metrics()
-    for job in jobs:
-        if not job:
-            continue
-        metrics["processed_clips"] += int(job.get("processed_clips", 0) or 0)
-        metrics["error_clips"] += int(job.get("error_clips", 0) or 0)
-    metrics["successful_clips"] = metrics["processed_clips"] - metrics["error_clips"]
-    process_state["audio"]["metrics"] = metrics
-    _recompute_audio_metrics_locked()
-
-
 def _load_audio_worker_settings():
     workers = 2
     batch_seed = -1
@@ -3505,7 +3622,6 @@ def _enqueue_audio_job(kind, indices, label=None, scope=None, scope_mode=None, c
         if audio_current_job is None and not audio_queue:
             process_state["audio"]["logs"] = []
             process_state["audio"]["recent_jobs"] = []
-            process_state["audio"]["metrics"] = _new_audio_metrics()
 
         valid_rows = []
         seen_uids = set()
@@ -3701,7 +3817,7 @@ def _restore_audio_queue_state():
     with audio_queue_condition:
         project_manager.recover_interrupted_generating_chunks()
         project_manager.reconcile_chunk_audio_states()
-        process_state["audio"]["metrics"] = _new_audio_metrics()
+        process_state["audio"]["metrics"] = _normalize_audio_metrics(payload.get("metrics"))
         process_state["audio"]["heartbeat"] = _new_audio_heartbeat_state()
         process_state["audio"]["logs"] = []
         process_state["audio"]["recent_jobs"] = []
@@ -3799,7 +3915,17 @@ def _restore_audio_queue_state():
                 )
 
         audio_queue[:] = restored_jobs
-        _seed_audio_metrics_from_jobs_locked(*restored_jobs)
+        restored_metrics = _normalize_audio_metrics(payload.get("metrics"))
+        processed_from_jobs = sum(max(0, int(job.get("processed_clips", 0) or 0)) for job in restored_jobs)
+        error_from_jobs = sum(max(0, int(job.get("error_clips", 0) or 0)) for job in restored_jobs)
+        restored_metrics["processed_clips"] = max(restored_metrics["processed_clips"], processed_from_jobs)
+        restored_metrics["error_clips"] = min(
+            restored_metrics["processed_clips"],
+            max(restored_metrics["error_clips"], error_from_jobs),
+        )
+        restored_metrics["successful_clips"] = restored_metrics["processed_clips"] - restored_metrics["error_clips"]
+        process_state["audio"]["metrics"] = restored_metrics
+        _recompute_audio_metrics_locked()
         if restored_jobs:
             _refresh_audio_process_state_locked(persist=True)
             audio_queue_condition.notify_all()
@@ -4563,19 +4689,19 @@ def run_script_sanity_task(run_id: str, stop_check=None):
         attribution_user_prompt = prompts_config.get("attribution_user_prompt")
         if attribution_system_prompt and attribution_user_prompt:
             ensure_active()
-            _base_url = llm_config.get("base_url", "http://localhost:11434/v1").rstrip("/")
-            if not _base_url.endswith("/v1"):
-                _base_url += "/v1"
-            client = OpenAI(
-                base_url=_base_url,
-                api_key=llm_config.get("api_key", "local"),
-                timeout=float(llm_config.get("timeout", 600)),
+            llm_runtime = LLMRuntimeConfig.from_dict(
+                llm_config,
+                default_base_url="http://localhost:11434/v1",
+                default_model_name="local-model",
+                default_timeout=600.0,
             )
+            client = _LLM_CLIENT_FACTORY.create_client(llm_runtime)
             attribution_resolver = build_attribution_classifier(
                 client,
-                llm_config.get("model_name", "local-model"),
+                llm_runtime.model_name,
                 attribution_system_prompt,
                 attribution_user_prompt,
+                runtime=llm_runtime,
             )
 
         result = run_script_sanity_check(
@@ -4633,6 +4759,13 @@ def run_script_sanity_task(run_id: str, stop_check=None):
         log(f"Dialogue-attribution model queries: {result['attribution_model_queries']}")
         log(f"Dialogue-attribution sections pruned: {result['attribution_pruned_sections']}")
         log(f"Dialogue-attribution words pruned: {result['attribution_pruned_words']}")
+        model_decisions = [d for d in (result.get("attribution_decisions") or []) if d.get("source") == "model"]
+        if model_decisions:
+            mode_labels = sorted({str(d.get("llm_mode") or "").strip() for d in model_decisions if str(d.get("llm_mode") or "").strip()})
+            tool_observed_values = sorted({bool(d.get("llm_tool_call_observed")) for d in model_decisions})
+            if mode_labels:
+                log(f"Dialogue-attribution llm modes: {', '.join(mode_labels)}")
+            log(f"Dialogue-attribution tool_call_observed values: {', '.join(str(v) for v in tool_observed_values)}")
         for decision in result.get("attribution_decisions") or []:
             if decision.get("decision") == "rejected":
                 phrase = decision.get("source_text") or ""

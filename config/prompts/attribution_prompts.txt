@@ -32,7 +32,7 @@ If there is any uncertainty, answer FALSE.
 
 Decide whether the omitted words below are only direct dialogue attribution / pure vocal delivery wording and can be ignored during sanity checking.
 
-Reply with JSON like {"result":"TRUE"} or {"result":"FALSE"} if possible, but plain TRUE/FALSE is also acceptable.
+Reply with TRUE or FALSE only.
 
 Chapter: {chapter}
 

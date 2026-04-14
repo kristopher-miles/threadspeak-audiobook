@@ -580,7 +580,7 @@ class SavedVoiceReuseTests(unittest.TestCase):
 
             original_config_path = app_module.CONFIG_PATH
             original_pm = app_module.project_manager
-            original_openai = app_module.OpenAI
+            original_llm_client_factory = app_module._LLM_CLIENT_FACTORY
             try:
                 app_module.CONFIG_PATH = config_path
 
@@ -592,8 +592,8 @@ class SavedVoiceReuseTests(unittest.TestCase):
                             "context_chars": 0,
                         }
 
-                class FakeOpenAI:
-                    def __init__(self, **kwargs):
+                class FakeClient:
+                    def __init__(self):
                         self.chat = self
                         self.completions = self
 
@@ -609,8 +609,15 @@ class SavedVoiceReuseTests(unittest.TestCase):
 
                         return _Resp()
 
+                class FakeLLMClientFactory:
+                    def __init__(self, *args, **kwargs):
+                        pass
+
+                    def create_client(self, runtime):
+                        return FakeClient()
+
                 app_module.project_manager = FakeProjectManager()
-                app_module.OpenAI = FakeOpenAI
+                app_module._LLM_CLIENT_FACTORY = FakeLLMClientFactory()
 
                 result = app_module.suggest_voice_description_sync("Narrator")
                 self.assertEqual(result["status"], "ok")
@@ -619,7 +626,7 @@ class SavedVoiceReuseTests(unittest.TestCase):
             finally:
                 app_module.CONFIG_PATH = original_config_path
                 app_module.project_manager = original_pm
-                app_module.OpenAI = original_openai
+                app_module._LLM_CLIENT_FACTORY = original_llm_client_factory
 
     def test_run_voice_processing_task_suggests_all_before_generation_and_unloads(self):
         with tempfile.TemporaryDirectory() as temp_root:

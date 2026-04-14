@@ -1,8 +1,7 @@
 import asyncio
-from urllib.parse import urlparse
 
-import requests
 from fastapi import APIRouter
+from llm import LMStudioModelLoadService, ToolCapabilityService
 from .. import shared as _shared
 from factory_prompt_defaults import load_factory_default_prompts
 from runtime_layout import LAYOUT
@@ -19,6 +18,7 @@ _VOICE_PROMPT_PATH = LAYOUT.prompt_voice_path
 _DIALOGUE_PROMPT_PATH = LAYOUT.prompt_dialogue_path
 _TEMPERAMENT_PROMPT_PATH = LAYOUT.prompt_temperament_path
 _TOOL_CAPABILITY_TIMEOUT_SECONDS = 5
+_LMSTUDIO_MODEL_LOAD_TIMEOUT_SECONDS = 120
 
 
 class ToolCapabilityRequest(BaseModel):
@@ -27,120 +27,116 @@ class ToolCapabilityRequest(BaseModel):
     model_name: str
 
 
-def _tool_capability_result(status: str, provider: str, message: str):
-    return {
-        "status": status,
-        "supported": status == "supported",
-        "provider": provider,
-        "message": message,
-    }
-
-
-def _auth_headers(api_key: str):
-    key = (api_key or "").strip()
-    if not key or key.lower() == "local":
-        return {}
-    return {"Authorization": f"Bearer {key}"}
+class LMStudioModelLoadRequest(BaseModel):
+    model_name: str = ""
+    base_url: str = ""
+    api_key: str | None = None
+    context_length: int | None = None
+    eval_batch_size: int | None = None
+    flash_attention: bool | None = None
+    num_experts: int | None = None
+    offload_kv_cache_to_gpu: bool | None = None
+    echo_load_config: bool = False
 
 
 def _request_json(url: str, api_key: str):
-    headers = _auth_headers(api_key)
-    response = requests.get(url, headers=headers, timeout=_TOOL_CAPABILITY_TIMEOUT_SECONDS)
-    response.raise_for_status()
-    return response.json()
+    service = ToolCapabilityService(timeout_seconds=_TOOL_CAPABILITY_TIMEOUT_SECONDS)
+    return service._request_json(url, api_key)
+
+
+def _post_json(url: str, payload: dict, api_key: str):
+    service = LMStudioModelLoadService(timeout_seconds=_LMSTUDIO_MODEL_LOAD_TIMEOUT_SECONDS)
+    return service._post_json(url, payload, api_key)
 
 
 def _is_openrouter_url(base_url: str) -> bool:
-    try:
-        return "openrouter.ai" in (urlparse(base_url).netloc or "").lower()
-    except ValueError:
-        return False
+    return ToolCapabilityService.is_openrouter_url(base_url)
 
 
 def _normalize_lm_studio_origin(base_url: str) -> str:
-    raw = (base_url or "").strip().rstrip("/")
-    parsed = urlparse(raw)
-    if not parsed.scheme or not parsed.netloc:
-        return raw
-    return f"{parsed.scheme}://{parsed.netloc}"
+    return ToolCapabilityService.normalize_lm_studio_origin(base_url)
 
 
 def _model_name_matches_lm_studio(model: dict, model_name: str) -> bool:
-    wanted = (model_name or "").strip()
-    if not wanted:
-        return False
-    candidates = {
-        str(model.get("key") or "").strip(),
-        str(model.get("display_name") or "").strip(),
-    }
-    for instance in model.get("loaded_instances") or []:
-        if isinstance(instance, dict):
-            candidates.add(str(instance.get("id") or "").strip())
-    return wanted in candidates
+    return ToolCapabilityService.model_name_matches_lm_studio(model, model_name)
+
+
+def _tool_capability_service() -> ToolCapabilityService:
+    return ToolCapabilityService(
+        timeout_seconds=_TOOL_CAPABILITY_TIMEOUT_SECONDS,
+        request_json_fn=_request_json,
+    )
+
+
+def _lmstudio_model_load_service() -> LMStudioModelLoadService:
+    return LMStudioModelLoadService(
+        timeout_seconds=_LMSTUDIO_MODEL_LOAD_TIMEOUT_SECONDS,
+        post_json_fn=_post_json,
+    )
 
 
 def _verify_openrouter_tool_capability(base_url: str, api_key: str, model_name: str):
-    model = (model_name or "").strip()
-    if not model:
-        return _tool_capability_result("unknown", "openrouter", "Enter a model name to verify tool calling.")
-
-    try:
-        payload = _request_json("https://openrouter.ai/api/v1/models?supported_parameters=tools", api_key)
-        models = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(models, list):
-            return _tool_capability_result("unknown", "openrouter", "OpenRouter returned an unexpected model list.")
-        tool_models = {
-            str(item.get("id") or "").strip()
-            for item in models
-            if isinstance(item, dict)
-        }
-        if model in tool_models:
-            return _tool_capability_result("supported", "openrouter", "This OpenRouter model supports tool calling.")
-        return _tool_capability_result(
-            "unsupported",
-            "openrouter",
-            "OpenRouter does not list this model as supporting tool calling.",
-        )
-    except Exception as exc:
-        return _tool_capability_result("unknown", "openrouter", f"Could not verify OpenRouter model: {exc}")
+    return _tool_capability_service().verify_openrouter_tool_capability(
+        base_url,
+        api_key,
+        model_name,
+    ).to_dict()
 
 
 def _verify_lm_studio_tool_capability(base_url: str, api_key: str, model_name: str):
-    model = (model_name or "").strip()
-    if not model:
-        return _tool_capability_result("unknown", "lmstudio", "Enter a model name to verify tool calling.")
-
-    origin = _normalize_lm_studio_origin(base_url)
-    if not origin:
-        return _tool_capability_result("unknown", "lmstudio", "Enter an LM Studio base URL to verify tool calling.")
-
-    try:
-        payload = _request_json(f"{origin}/api/v1/models", api_key)
-        models = payload.get("models") if isinstance(payload, dict) else None
-        if not isinstance(models, list):
-            return _tool_capability_result("unknown", "lmstudio", "LM Studio returned an unexpected model list.")
-        for item in models:
-            if not isinstance(item, dict) or not _model_name_matches_lm_studio(item, model):
-                continue
-            capabilities = item.get("capabilities") or {}
-            if capabilities.get("trained_for_tool_use") is True:
-                return _tool_capability_result("supported", "lmstudio", "This LM Studio model is trained for tool use.")
-            if capabilities.get("trained_for_tool_use") is False:
-                return _tool_capability_result(
-                    "unsupported",
-                    "lmstudio",
-                    "LM Studio reports this model is not trained for tool use.",
-                )
-            return _tool_capability_result("unknown", "lmstudio", "LM Studio did not report tool-use capability for this model.")
-        return _tool_capability_result("unknown", "lmstudio", "LM Studio did not return a matching model.")
-    except Exception as exc:
-        return _tool_capability_result("unknown", "lmstudio", f"Could not verify LM Studio model: {exc}")
+    return _tool_capability_service().verify_lm_studio_tool_capability(
+        base_url,
+        api_key,
+        model_name,
+    ).to_dict()
 
 
 def verify_tool_capability(base_url: str, api_key: str, model_name: str):
-    if _is_openrouter_url(base_url):
-        return _verify_openrouter_tool_capability(base_url, api_key, model_name)
-    return _verify_lm_studio_tool_capability(base_url, api_key, model_name)
+    return _tool_capability_service().verify_tool_capability(
+        base_url,
+        api_key,
+        model_name,
+    ).to_dict()
+
+
+def load_lmstudio_model(
+    *,
+    base_url: str,
+    api_key: str,
+    model_name: str,
+    context_length: int | None = None,
+    eval_batch_size: int | None = None,
+    flash_attention: bool | None = None,
+    num_experts: int | None = None,
+    offload_kv_cache_to_gpu: bool | None = None,
+    echo_load_config: bool = False,
+):
+    return _lmstudio_model_load_service().load_model(
+        base_url=base_url,
+        api_key=api_key,
+        model_name=model_name,
+        context_length=context_length,
+        eval_batch_size=eval_batch_size,
+        flash_attention=flash_attention,
+        num_experts=num_experts,
+        offload_kv_cache_to_gpu=offload_kv_cache_to_gpu,
+        echo_load_config=echo_load_config,
+    )
+
+
+def _read_saved_llm_config() -> dict:
+    if not os.path.exists(CONFIG_PATH):
+        return {}
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (json.JSONDecodeError, ValueError, OSError):
+        return {}
+
+    llm_payload = payload.get("llm")
+    if not isinstance(llm_payload, dict):
+        return {}
+    return llm_payload
 
 
 def _write_prompt_pair(path: str, system_prompt: str, user_prompt: str):
@@ -647,6 +643,38 @@ async def verify_model_tool_capability(request: ToolCapabilityRequest):
         request.api_key,
         request.model_name,
     )
+
+
+@router.post("/api/config/lmstudio/load_model")
+async def load_lmstudio_model_endpoint(request: LMStudioModelLoadRequest):
+    saved = _read_saved_llm_config()
+    base_url = (request.base_url or "").strip() or str(saved.get("base_url") or "").strip()
+    api_key = request.api_key if request.api_key is not None else str(saved.get("api_key") or "")
+    model_name = (request.model_name or "").strip() or str(saved.get("model_name") or "").strip()
+
+    if not model_name:
+        raise HTTPException(status_code=400, detail="Model name is required.")
+    if not base_url:
+        raise HTTPException(status_code=400, detail="LLM base URL is required.")
+
+    try:
+        return await asyncio.to_thread(
+            load_lmstudio_model,
+            base_url=base_url,
+            api_key=api_key,
+            model_name=model_name,
+            context_length=request.context_length,
+            eval_batch_size=request.eval_batch_size,
+            flash_attention=request.flash_attention,
+            num_experts=request.num_experts,
+            offload_kv_cache_to_gpu=request.offload_kv_cache_to_gpu,
+            echo_load_config=request.echo_load_config,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to load LM Studio model: {exc}") from exc
+
 
 @router.post("/api/generation_mode_lock")
 async def set_generation_mode_lock(update: GenerationModeLockUpdate):

@@ -28,12 +28,18 @@
         const singleChunkPollIntervalMs = 1000;
         const singleChunkPollTimeoutMs = 180000;
         const NARRATOR_SELECTION_KEY = 'threadspeak-narrator-selection';
+        const EDITOR_AUDIO_CONTROL_WIDTH = 210;
+        let activeEditorPreviewButton = null;
+        let activeEditorPreviewChunkId = '';
 
         // Check if any audio is currently playing
         function isAudioPlaying() {
             const audios = document.querySelectorAll('audio');
             for (const audio of audios) {
                 if (!audio.paused && !audio.ended) return true;
+            }
+            if (window._editorPreviewAudio && !window._editorPreviewAudio.paused && !window._editorPreviewAudio.ended) {
+                return true;
             }
             return false;
         }
@@ -120,35 +126,138 @@
             return buildAudioSrcFromPath(chunk?.audio_path || '', fingerprint);
         }
 
-        function buildAudioPlayerHtml({ chunkRef = '', audioPath = '', fingerprint = '', src = '', width = 200, stopOthersId = null } = {}) {
+        function buildCompactAudioButtonHtml() {
+            return `<button type="button" class="btn btn-outline-secondary btn-sm chunk-audio-toggle" onclick="toggleChunkAudio(this)" aria-label="Play audio" title="Play audio"><i class="fas fa-play"></i></button>`;
+        }
+
+        function setCompactAudioButtonState(buttonEl, isPlaying) {
+            if (!buttonEl) return;
+            buttonEl.innerHTML = isPlaying
+                ? '<i class="fas fa-pause"></i>'
+                : '<i class="fas fa-play"></i>';
+            buttonEl.setAttribute('aria-label', isPlaying ? 'Pause audio' : 'Play audio');
+            buttonEl.title = isPlaying ? 'Pause audio' : 'Play audio';
+            buttonEl.classList.toggle('active', Boolean(isPlaying));
+        }
+
+        function clearActiveEditorPreviewButton() {
+            if (activeEditorPreviewButton) {
+                setCompactAudioButtonState(activeEditorPreviewButton, false);
+            }
+            activeEditorPreviewButton = null;
+            activeEditorPreviewChunkId = '';
+        }
+
+        function ensureEditorPreviewAudio() {
+            if (window._editorPreviewAudio) return window._editorPreviewAudio;
+            const audio = new Audio();
+            audio.preload = 'auto';
+            audio.addEventListener('play', () => {
+                if (activeEditorPreviewButton) {
+                    setCompactAudioButtonState(activeEditorPreviewButton, true);
+                }
+            });
+            const syncStopped = () => {
+                clearActiveEditorPreviewButton();
+            };
+            audio.addEventListener('pause', syncStopped);
+            audio.addEventListener('ended', syncStopped);
+            audio.addEventListener('error', syncStopped);
+            window._editorPreviewAudio = audio;
+            return audio;
+        }
+
+        function updateCompactAudioButton(audioEl) {
+            if (!audioEl) return;
+            const slot = audioEl.closest('.chunk-audio-slot');
+            const button = slot?.querySelector('.chunk-audio-toggle');
+            if (!button) return;
+            const chunkId = String(audioEl.dataset?.id || '').trim();
+            const previewAudio = window._editorPreviewAudio;
+            const isPlaying = Boolean(
+                button === activeEditorPreviewButton
+                && chunkId
+                && chunkId === activeEditorPreviewChunkId
+                && previewAudio
+                && !previewAudio.paused
+                && !previewAudio.ended
+            );
+            setCompactAudioButtonState(button, isPlaying);
+        }
+        window.updateCompactAudioButton = updateCompactAudioButton;
+
+        async function toggleChunkAudio(buttonEl) {
+            const slot = buttonEl?.closest?.('.chunk-audio-slot');
+            const audioEl = slot?.querySelector?.('audio.chunk-audio');
+            if (!audioEl) return;
+            const previewAudio = ensureEditorPreviewAudio();
+            const chunkId = String(audioEl.dataset?.id || '').trim();
+
+            try {
+                if (activeEditorPreviewButton === buttonEl && !previewAudio.paused && !previewAudio.ended) {
+                    previewAudio.pause();
+                } else {
+                    const nextSrc = String(await window.primeChunkAudioPlayback(audioEl) || audioEl.currentSrc || audioEl.src || '').trim();
+                    if (!nextSrc) return;
+
+                    if (activeEditorPreviewButton !== buttonEl) {
+                        clearActiveEditorPreviewButton();
+                    }
+                    if (previewAudio.src !== nextSrc) {
+                        previewAudio.src = nextSrc;
+                        previewAudio.currentTime = 0;
+                        previewAudio.load();
+                    } else if (previewAudio.ended) {
+                        previewAudio.currentTime = 0;
+                    }
+
+                    activeEditorPreviewButton = buttonEl;
+                    activeEditorPreviewChunkId = chunkId;
+                    setCompactAudioButtonState(buttonEl, true);
+                    await previewAudio.play();
+                }
+            } catch (e) {
+                console.warn('Failed to toggle chunk audio playback', e);
+                clearActiveEditorPreviewButton();
+            } finally {
+                updateCompactAudioButton(audioEl);
+            }
+        }
+
+        window.toggleChunkAudio = toggleChunkAudio;
+
+        function buildAudioPlayerHtml({ chunkRef = '', audioPath = '', fingerprint = '', src = '', width = EDITOR_AUDIO_CONTROL_WIDTH, stopOthersId = null, compact = false } = {}) {
             if (!src) return '';
             const onPlayAttr = stopOthersId == null
                 ? ''
                 : ` onplay='stopOthers(${JSON.stringify(stopOthersId)})'`;
+            if (compact) {
+                return `${buildCompactAudioButtonHtml()}<audio class="chunk-audio" data-id="${escapeHtml(chunkRef)}" data-audio-path="${escapeHtml(audioPath)}" data-audio-fingerprint="${escapeHtml(fingerprint)}" data-audio-retry-count="0" preload="none" src="${src}" style="display:none;" onerror='handleChunkAudioError(this); updateCompactAudioButton(this)'${onPlayAttr}></audio>`;
+            }
             return `<audio class="chunk-audio" data-id="${escapeHtml(chunkRef)}" data-audio-path="${escapeHtml(audioPath)}" data-audio-fingerprint="${escapeHtml(fingerprint)}" data-audio-retry-count="0" controls preload="none" src="${src}" style="width: ${width}px; height: 30px;" onerror='handleChunkAudioError(this)' onpointerdown='primeChunkAudioPlayback(this)'${onPlayAttr}></audio>`;
         }
 
         window.primeChunkAudioPlayback = async (audioEl) => {
-            if (!audioEl) return;
+            if (!audioEl) return '';
             const chunkRef = String(audioEl.dataset?.id || '').trim();
-            if (!chunkRef) return;
+            if (!chunkRef) return '';
             try {
                 const payload = await API.get(`/api/chunks/${encodeURIComponent(chunkRef)}/audio`);
                 const nextPath = String(payload?.audio_path || '').trim();
                 const nextFingerprint = String(payload?.audio_fingerprint || '').trim();
-                if (!nextPath) return;
-                if (audioEl.dataset.audioPath === nextPath && audioEl.dataset.audioFingerprint === nextFingerprint) {
-                    return;
-                }
+                if (!nextPath) return '';
+                const nextSrc = buildAudioSrcFromPath(nextPath, nextFingerprint || Date.now().toString());
                 audioEl.dataset.audioPath = nextPath;
                 audioEl.dataset.audioFingerprint = nextFingerprint;
                 audioEl.dataset.audioRetryCount = '0';
-                audioEl.src = buildAudioSrcFromPath(nextPath, nextFingerprint || Date.now().toString());
+                audioEl.src = nextSrc;
                 if (typeof audioEl.load === 'function') {
                     audioEl.load();
                 }
+                return nextSrc;
             } catch (e) {
                 console.warn(`Failed to refresh audio ref for ${chunkRef}`, e);
+                return '';
             }
         };
 
@@ -212,6 +321,7 @@
                 if (!shouldReuseRenderedAudioElement(existingAudio, nextAudio)) return;
 
                 nextAudio.replaceWith(existingAudio);
+                updateCompactAudioButton(existingAudio);
             });
         }
 
@@ -550,9 +660,10 @@
                             audioPath: chunk.audio_path,
                             fingerprint: nextFingerprint,
                             src: newSrc,
-                            width: 200,
                             stopOthersId: chunkRef,
+                            compact: true,
                         });
+                        audioSlot.replaceChildren();
                         audioSlot.insertAdjacentHTML('beforeend', audioHtml);
                     } else if (existingAudio) {
                         const currentFingerprint = existingAudio.dataset.audioFingerprint || '';
@@ -563,9 +674,16 @@
                             existingAudio.src = newSrc;
                             existingAudio.load();
                         }
+                        updateCompactAudioButton(existingAudio);
                     }
                 } else if (existingAudio) {
-                    existingAudio.remove();
+                    if (typeof existingAudio.remove === 'function') {
+                        existingAudio.remove();
+                    }
+                    if (Object.prototype.hasOwnProperty.call(audioSlot, 'audio')) {
+                        audioSlot.audio = null;
+                    }
+                    audioSlot.replaceChildren();
                 }
             }
             return true;
@@ -1826,19 +1944,6 @@
                             window.releaseNavTaskSpinner('editor');
                         }
                     }
-                    // Auto Proofread: trigger every 25 completed clips while audio is running
-                    if (autoProofreadEnabled && audioState?.running) {
-                        const processed = Number(audioState?.metrics?.processed_clips) || 0;
-                        if (processed - clipsAtLastAutoProofread >= 25) {
-                            const proofreadRunning = !!latestProofreadStatus?.running;
-                            if (!proofreadRunning) {
-                                clipsAtLastAutoProofread = processed;
-                                const threshold = getProofreadThreshold();
-                                API.post('/api/proofread/auto', { threshold, chapter: '__ALL__' })
-                                    .catch(err => console.warn('Auto proofread trigger failed:', err));
-                            }
-                        }
-                    }
                     return audioState;
                 } catch (e) {
                     console.error('Audio queue poll error', e);
@@ -1964,8 +2069,8 @@
                     audioPath: chunk.audio_path,
                     fingerprint: audioFingerprint,
                     src: buildChunkAudioSrc(chunk, Date.now().toString()),
-                    width: 200,
                     stopOthersId: chunkRef,
+                    compact: true,
                 })
                 : '';
 
@@ -2646,6 +2751,9 @@
 
         window.stopOthers = (id) => {
             if (isPlayingSequence) return; // Sequence player handles its own logic
+            if (window._editorPreviewAudio && activeEditorPreviewChunkId && activeEditorPreviewChunkId !== String(id)) {
+                window._editorPreviewAudio.pause();
+            }
             document.querySelectorAll('audio').forEach(audio => {
                 if (audio.dataset.id != id) {
                     audio.pause();
@@ -2721,6 +2829,10 @@
 
         window.stopSequence = () => {
             isPlayingSequence = false;
+            if (window._editorPreviewAudio) {
+                window._editorPreviewAudio.pause();
+                window._editorPreviewAudio.currentTime = 0;
+            }
             document.querySelectorAll('audio').forEach(a => {
                 a.pause();
                 a.currentTime = 0;

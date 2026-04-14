@@ -21,7 +21,7 @@ m4b_cover.jpg
 temp_m4b_combined.wav
 temp_m4b_meta.txt
 voicelines/
-scripts/
+/scripts/
 saved_projects/
 app/config.json
 app/output_audio_cloned/

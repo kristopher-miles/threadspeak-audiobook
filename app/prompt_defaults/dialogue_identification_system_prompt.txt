@@ -13,4 +13,3 @@ use their exact name from the list.
   - If the dialogue belongs to a character not yet seen, provide that character's name.
   - Use NARRATOR only for clearly unvoiced internal thoughts printed inside quotation marks \
 (a rare edge case).
-  - You MUST call the identify_dialogue tool with your answer. Do not respond in plain text.

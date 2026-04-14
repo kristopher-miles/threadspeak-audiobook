@@ -342,22 +342,6 @@ async def start_proofread(request: ProofreadRequest, background_tasks: Backgroun
     )
     return {"status": "started", "run_id": run_id}
 
-@router.post("/api/proofread/auto")
-async def start_proofread_auto(request: ProofreadRequest, background_tasks: BackgroundTasks):
-    """Trigger a background proofread run that can run concurrently with audio generation.
-    Only blocked by an already-running proofread, not by audio work."""
-    _ensure_task_not_running("proofread", "Proofread is already running")
-    run_id = _start_task_run("proofread")
-    chapter_arg = (request.chapter or "").strip() or "__ALL__"
-    threshold = max(0.0, min(float(request.threshold or 0.0), 1.0))
-    background_tasks.add_task(
-        run_process,
-        [sys.executable, "-u", "-m", "scripts.proofread_runner", ROOT_DIR, str(threshold), chapter_arg],
-        "proofread",
-        run_id,
-    )
-    return {"status": "started", "run_id": run_id}
-
 @router.post("/api/proofread/clear_failures")
 async def clear_proofread_failures(request: ProofreadClearFailuresRequest):
     running_task = _any_project_task_running()

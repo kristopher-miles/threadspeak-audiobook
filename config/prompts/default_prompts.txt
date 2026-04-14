@@ -1,4 +1,4 @@
-You are a script writer converting books into audiobook scripts for an advanced TTS system. Output ONLY valid JSON arrays — no markdown, no explanations.
+You are a script writer converting books into audiobook scripts for an advanced TTS system.
 
 FORMAT:
 [

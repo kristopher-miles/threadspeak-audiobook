@@ -1,10 +1,18 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from fastapi import APIRouter
+from llm import (
+    LLMClientFactory,
+    LLMRuntimeConfig,
+    StructuredLLMService,
+    VOICE_DESCRIPTION_CONTRACT,
+)
 from .. import shared as _shared
 
 globals().update({k: v for k, v in vars(_shared).items() if not k.startswith("__")})
 
 router = APIRouter()
+_LLM_CLIENT_FACTORY = LLMClientFactory()
+_STRUCTURED_LLM_SERVICE = StructuredLLMService()
 
 class NarratorThresholdRequest(BaseModel):
     value: int
@@ -466,22 +474,23 @@ def suggest_voice_description_sync(speaker: str):
 
     prompt_payload = project_manager.build_voice_suggestion_prompt(speaker, prompt_template)
     llm_config = config.get("llm", {})
-
-    _base_url = llm_config.get("base_url", "http://localhost:11434/v1").rstrip("/")
-    if not _base_url.endswith("/v1"):
-        _base_url += "/v1"
-    client = OpenAI(
-        base_url=_base_url,
-        api_key=llm_config.get("api_key", "local"),
-        timeout=float(llm_config.get("timeout", 600)),
+    runtime = LLMRuntimeConfig.from_dict(
+        llm_config,
+        default_base_url="http://localhost:11434/v1",
+        default_model_name="local-model",
+        default_timeout=600.0,
     )
-    response = client.chat.completions.create(
-        model=llm_config.get("model_name", "local-model"),
+    client = _LLM_CLIENT_FACTORY.create_client(runtime)
+    result = _STRUCTURED_LLM_SERVICE.run(
+        client=client,
+        runtime=runtime,
         messages=[{"role": "user", "content": prompt_payload["prompt"]}],
+        contract=VOICE_DESCRIPTION_CONTRACT,
     )
-
-    content = response.choices[0].message.content if response.choices else ""
-    voice = _extract_voice_field(content)
+    payload = result.parsed if isinstance(result.parsed, dict) else None
+    voice = str((payload or {}).get("voice") or "").strip()
+    if not voice:
+        voice = _extract_voice_field(result.text)
     if not voice:
         raise ValueError("Model response did not include a valid JSON voice field")
 
@@ -489,6 +498,8 @@ def suggest_voice_description_sync(speaker: str):
         "status": "ok",
         "speaker": speaker,
         "voice": voice,
+        "llm_mode": result.mode,
+        "llm_tool_call_observed": bool(result.tool_call_observed),
         "matched_paragraphs": len(prompt_payload["paragraphs"]),
         "context_chars": prompt_payload["context_chars"],
         "warning": prompt_payload.get("warning"),

@@ -5,7 +5,7 @@ import re
 import time
 import hashlib
 
-from openai import OpenAI
+from llm import LLMClientFactory, LLMRuntimeConfig
 
 from scripts.generate_script import process_chunk
 from script_sanity import run_script_sanity_check
@@ -15,6 +15,7 @@ from source_document import load_source_document
 
 _WORD_RE = re.compile(r"[A-Za-z0-9]+")
 _QUOTE_RE = re.compile(r'["“”]')
+_LLM_CLIENT_FACTORY = LLMClientFactory()
 
 
 class RepairSupersededError(Exception):
@@ -535,11 +536,19 @@ def _load_generation_settings(config_path):
     generation = config.get("generation", {})
     prompts = config.get("prompts", {})
 
+    llm_runtime = LLMRuntimeConfig.from_dict(
+        llm,
+        default_base_url="http://localhost:11434/v1",
+        default_model_name="local-model",
+        default_timeout=600.0,
+    )
+
     return {
-        "base_url": llm.get("base_url", "http://localhost:11434/v1"),
-        "api_key": llm.get("api_key", "local"),
-        "model_name": llm.get("model_name", "local-model"),
-        "timeout": float(llm.get("timeout", 600)),
+        "llm_runtime": llm_runtime,
+        "base_url": llm_runtime.base_url,
+        "api_key": llm_runtime.api_key,
+        "model_name": llm_runtime.model_name,
+        "timeout": llm_runtime.timeout,
         "chunk_size": int(generation.get("chunk_size", 3000)),
         "max_tokens": int(generation.get("max_tokens", 4096)),
         "temperature": float(generation.get("temperature", 0.6)),
@@ -689,11 +698,7 @@ def repair_invalid_chunks(root_dir, log, should_continue=None, trace=None):
         raise FileNotFoundError("Original uploaded source could not be found.")
 
     settings = _load_generation_settings(config_path)
-    client = OpenAI(
-        base_url=settings["base_url"],
-        api_key=settings["api_key"],
-        timeout=settings["timeout"],
-    )
+    client = _LLM_CLIENT_FACTORY.create_client(settings["llm_runtime"])
     source_document = load_source_document(input_file)
     store = open_project_script_store(root_dir)
     if not store.load_script_document().get("entries"):
@@ -1044,6 +1049,7 @@ def repair_invalid_chunks(root_dir, log, should_continue=None, trace=None):
             min_p=settings["min_p"],
             presence_penalty=settings["presence_penalty"],
             banned_tokens=settings["banned_tokens"],
+            runtime=settings.get("llm_runtime"),
         )
         for entry in generated_entries:
             entry["chapter"] = source_chapter["title"]

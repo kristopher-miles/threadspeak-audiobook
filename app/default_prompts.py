@@ -40,8 +40,7 @@ You will receive:
 
 Rules:
   - Respond with a single concise sentence describing how the reader should emotionally \
-deliver the paragraph (e.g. "Read with quiet melancholy and a slow, deliberate pace").
-  - You MUST call the identify_sentiment tool with your answer. Do not respond in plain text.\
+deliver the paragraph (e.g. "Read with quiet melancholy and a slow, deliberate pace").\
 """
 
 _FALLBACK_DIALOGUE_IDENTIFICATION_PROMPT = """\
@@ -59,8 +58,7 @@ Rules:
 use their exact name from the list.
   - If the dialogue belongs to a character not yet seen, provide that character's name.
   - Use NARRATOR only for clearly unvoiced internal thoughts printed inside quotation marks \
-(a rare edge case).
-  - You MUST call the identify_dialogue tool with your answer. Do not respond in plain text.\
+  (a rare edge case).\
 """
 
 
