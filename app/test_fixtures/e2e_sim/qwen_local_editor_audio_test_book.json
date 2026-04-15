@@ -1,8 +1,11 @@
 {
   "strict": true,
+  "unordered_methods": [
+    "generate_voice_clone"
+  ],
   "metadata": {
     "purpose": "Captured editor-phase local Qwen outputs for full line-by-line generation replay",
-    "captured_at": "2026-04-15T07:51:14.981857+00:00",
+    "captured_at": "2026-04-15T10:25:35.883068+00:00",
     "source_file": "app/test_fixtures/files/test_book.epub",
     "tts_local_backend": "mlx",
     "line_count": 72,
@@ -35,10 +38,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0000_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "702328dc65a24ae6aa17d90a2142fb5d",
+          "uid": "6c384576dbf84efc98a7eb38cb8eda46",
           "line_id": 0,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_702328dc65a24ae6aa17d90a2142fb5d_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_6c384576dbf84efc98a7eb38cb8eda46_narrator.mp3"
         }
       },
       {
@@ -49,10 +52,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0001_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "f8ce37134bdc453d9e4c380bdde360bb",
+          "uid": "8a3732446cdf47e8bfcf05efec553c1e",
           "line_id": 1,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_f8ce37134bdc453d9e4c380bdde360bb_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_8a3732446cdf47e8bfcf05efec553c1e_narrator.mp3"
         }
       },
       {
@@ -63,10 +66,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0002_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "a6505a076aeb4e9182d55e21c332b2c0",
+          "uid": "16a34869f59b43dcb15315776b89190b",
           "line_id": 2,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_a6505a076aeb4e9182d55e21c332b2c0_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_16a34869f59b43dcb15315776b89190b_narrator.mp3"
         }
       },
       {
@@ -77,10 +80,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0003_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "08b7256982fd4e9eaa2fb496932aff2d",
+          "uid": "295392e75fb24e0a9fa44b317bc56141",
           "line_id": 3,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_08b7256982fd4e9eaa2fb496932aff2d_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_295392e75fb24e0a9fa44b317bc56141_narrator.mp3"
         }
       },
       {
@@ -91,10 +94,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0004_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "9257c833421746ef9b03f6db95776026",
+          "uid": "57cdfe700f0e4b86b1d8a150909eff0e",
           "line_id": 4,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_9257c833421746ef9b03f6db95776026_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_57cdfe700f0e4b86b1d8a150909eff0e_narrator.mp3"
         }
       },
       {
@@ -105,10 +108,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0005_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "2c1a658f3c6d42f18f049312d7362d15",
+          "uid": "f734d7ec7c3b4607ae3a421de3e6b0df",
           "line_id": 5,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_2c1a658f3c6d42f18f049312d7362d15_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_f734d7ec7c3b4607ae3a421de3e6b0df_narrator.mp3"
         }
       },
       {
@@ -119,10 +122,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0006_Bitera.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "5a40a5cad23740f8bce97f707e15cc60",
+          "uid": "17dea3c9771b48e9b4f26f85c36a77b8",
           "line_id": 6,
           "speaker": "Bitera",
-          "source_audio_path": "voicelines/voiceline_5a40a5cad23740f8bce97f707e15cc60_bitera.wav"
+          "source_audio_path": "voicelines/voiceline_17dea3c9771b48e9b4f26f85c36a77b8_bitera.mp3"
         }
       },
       {
@@ -133,10 +136,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0007_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "18b3a2c6376e422aa53911b419c2eee2",
+          "uid": "707d4d2f62b74de9896bb2c1f4b64420",
           "line_id": 7,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_18b3a2c6376e422aa53911b419c2eee2_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_707d4d2f62b74de9896bb2c1f4b64420_narrator.mp3"
         }
       },
       {
@@ -147,10 +150,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0008_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "08ea974c2372427e8f60526e2d27737a",
+          "uid": "6f9aa3df225d459da181a35139853647",
           "line_id": 8,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_08ea974c2372427e8f60526e2d27737a_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_6f9aa3df225d459da181a35139853647_narrator.mp3"
         }
       },
       {
@@ -161,10 +164,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0009_Kisten.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "64649c9576a84ba399decb38acb01e2a",
+          "uid": "ae9369654bfb4423b48fd047cad94907",
           "line_id": 9,
           "speaker": "Kisten",
-          "source_audio_path": "voicelines/voiceline_64649c9576a84ba399decb38acb01e2a_kisten.mp3"
+          "source_audio_path": "voicelines/voiceline_ae9369654bfb4423b48fd047cad94907_kisten.mp3"
         }
       },
       {
@@ -175,10 +178,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0010_Bitera.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "287ea8a561d54569ab60a62f9ac1a35c",
+          "uid": "17851cd21d604f49ba667e5345cce7f1",
           "line_id": 10,
           "speaker": "Bitera",
-          "source_audio_path": "voicelines/voiceline_287ea8a561d54569ab60a62f9ac1a35c_bitera.mp3"
+          "source_audio_path": "voicelines/voiceline_17851cd21d604f49ba667e5345cce7f1_bitera.mp3"
         }
       },
       {
@@ -189,10 +192,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0011_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "6b0d5d7bd81e480f85f31679b05db059",
+          "uid": "68af3d5bc7634e739fef357a3bdc3170",
           "line_id": 11,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_6b0d5d7bd81e480f85f31679b05db059_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_68af3d5bc7634e739fef357a3bdc3170_narrator.mp3"
         }
       },
       {
@@ -203,10 +206,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0012_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "87c33550689a49d6a95292939ecb13e5",
+          "uid": "c7c6511229df447483e261c09542b661",
           "line_id": 12,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_87c33550689a49d6a95292939ecb13e5_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_c7c6511229df447483e261c09542b661_narrator.mp3"
         }
       },
       {
@@ -217,10 +220,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0013_Maddie.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "52bda45675ff447cbd7850568a6489be",
+          "uid": "1f1289d5a183425e83172513950a7ebb",
           "line_id": 13,
           "speaker": "Maddie",
-          "source_audio_path": "voicelines/voiceline_52bda45675ff447cbd7850568a6489be_maddie.mp3"
+          "source_audio_path": "voicelines/voiceline_1f1289d5a183425e83172513950a7ebb_maddie.mp3"
         }
       },
       {
@@ -231,10 +234,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0014_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "70ab5048b3bc447f94afa10a9b0de216",
+          "uid": "34bdff1d1d274e82beb47be5c7b5b6ab",
           "line_id": 14,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_70ab5048b3bc447f94afa10a9b0de216_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_34bdff1d1d274e82beb47be5c7b5b6ab_narrator.mp3"
         }
       },
       {
@@ -245,10 +248,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0015_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "aae8f75e584546c29fede4c880c2bb82",
+          "uid": "96d91a52a98347eeb3b471e5be93896d",
           "line_id": 15,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_aae8f75e584546c29fede4c880c2bb82_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_96d91a52a98347eeb3b471e5be93896d_narrator.mp3"
         }
       },
       {
@@ -259,10 +262,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0016_Maddie.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "f86dc57bc0fb4421879ba4d7015113f6",
+          "uid": "5a40dde3032d468991ec8af1fee587eb",
           "line_id": 16,
           "speaker": "Maddie",
-          "source_audio_path": "voicelines/voiceline_f86dc57bc0fb4421879ba4d7015113f6_maddie.mp3"
+          "source_audio_path": "voicelines/voiceline_5a40dde3032d468991ec8af1fee587eb_maddie.mp3"
         }
       },
       {
@@ -273,10 +276,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0017_Kisten.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "c65aac2f66cd4e58abfa9ace1617aceb",
+          "uid": "e3b283575bb34684a42eda5435329e9b",
           "line_id": 17,
           "speaker": "Kisten",
-          "source_audio_path": "voicelines/voiceline_c65aac2f66cd4e58abfa9ace1617aceb_kisten.mp3"
+          "source_audio_path": "voicelines/voiceline_e3b283575bb34684a42eda5435329e9b_kisten.mp3"
         }
       },
       {
@@ -287,10 +290,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0018_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "25c43a54d95343489447a5515f2595b8",
+          "uid": "93846fd8c1334c57bd35320bc87dcda2",
           "line_id": 18,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_25c43a54d95343489447a5515f2595b8_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_93846fd8c1334c57bd35320bc87dcda2_narrator.mp3"
         }
       },
       {
@@ -301,10 +304,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0019_Kisten.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "3c3edb1fbf4743f4a5e9b5575b0bb142",
+          "uid": "d17ca07d2a624a62878ef0612eaf60d5",
           "line_id": 19,
           "speaker": "Kisten",
-          "source_audio_path": "voicelines/voiceline_3c3edb1fbf4743f4a5e9b5575b0bb142_kisten.mp3"
+          "source_audio_path": "voicelines/voiceline_d17ca07d2a624a62878ef0612eaf60d5_kisten.mp3"
         }
       },
       {
@@ -315,10 +318,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0020_Bitera.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "b3c00ab8dce14bd59198c304eee6b5b1",
+          "uid": "4e76fbe2598d4e4ca3642b72cd8dfbad",
           "line_id": 20,
           "speaker": "Bitera",
-          "source_audio_path": "voicelines/voiceline_b3c00ab8dce14bd59198c304eee6b5b1_bitera.mp3"
+          "source_audio_path": "voicelines/voiceline_4e76fbe2598d4e4ca3642b72cd8dfbad_bitera.mp3"
         }
       },
       {
@@ -329,10 +332,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0021_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "f888d4e2fb6449e89e66d8321ddc3174",
+          "uid": "4e6d78ce95ba46d5865c9fc5fea1323a",
           "line_id": 21,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_f888d4e2fb6449e89e66d8321ddc3174_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_4e6d78ce95ba46d5865c9fc5fea1323a_narrator.mp3"
         }
       },
       {
@@ -343,10 +346,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0022_Bitera.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "d46695294e5849f393b058777d9b610a",
+          "uid": "55f458a88b6d416faf4bfdb2e5100180",
           "line_id": 22,
           "speaker": "Bitera",
-          "source_audio_path": "voicelines/voiceline_d46695294e5849f393b058777d9b610a_bitera.mp3"
+          "source_audio_path": "voicelines/voiceline_55f458a88b6d416faf4bfdb2e5100180_bitera.mp3"
         }
       },
       {
@@ -357,10 +360,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0023_Bitera.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "f5f01f5aabbe4c15b4a94a0c4f5b5c16",
+          "uid": "85b3d1e99c6f4efaabfa26a87fb0fe54",
           "line_id": 23,
           "speaker": "Bitera",
-          "source_audio_path": "voicelines/voiceline_f5f01f5aabbe4c15b4a94a0c4f5b5c16_bitera.mp3"
+          "source_audio_path": "voicelines/voiceline_85b3d1e99c6f4efaabfa26a87fb0fe54_bitera.mp3"
         }
       },
       {
@@ -371,10 +374,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0024_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "56b720a9b0cd447aa18dd18cfa0b19cd",
+          "uid": "3b55552128dc41d686c4f7738aa40f6f",
           "line_id": 24,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_56b720a9b0cd447aa18dd18cfa0b19cd_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_3b55552128dc41d686c4f7738aa40f6f_narrator.mp3"
         }
       },
       {
@@ -385,10 +388,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0025_Maddie.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "2c44287b4c2241d7a5b866f818162bfa",
+          "uid": "6c1952dd641b4e41b3b66daa593ef270",
           "line_id": 25,
           "speaker": "Maddie",
-          "source_audio_path": "voicelines/voiceline_2c44287b4c2241d7a5b866f818162bfa_maddie.mp3"
+          "source_audio_path": "voicelines/voiceline_6c1952dd641b4e41b3b66daa593ef270_maddie.mp3"
         }
       },
       {
@@ -399,10 +402,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0026_Bitera.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "b5a89dc53b7d4a158606069fab31c358",
+          "uid": "a8242ad30e3b407cbbce9f24c835ff03",
           "line_id": 26,
           "speaker": "Bitera",
-          "source_audio_path": "voicelines/voiceline_b5a89dc53b7d4a158606069fab31c358_bitera.mp3"
+          "source_audio_path": "voicelines/voiceline_a8242ad30e3b407cbbce9f24c835ff03_bitera.mp3"
         }
       },
       {
@@ -413,10 +416,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0027_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "3405813cb5df4ecd98e25057c383fe36",
+          "uid": "2b68e3ae09f7447ab8d57fb460f5a06a",
           "line_id": 27,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_3405813cb5df4ecd98e25057c383fe36_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_2b68e3ae09f7447ab8d57fb460f5a06a_narrator.mp3"
         }
       },
       {
@@ -427,10 +430,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0028_Bitera.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "16f05894a1f341cc942f089d5b2deebc",
+          "uid": "eb1fa310c0bf49df94792488ba18e6b0",
           "line_id": 28,
           "speaker": "Bitera",
-          "source_audio_path": "voicelines/voiceline_16f05894a1f341cc942f089d5b2deebc_bitera.mp3"
+          "source_audio_path": "voicelines/voiceline_eb1fa310c0bf49df94792488ba18e6b0_bitera.mp3"
         }
       },
       {
@@ -441,10 +444,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0029_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "9d9bf41896d54771b0961d97737bb468",
+          "uid": "27ec396d87484235af5ec2c15f1c8892",
           "line_id": 29,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_9d9bf41896d54771b0961d97737bb468_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_27ec396d87484235af5ec2c15f1c8892_narrator.mp3"
         }
       },
       {
@@ -455,10 +458,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0030_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "412d1ef11c1c4be1949ff08562c7845a",
+          "uid": "172710a746b748bf9b5b36f82a834887",
           "line_id": 30,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_412d1ef11c1c4be1949ff08562c7845a_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_172710a746b748bf9b5b36f82a834887_narrator.mp3"
         }
       },
       {
@@ -469,10 +472,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0031_Maddie.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "d13c2a100ccc4618aa8c8e104357b42e",
+          "uid": "591f21f82f91429a96647490b4780c61",
           "line_id": 31,
           "speaker": "Maddie",
-          "source_audio_path": "voicelines/voiceline_d13c2a100ccc4618aa8c8e104357b42e_maddie.mp3"
+          "source_audio_path": "voicelines/voiceline_591f21f82f91429a96647490b4780c61_maddie.mp3"
         }
       },
       {
@@ -483,10 +486,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0032_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "7cc26f18f91b43f19a579f20720345f3",
+          "uid": "c7609ed6f5e34981a925e12a32caddd7",
           "line_id": 32,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_7cc26f18f91b43f19a579f20720345f3_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_c7609ed6f5e34981a925e12a32caddd7_narrator.mp3"
         }
       },
       {
@@ -497,10 +500,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0033_Maddie.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "d9542a3428d740a0bc212bcca8b22d03",
+          "uid": "42b6c3c21e0a4839875bcd337b063b21",
           "line_id": 33,
           "speaker": "Maddie",
-          "source_audio_path": "voicelines/voiceline_d9542a3428d740a0bc212bcca8b22d03_maddie.mp3"
+          "source_audio_path": "voicelines/voiceline_42b6c3c21e0a4839875bcd337b063b21_maddie.mp3"
         }
       },
       {
@@ -511,10 +514,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0034_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "52b9e7b1cf3a466296948263b4be7b36",
+          "uid": "67e6c404b66b473e82a04a0a105216bb",
           "line_id": 34,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_52b9e7b1cf3a466296948263b4be7b36_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_67e6c404b66b473e82a04a0a105216bb_narrator.mp3"
         }
       },
       {
@@ -525,10 +528,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0035_Kisten.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "8a402cfdf23442a7bdf99270b1513fcf",
+          "uid": "d7c47fd68df04534a87c16a4e04fa3f5",
           "line_id": 35,
           "speaker": "Kisten",
-          "source_audio_path": "voicelines/voiceline_8a402cfdf23442a7bdf99270b1513fcf_kisten.mp3"
+          "source_audio_path": "voicelines/voiceline_d7c47fd68df04534a87c16a4e04fa3f5_kisten.mp3"
         }
       },
       {
@@ -539,10 +542,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0036_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "3d327a69d2b04be09057c1e7e001f01e",
+          "uid": "d648ebc5480744d9b105d4c86a5b25cf",
           "line_id": 36,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_3d327a69d2b04be09057c1e7e001f01e_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_d648ebc5480744d9b105d4c86a5b25cf_narrator.mp3"
         }
       },
       {
@@ -553,10 +556,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0037_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "480dd74387c142c59f5a7de21af2863d",
+          "uid": "1e59d4bdae4545d29da92a80dece7c4f",
           "line_id": 37,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_480dd74387c142c59f5a7de21af2863d_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_1e59d4bdae4545d29da92a80dece7c4f_narrator.mp3"
         }
       },
       {
@@ -567,10 +570,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0038_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "ce94fe2b9a444fda8f4cefa6655cd5d7",
+          "uid": "5dd8e23262c545ba9f040307c3398708",
           "line_id": 38,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_ce94fe2b9a444fda8f4cefa6655cd5d7_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_5dd8e23262c545ba9f040307c3398708_narrator.mp3"
         }
       },
       {
@@ -581,10 +584,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0039_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "f03a5c8fcde548399fbe5db59db63eb3",
+          "uid": "7881d9e1216748e8b843cb903847f3de",
           "line_id": 39,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_f03a5c8fcde548399fbe5db59db63eb3_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_7881d9e1216748e8b843cb903847f3de_narrator.mp3"
         }
       },
       {
@@ -595,10 +598,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0040_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "8c52d7c309224a16aa1311d067584776",
+          "uid": "530c80f8fb324b73abe4147699a08646",
           "line_id": 40,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_8c52d7c309224a16aa1311d067584776_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_530c80f8fb324b73abe4147699a08646_narrator.mp3"
         }
       },
       {
@@ -609,10 +612,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0041_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "15e2e370491a40adb4eaa4a978284513",
+          "uid": "d11bbf45ee1948fa85911446c459365e",
           "line_id": 41,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_15e2e370491a40adb4eaa4a978284513_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_d11bbf45ee1948fa85911446c459365e_narrator.mp3"
         }
       },
       {
@@ -623,10 +626,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0042_Mother.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "3ca7e6258a374c6599edbf302e1143a0",
+          "uid": "21001d314ee04a3ba7024c9839de1fea",
           "line_id": 42,
           "speaker": "Mother",
-          "source_audio_path": "voicelines/voiceline_3ca7e6258a374c6599edbf302e1143a0_mother.mp3"
+          "source_audio_path": "voicelines/voiceline_21001d314ee04a3ba7024c9839de1fea_mother.mp3"
         }
       },
       {
@@ -637,10 +640,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0043_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "5dec1578a1ca4e8a81cb715d65ec077d",
+          "uid": "927efd0c252e41599e743c282558099f",
           "line_id": 43,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_5dec1578a1ca4e8a81cb715d65ec077d_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_927efd0c252e41599e743c282558099f_narrator.mp3"
         }
       },
       {
@@ -651,10 +654,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0044_Father.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "0944d94eaf314f939bd3e39bf885c71b",
+          "uid": "dc97effa3940466480e52742c3e825ec",
           "line_id": 44,
           "speaker": "Father",
-          "source_audio_path": "voicelines/voiceline_0944d94eaf314f939bd3e39bf885c71b_father.mp3"
+          "source_audio_path": "voicelines/voiceline_dc97effa3940466480e52742c3e825ec_father.mp3"
         }
       },
       {
@@ -665,10 +668,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0045_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "b820382318d540c590415625d1713622",
+          "uid": "451d15840b3643d992635e19c14d84b9",
           "line_id": 45,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_b820382318d540c590415625d1713622_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_451d15840b3643d992635e19c14d84b9_narrator.mp3"
         }
       },
       {
@@ -679,10 +682,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0046_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "f7f4b6d3b110411d925d2aa6ecc8d376",
+          "uid": "a6a5b4de1d224e61a9b3e40b81961f74",
           "line_id": 46,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_f7f4b6d3b110411d925d2aa6ecc8d376_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_a6a5b4de1d224e61a9b3e40b81961f74_narrator.mp3"
         }
       },
       {
@@ -693,10 +696,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0047_Bitera.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "3116cdc2005043c4ba978787bd49b7d4",
+          "uid": "a040f09b65cd4d74a607396cf832a565",
           "line_id": 47,
           "speaker": "Bitera",
-          "source_audio_path": "voicelines/voiceline_3116cdc2005043c4ba978787bd49b7d4_bitera.mp3"
+          "source_audio_path": "voicelines/voiceline_a040f09b65cd4d74a607396cf832a565_bitera.mp3"
         }
       },
       {
@@ -707,10 +710,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0048_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "99f370ec82044bf7b6a3f3a28303724c",
+          "uid": "393f6e531e5249969a24f3860ea49b30",
           "line_id": 48,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_99f370ec82044bf7b6a3f3a28303724c_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_393f6e531e5249969a24f3860ea49b30_narrator.mp3"
         }
       },
       {
@@ -721,10 +724,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0049_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "c99de21e64ef4780b8bfd1d4ce354c76",
+          "uid": "fd49d7cf60334d728efd4cac536c13d2",
           "line_id": 49,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_c99de21e64ef4780b8bfd1d4ce354c76_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_fd49d7cf60334d728efd4cac536c13d2_narrator.mp3"
         }
       },
       {
@@ -735,10 +738,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0050_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "74ace2b26eb74bfe891cdc634a29b7cf",
+          "uid": "b92664565c524186b37603b2f19e9720",
           "line_id": 50,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_74ace2b26eb74bfe891cdc634a29b7cf_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_b92664565c524186b37603b2f19e9720_narrator.mp3"
         }
       },
       {
@@ -749,10 +752,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0051_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "a1fadc47f8454cfc8f111b9497c282b0",
+          "uid": "bab243b5b0af4ef180e5bb3549cd1b98",
           "line_id": 51,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_a1fadc47f8454cfc8f111b9497c282b0_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_bab243b5b0af4ef180e5bb3549cd1b98_narrator.mp3"
         }
       },
       {
@@ -763,10 +766,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0052_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "09e05faeffd24f979b2dc6028e6165c2",
+          "uid": "b68a4c0266004268a4a35516c16a8cf7",
           "line_id": 52,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_09e05faeffd24f979b2dc6028e6165c2_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_b68a4c0266004268a4a35516c16a8cf7_narrator.mp3"
         }
       },
       {
@@ -777,10 +780,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0053_Kisten.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "2fca38ac88ea4154961df2815632f105",
+          "uid": "bf35a85f8d2d45eb999ef74e70cc9a6f",
           "line_id": 53,
           "speaker": "Kisten",
-          "source_audio_path": "voicelines/voiceline_2fca38ac88ea4154961df2815632f105_kisten.mp3"
+          "source_audio_path": "voicelines/voiceline_bf35a85f8d2d45eb999ef74e70cc9a6f_kisten.mp3"
         }
       },
       {
@@ -791,10 +794,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0054_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "47002c191b294891a02e3a10ddc84110",
+          "uid": "4c673b5e243e432ba9f58918283f6214",
           "line_id": 54,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_47002c191b294891a02e3a10ddc84110_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_4c673b5e243e432ba9f58918283f6214_narrator.mp3"
         }
       },
       {
@@ -805,10 +808,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0055_Bitera.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "531bccee829942ccb39bf859d08ee010",
+          "uid": "dd7ccdb9286a4e3a8aebef876a24fad0",
           "line_id": 55,
           "speaker": "Bitera",
-          "source_audio_path": "voicelines/voiceline_531bccee829942ccb39bf859d08ee010_bitera.mp3"
+          "source_audio_path": "voicelines/voiceline_dd7ccdb9286a4e3a8aebef876a24fad0_bitera.mp3"
         }
       },
       {
@@ -819,10 +822,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0056_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "dac41337370340cdb81f06727d4149e9",
+          "uid": "3c22de8d917444d08bfcadcd3b2d6504",
           "line_id": 56,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_dac41337370340cdb81f06727d4149e9_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_3c22de8d917444d08bfcadcd3b2d6504_narrator.mp3"
         }
       },
       {
@@ -833,10 +836,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0057_Bitera.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "169b2c0b73754c869afd27e27a1d11e7",
+          "uid": "b2f35fe5e0c04ba69e64c6902a28e6fd",
           "line_id": 57,
           "speaker": "Bitera",
-          "source_audio_path": "voicelines/voiceline_169b2c0b73754c869afd27e27a1d11e7_bitera.mp3"
+          "source_audio_path": "voicelines/voiceline_b2f35fe5e0c04ba69e64c6902a28e6fd_bitera.mp3"
         }
       },
       {
@@ -847,10 +850,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0058_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "1f8eef5bcda749438e387664c1997faa",
+          "uid": "cb51ad5966644fcd9934644eb3f0cecc",
           "line_id": 58,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_1f8eef5bcda749438e387664c1997faa_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_cb51ad5966644fcd9934644eb3f0cecc_narrator.mp3"
         }
       },
       {
@@ -861,10 +864,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0059_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "4b47a4ebe0294efbade60e6ccc7b8551",
+          "uid": "f223e5b85c204d01be4136a69c617331",
           "line_id": 59,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_4b47a4ebe0294efbade60e6ccc7b8551_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_f223e5b85c204d01be4136a69c617331_narrator.mp3"
         }
       },
       {
@@ -875,10 +878,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0060_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "4adc7ace64904be5a137d1913cba1554",
+          "uid": "376d5a65b50a467196e7466a0175b22c",
           "line_id": 60,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_4adc7ace64904be5a137d1913cba1554_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_376d5a65b50a467196e7466a0175b22c_narrator.mp3"
         }
       },
       {
@@ -889,10 +892,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0061_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "4f8cbbc9a6cf4f899272e55b10f54b80",
+          "uid": "863e4ecbff6c4683b83e1a71040af6fb",
           "line_id": 61,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_4f8cbbc9a6cf4f899272e55b10f54b80_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_863e4ecbff6c4683b83e1a71040af6fb_narrator.mp3"
         }
       },
       {
@@ -903,10 +906,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0062_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "0f01fc152e014f81809d9bacab325179",
+          "uid": "f6b2746402fa432c89f4502582199eaa",
           "line_id": 62,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_0f01fc152e014f81809d9bacab325179_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_f6b2746402fa432c89f4502582199eaa_narrator.mp3"
         }
       },
       {
@@ -917,10 +920,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0063_Kisten.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "ea6f5f3f210642e7bca4a0a34431f720",
+          "uid": "ce56e531b8bf48189d50e4f5e5301b79",
           "line_id": 63,
           "speaker": "Kisten",
-          "source_audio_path": "voicelines/voiceline_ea6f5f3f210642e7bca4a0a34431f720_kisten.mp3"
+          "source_audio_path": "voicelines/voiceline_ce56e531b8bf48189d50e4f5e5301b79_kisten.mp3"
         }
       },
       {
@@ -931,10 +934,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0064_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "cb2808d1775647788b8a6ac9b6dcfa5c",
+          "uid": "321d46bd6ed14fd8aac1c74eeb044ec4",
           "line_id": 64,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_cb2808d1775647788b8a6ac9b6dcfa5c_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_321d46bd6ed14fd8aac1c74eeb044ec4_narrator.mp3"
         }
       },
       {
@@ -945,10 +948,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0065_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "d61307fc7bb540858e5fa1cf413779f2",
+          "uid": "411619ff0bbf4e6191745ebf1352f45b",
           "line_id": 65,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_d61307fc7bb540858e5fa1cf413779f2_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_411619ff0bbf4e6191745ebf1352f45b_narrator.mp3"
         }
       },
       {
@@ -959,10 +962,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0066_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "5acd022e6543423a9e9c546d00fe5967",
+          "uid": "191d8b03bc7e41df828e8180a7f8e96b",
           "line_id": 66,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_5acd022e6543423a9e9c546d00fe5967_narrator.mp3 | voicelines/voiceline_5acd022e6543423a9e9c546d00fe5967_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_191d8b03bc7e41df828e8180a7f8e96b_narrator.mp3 | voicelines/voiceline_191d8b03bc7e41df828e8180a7f8e96b_narrator.mp3"
         }
       },
       {
@@ -973,10 +976,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0067_Maddie.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "e7bab6fb50be4c539d53fa42c26aeb25",
+          "uid": "c2da54152fb04d03b75ac31403451b19",
           "line_id": 67,
           "speaker": "Maddie",
-          "source_audio_path": "voicelines/voiceline_e7bab6fb50be4c539d53fa42c26aeb25_maddie.mp3"
+          "source_audio_path": "voicelines/voiceline_c2da54152fb04d03b75ac31403451b19_maddie.mp3"
         }
       },
       {
@@ -987,10 +990,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0068_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "a1178670cfaf4333b748306229ff4c91",
+          "uid": "b60fee5646cf4e4a81ad82566aac2ad6",
           "line_id": 68,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_a1178670cfaf4333b748306229ff4c91_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_b60fee5646cf4e4a81ad82566aac2ad6_narrator.mp3"
         }
       },
       {
@@ -1001,10 +1004,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0069_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "ebb913fdde0c4231abb447adc051f668",
+          "uid": "40314993513c4c74be32cab55f4f5b82",
           "line_id": 69,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_ebb913fdde0c4231abb447adc051f668_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_40314993513c4c74be32cab55f4f5b82_narrator.mp3"
         }
       },
       {
@@ -1015,10 +1018,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0070_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "9d90fe136ebd422d90c62fbea4ca80a3",
+          "uid": "20776c4b634541a9b624960f5eeea93c",
           "line_id": 70,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_9d90fe136ebd422d90c62fbea4ca80a3_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_20776c4b634541a9b624960f5eeea93c_narrator.mp3"
         }
       },
       {
@@ -1029,10 +1032,10 @@
         "audio_wav_path": "audio/editor_audio_test_book/0071_NARRATOR.wav",
         "sample_rate": 24000,
         "metadata": {
-          "uid": "f92bfa2a6fc64a5ea4e1173d373b3772",
+          "uid": "d0d3aec031d84abfac370e6d314438c2",
           "line_id": 71,
           "speaker": "NARRATOR",
-          "source_audio_path": "voicelines/voiceline_f92bfa2a6fc64a5ea4e1173d373b3772_narrator.mp3"
+          "source_audio_path": "voicelines/voiceline_d0d3aec031d84abfac370e6d314438c2_narrator.mp3"
         }
       }
     ]

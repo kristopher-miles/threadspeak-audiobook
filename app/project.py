@@ -86,7 +86,7 @@ class ProjectManager(
     ProjectAudioExportMixin,
     ProjectGenerationMixin,
 ):
-    DEFAULT_NARRATOR_THRESHOLD = 10
+    DEFAULT_NARRATOR_THRESHOLD = 0
     _HEADING_RE = re.compile(
         r'^(chapter|part|book|volume|prologue|epilogue|introduction|conclusion|act|section)\b',
         re.IGNORECASE

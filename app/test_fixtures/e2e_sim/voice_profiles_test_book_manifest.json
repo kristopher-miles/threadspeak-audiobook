@@ -19,8 +19,8 @@
       "generated_ref_text": "Maddie, you could walk right past them—they’ll think you’re a stray. Give them something to fuss over while Kisten and I do the work. I want you to be charming,",
       "ref_audio": "clone_voices/test_book_bitera.wav",
       "fixture_audio_path": "app/test_fixtures/e2e_sim/audio/voice_profiles_test_book/01_Bitera.wav",
-      "audio_sha256": "acedc1c59bb3422afd777f40a24cac36cb3c733923c224b50588a27d90cca9b8",
-      "audio_size": 852558,
+      "audio_sha256": "583e6dbf6b85fe349dd88807a740dd1ec4e8d59c28f8bcb13e993d0f78e5065f",
+      "audio_size": 430124,
       "sample_rate": 24000
     },
     {

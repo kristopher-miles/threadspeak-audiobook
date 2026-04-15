@@ -64,9 +64,9 @@
 
         function getNarratorThresholdValue() {
             const input = document.getElementById('narrator-threshold-input');
-            if (!input) return 10;
+            if (!input) return 0;
             const parsed = parseInt(input.value, 10);
-            return Number.isFinite(parsed) && parsed >= 0 ? parsed : 10;
+            return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
         }
 
         function getNarratorName(cards) {
@@ -120,9 +120,9 @@
             try {
                 const result = await API.get('/api/voices/settings');
                 const value = Number(result?.narrator_threshold);
-                input.value = Number.isFinite(value) && value >= 0 ? String(value) : '10';
+                input.value = Number.isFinite(value) && value >= 0 ? String(value) : '0';
             } catch (_e) {
-                input.value = input.value || '10';
+                input.value = input.value || '0';
             }
         }
 

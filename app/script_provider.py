@@ -962,7 +962,7 @@ class SQLiteScriptStore(ScriptStore):
             rows = conn.execute("SELECT key, value FROM voice_settings").fetchall()
         settings = {row["key"]: row["value"] for row in rows}
         if "narrator_threshold" not in settings:
-            settings["narrator_threshold"] = "10"
+            settings["narrator_threshold"] = "0"
         return settings
 
     def set_voice_setting(self, key, value, *, reason="set_voice_setting", wait=True):
@@ -1433,7 +1433,7 @@ class SQLiteScriptStore(ScriptStore):
                 if settings_count <= 0:
                     conn.execute(
                         "INSERT OR REPLACE INTO voice_settings(key, value) VALUES(?, ?)",
-                        ("narrator_threshold", "10"),
+                        ("narrator_threshold", "0"),
                     )
 
                 seeded_rows = []
@@ -2451,7 +2451,7 @@ class SQLiteScriptStore(ScriptStore):
     def _replace_voice_state_snapshot_tx(self, conn, snapshot):
         payload = dict(snapshot or {})
         profiles = payload.get("profiles") or {}
-        narrator_threshold = payload.get("narrator_threshold", 10)
+        narrator_threshold = payload.get("narrator_threshold", 0)
         narrator_overrides = payload.get("narrator_overrides") or {}
         auto_aliases = payload.get("auto_narrator_aliases") or {}
         profile_rows = self._dedupe_voice_profile_rows(
@@ -2941,9 +2941,9 @@ class SQLiteScriptStore(ScriptStore):
             for row in conn.execute("SELECT key, value FROM voice_settings").fetchall()
         }
         try:
-            narrator_threshold = int(settings.get("narrator_threshold", "10") or 10)
+            narrator_threshold = int(settings.get("narrator_threshold", "0") or 0)
         except (TypeError, ValueError):
-            narrator_threshold = 10
+            narrator_threshold = 0
         narrator_overrides = {
             str(row["chapter"] or "").strip(): str(row["voice_name"] or "").strip()
             for row in conn.execute(

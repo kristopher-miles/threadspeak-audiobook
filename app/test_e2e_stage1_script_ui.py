@@ -766,6 +766,116 @@ def _wait_for_editor_audio_completion(base_url: str, *, baseline_job_id: int = 0
     return _wait_for_activity("Waiting for editor audio render output", probe, done, poll_seconds=0.8)
 
 
+def _wait_for_proofread_completion(base_url: str) -> dict:
+    def probe():
+        payload = _fetch_task_status(base_url, "proofread")
+        logs = _extract_logs(payload)
+        errors = _collect_fatal_log_lines(logs)
+        progress = dict(payload.get("progress") or {})
+        return {
+            "running": bool(payload.get("running")),
+            "phase": str(progress.get("phase") or "").strip().lower(),
+            "processed": int(progress.get("processed") or 0),
+            "pending_total": int(progress.get("pending_total") or 0),
+            "passed": int(progress.get("passed") or 0),
+            "failed": int(progress.get("failed") or 0),
+            "auto_failed": int(progress.get("auto_failed") or 0),
+            "skipped": int(progress.get("skipped") or 0),
+            "logs_count": len(logs),
+            "last_log": logs[-1] if logs else "",
+            "has_success_log": any("Task proofread completed successfully." in line for line in logs),
+            "errors": errors,
+            "logs_tail": logs[-20:],
+        }
+
+    def done(snapshot):
+        if snapshot.get("errors"):
+            raise AssertionError(f"Proofread emitted fatal errors: {snapshot['errors']}")
+        return (
+            not snapshot.get("running")
+            and bool(snapshot.get("has_success_log"))
+            and str(snapshot.get("phase") or "") == "complete"
+        )
+
+    return _wait_for_activity("Waiting for proofread output", probe, done, poll_seconds=0.8)
+
+
+def _wait_for_audio_merge_completion(base_url: str) -> dict:
+    def probe():
+        payload = _fetch_task_status(base_url, "audio")
+        logs = _extract_logs(payload)
+        errors = _collect_fatal_log_lines(logs)
+        merge_progress = dict(payload.get("merge_progress") or {})
+        return {
+            "running": bool(payload.get("running")),
+            "merge_running": bool(payload.get("merge_running")),
+            "merge_stage": str(merge_progress.get("stage") or "").strip().lower(),
+            "merge_progress_running": bool(merge_progress.get("running")),
+            "logs_count": len(logs),
+            "last_log": logs[-1] if logs else "",
+            "has_success_log": any("Merge complete:" in line for line in logs),
+            "has_failure_log": any(
+                ("Merge failed:" in line) or ("Merge error:" in line)
+                for line in logs
+            ),
+            "errors": errors,
+            "logs_tail": logs[-20:],
+        }
+
+    def done(snapshot):
+        if snapshot.get("errors"):
+            raise AssertionError(f"Export merge emitted fatal errors: {snapshot['errors']}")
+        if snapshot.get("has_failure_log"):
+            raise AssertionError(
+                "Export merge failed.\n"
+                f"Last observed state:\n{json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True)}"
+            )
+        return (
+            not snapshot.get("running")
+            and not snapshot.get("merge_running")
+            and not snapshot.get("merge_progress_running")
+            and bool(snapshot.get("has_success_log"))
+        )
+
+    return _wait_for_activity("Waiting for merged export output", probe, done, poll_seconds=0.8)
+
+
+def _confirm_modal_if_present(page, *, timeout_ms: int = 3000) -> bool:
+    confirm_ok = page.locator("#confirmModalOk")
+    try:
+        confirm_ok.wait_for(state="visible", timeout=timeout_ms)
+    except PlaywrightTimeoutError:
+        return False
+    confirm_ok.click()
+    return True
+
+
+def _looks_like_mp3(path: str) -> bool:
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(8192)
+    except Exception:
+        return False
+    if len(data) < 4:
+        return False
+    if data.startswith(b"ID3"):
+        return True
+    # Fallback: detect MPEG audio frame sync in the header bytes.
+    for i in range(0, len(data) - 1):
+        b1 = data[i]
+        b2 = data[i + 1]
+        if b1 == 0xFF and (b2 & 0xE0) == 0xE0:
+            return True
+    return False
+
+
+def _audio_duration_seconds(path: str) -> float:
+    from pydub import AudioSegment
+
+    segment = AudioSegment.from_file(path)
+    return float(len(segment)) / 1000.0
+
+
 def _pid_is_alive(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -892,6 +1002,279 @@ def _run_stage1_to_voices_tab(*, page, app_base_url: str, book_path: str) -> Non
         },
         lambda snapshot: bool(snapshot.get("voices_visible") and snapshot.get("header", "").startswith("Voice Configuration")),
     )
+
+
+def _run_stage2_to_stage4_proofread_flow(
+    *,
+    page,
+    app_base_url: str,
+    voice_server_base_url: str,
+    voice_model_name: str,
+    expected_speakers: set[str],
+) -> dict:
+    _switch_llm_via_setup_ui(
+        page,
+        llm_base_url=voice_server_base_url,
+        llm_model_name=voice_model_name,
+    )
+
+    page.locator('.nav-link[data-tab="voices"]').click()
+    _wait_for_activity(
+        "Waiting for Voices tab",
+        lambda: {"visible": bool(page.locator("#voices-tab").is_visible())},
+        lambda snapshot: bool(snapshot.get("visible")),
+    )
+
+    pre_generation_states = _read_voice_card_states(page)
+    speaker_list = set(pre_generation_states.keys())
+    assert speaker_list == expected_speakers, f"Unexpected speaker rows before generation: {speaker_list}"
+    eligible_speakers = {
+        speaker
+        for speaker, state in pre_generation_states.items()
+        if not bool(state.get("alias_active")) and not bool(state.get("narrator_threshold_active"))
+    }
+    assert eligible_speakers, "No eligible voice cards available for outstanding generation."
+
+    page.locator("#generate-outstanding-voices-btn").click()
+    _wait_for_voice_generation_completion(page, eligible_speakers)
+
+    post_generation_states = _read_voice_card_states(page)
+    speaker_list = set(post_generation_states.keys())
+    assert speaker_list == expected_speakers, f"Unexpected speaker rows after generation: {speaker_list}"
+
+    for speaker in sorted(eligible_speakers):
+        state = post_generation_states.get(speaker) or {}
+        ref_audio = str(state.get("ref_audio") or "").strip()
+        assert ref_audio, f"Missing design ref audio for eligible speaker {speaker}"
+        assert bool(state.get("retry")), f"Expected Retry state for eligible speaker {speaker}: {state}"
+
+    playable_speakers = [
+        speaker
+        for speaker, state in sorted(post_generation_states.items())
+        if str(state.get("ref_audio") or "").strip()
+    ]
+    assert playable_speakers, "No playable voice previews available after outstanding generation."
+    for speaker in playable_speakers:
+        card_selector = f'.voice-card[data-voice="{speaker}"]'
+        ref_audio = page.locator(f"{card_selector} .design-ref-audio").input_value().strip()
+        page.locator(f"{card_selector} .design-play-btn").click()
+        _wait_for_preview_playback(page, speaker=speaker, ref_audio=ref_audio)
+
+    _wait_for_nav_unlocked(page, '.nav-link[data-tab="editor"]', "Editor tab")
+    page.locator('.nav-link[data-tab="editor"]').click()
+    _wait_for_activity(
+        "Waiting for Editor tab",
+        lambda: {"visible": bool(page.locator("#editor-tab").is_visible())},
+        lambda snapshot: bool(snapshot.get("visible")),
+    )
+
+    page.locator("#editor-chapter-select").select_option("__whole_project__")
+    _wait_for_activity(
+        "Waiting for Whole Project chunks before render",
+        lambda: page.evaluate(
+            """() => {
+                const rows = Array.from(document.querySelectorAll('#chunks-table-body tr'));
+                let textRows = 0;
+                for (const row of rows) {
+                    const textVal = String(row.querySelector('textarea.chunk-text')?.value || '').trim();
+                    if (textVal) textRows += 1;
+                }
+                return { rows: rows.length, text_rows: textRows };
+            }"""
+        ),
+        lambda snapshot: int(snapshot.get("text_rows") or 0) > 0,
+    )
+
+    pre_render_audio = _fetch_task_status(app_base_url, "audio")
+    pre_recent_jobs = list((pre_render_audio or {}).get("recent_jobs") or [])
+    baseline_job_id = int(((pre_recent_jobs[0] or {}).get("id") or 0)) if pre_recent_jobs else 0
+
+    render_pending_button = page.locator("#btn-batch-fast")
+    assert render_pending_button.is_enabled(), "Render Pending button should be enabled before stage-3 run."
+    with page.expect_response(
+        lambda response: (
+            response.url.endswith("/api/generate_batch_fast")
+            and response.request.method == "POST"
+            and response.status == 200
+        ),
+        timeout=10000,
+    ):
+        render_pending_button.click()
+
+    _wait_for_editor_audio_completion(app_base_url, baseline_job_id=baseline_job_id)
+
+    _wait_for_nav_unlocked(page, '.nav-link[data-tab="voices"]', "Voices tab")
+    page.locator('.nav-link[data-tab="voices"]').click()
+    _wait_for_activity(
+        "Waiting for Voices tab reload",
+        lambda: {"visible": bool(page.locator("#voices-tab").is_visible())},
+        lambda snapshot: bool(snapshot.get("visible")),
+    )
+
+    _wait_for_nav_unlocked(page, '.nav-link[data-tab="editor"]', "Editor tab")
+    page.locator('.nav-link[data-tab="editor"]').click()
+    _wait_for_activity(
+        "Waiting for Editor tab reload",
+        lambda: {"visible": bool(page.locator("#editor-tab").is_visible())},
+        lambda snapshot: bool(snapshot.get("visible")),
+    )
+
+    page.locator("#editor-chapter-select").select_option("__whole_project__")
+    _wait_for_activity(
+        "Waiting for Whole Project rows after reload",
+        lambda: {
+            "rows": int(
+                page.evaluate(
+                    "() => document.querySelectorAll('#chunks-table-body tr').length"
+                )
+            ),
+            "text_rows": int(
+                page.evaluate(
+                    """() => {
+                        let n = 0;
+                        for (const row of Array.from(document.querySelectorAll('#chunks-table-body tr'))) {
+                            const text = String(row.querySelector('textarea.chunk-text')?.value || '').trim();
+                            if (text) n += 1;
+                        }
+                        return n;
+                    }"""
+                )
+            ),
+        },
+        lambda snapshot: int(snapshot.get("text_rows") or 0) > 0,
+    )
+
+    words_text = page.locator("#editor-estimate-words").inner_text().strip()
+    words_value = int("".join(ch for ch in words_text if ch.isdigit()) or "0")
+    assert words_value == 0, f"Expected remaining words to be 0, got: {words_text}"
+    errors_text = page.locator("#editor-estimate-errors").inner_text().strip().lower()
+    assert errors_text.startswith("0 clip"), f"Expected 0 errors, got: {errors_text}"
+
+    page.locator("#editor-chapter-select").select_option("__whole_project__")
+    _wait_for_activity(
+        "Waiting for Whole Project rows",
+        lambda: {
+            "rows": int(
+                page.evaluate(
+                    "() => document.querySelectorAll('#chunks-table-body tr').length"
+                )
+            )
+        },
+        lambda snapshot: int(snapshot.get("rows") or 0) > 0,
+    )
+
+    audio_check = page.evaluate(
+        """() => {
+            const rows = Array.from(document.querySelectorAll('#chunks-table-body tr'));
+            const details = [];
+            let textRows = 0;
+            for (const row of rows) {
+                const text = String(row.querySelector('textarea.chunk-text')?.value || '').trim();
+                if (!text) continue;
+                textRows += 1;
+                const audio = row.querySelector('audio.chunk-audio');
+                const audioPath = String(audio?.getAttribute('data-audio-path') || '').trim();
+                const done = row.classList.contains('status-done');
+                if (!audioPath || !done) {
+                    details.push({
+                        id: String(row.getAttribute('data-id') || ''),
+                        has_audio: Boolean(audioPath),
+                        status_done: done,
+                    });
+                }
+            }
+            return { text_rows: textRows, missing: details };
+        }"""
+    )
+    assert int(audio_check.get("text_rows") or 0) > 0, "Expected at least one text clip row in Whole Project view."
+    assert not audio_check.get("missing"), f"Rows missing audio or done status: {audio_check.get('missing')}"
+
+    _wait_for_nav_unlocked(page, '.nav-link[data-tab="proofread"]', "Proofread tab")
+    page.locator('.nav-link[data-tab="proofread"]').click()
+    _wait_for_activity(
+        "Waiting for Proofread tab",
+        lambda: page.evaluate(
+            """() => ({
+                visible: !!document.querySelector('#proofread-tab') && getComputedStyle(document.querySelector('#proofread-tab')).display !== 'none',
+                has_book_btn: !!document.querySelector('#btn-proofread-book'),
+                has_logs: !!document.querySelector('#proofread-logs'),
+                has_table: !!document.querySelector('#proofread-table-body')
+            })"""
+        ),
+        lambda snapshot: bool(
+            snapshot.get("visible")
+            and snapshot.get("has_book_btn")
+            and snapshot.get("has_logs")
+            and snapshot.get("has_table")
+        ),
+    )
+
+    page.locator("#proofread-chapter-select").select_option("__whole_project__")
+    _wait_for_activity(
+        "Waiting for Proofread rows before run",
+        lambda: page.evaluate(
+            """() => ({
+                row_count: document.querySelectorAll('#proofread-table-body tr[data-proofread-id]').length,
+                chapter_value: String(document.querySelector('#proofread-chapter-select')?.value || '')
+            })"""
+        ),
+        lambda snapshot: (
+            int(snapshot.get("row_count") or 0) > 0
+            and str(snapshot.get("chapter_value") or "") == "__whole_project__"
+        ),
+    )
+
+    with page.expect_response(
+        lambda response: (
+            response.url.endswith("/api/proofread")
+            and response.request.method == "POST"
+            and response.status == 200
+        ),
+        timeout=10000,
+    ):
+        page.locator("#btn-proofread-book").click()
+
+    _wait_for_proofread_completion(app_base_url)
+
+    page.locator("#proofread-chapter-select").select_option("__whole_project__")
+    final_snapshot = _wait_for_activity(
+        "Waiting for proofread strict pass summary",
+        lambda: {
+            "status": _fetch_task_status(app_base_url, "proofread"),
+            "ui": page.evaluate(
+                """() => {
+                    const parseIntFrom = (id) => {
+                        const raw = String(document.querySelector(id)?.innerText || '').trim();
+                        const digits = raw.replace(/[^0-9]/g, '');
+                        return digits ? Number.parseInt(digits, 10) : 0;
+                    };
+                    return {
+                        row_count: document.querySelectorAll('#proofread-table-body tr[data-proofread-id]').length,
+                        chapter_value: String(document.querySelector('#proofread-chapter-select')?.value || ''),
+                        passed: parseIntFrom('#proofread-passed'),
+                        failed: parseIntFrom('#proofread-failed'),
+                        auto_failed: parseIntFrom('#proofread-auto-failed'),
+                        phase_text: String(document.querySelector('#proofread-phase')?.innerText || '').trim().toLowerCase(),
+                    };
+                }"""
+            ),
+        },
+        lambda snapshot: (
+            not bool((snapshot.get("status") or {}).get("running"))
+            and str(((snapshot.get("ui") or {}).get("chapter_value") or "")) == "__whole_project__"
+            and int(((snapshot.get("ui") or {}).get("row_count") or 0)) > 0
+            and int(((snapshot.get("ui") or {}).get("failed") or 0)) == 0
+            and int(((snapshot.get("ui") or {}).get("auto_failed") or 0)) == 0
+            and int(((snapshot.get("ui") or {}).get("passed") or 0))
+            == int(((snapshot.get("ui") or {}).get("row_count") or 0))
+        ),
+    )
+    ui_summary = dict(final_snapshot.get("ui") or {})
+    assert int(ui_summary.get("row_count") or 0) > 0
+    assert int(ui_summary.get("failed") or 0) == 0
+    assert int(ui_summary.get("auto_failed") or 0) == 0
+    assert int(ui_summary.get("passed") or 0) == int(ui_summary.get("row_count") or 0)
+    return {"proofread_ui_summary": ui_summary}
 
 
 def test_e2e_stage1_script_nonlegacy_ui_only():
@@ -1484,6 +1867,713 @@ def test_e2e_stage3_editor_render_pending_nonlegacy_ui_only():
                                     f"LM voice trace tail ({voice_lm_trace}):\n{_tail_file(voice_lm_trace)}\n"
                                     f"Qwen trace tail ({qwen_trace}):\n{_tail_file(qwen_trace)}\n"
                                     f"Qwen report tail ({qwen_report}):\n{_tail_file(qwen_report)}\n"
+                                    f"{_report_console(console_errors, page_errors, warnings)}"
+                                ) from exc
+                            finally:
+                                context.close()
+                                browser.close()
+
+                script_server.assert_all_consumed()
+                voice_server.assert_all_consumed()
+
+            if os.path.exists(qwen_report):
+                report_payload = _read_json(qwen_report)
+                pending = dict(report_payload.get("pending") or {})
+                allowed_pending = {"generate_voice_clone", "generate_voice_design"}
+                disallowed_pending = {
+                    key: value
+                    for key, value in pending.items()
+                    if str(key) not in allowed_pending
+                }
+                assert not disallowed_pending, f"Unexpected pending Qwen interactions: {disallowed_pending}"
+
+
+def test_e2e_stage4_proofread_nonlegacy_ui_only():
+    """
+    Top-level rule:
+    once browser interactions begin, this flow uses UI navigation/actions only.
+    """
+    with _exclusive_run_lock("stage4_proofread_nonlegacy_ui_only"):
+        fixtures_dir = os.path.join(SOURCE_APP_DIR, "test_fixtures", "e2e_sim")
+        script_fixture_path = os.path.join(fixtures_dir, "lmstudio_generate_script_test_book.json")
+        voice_fixture_path = os.path.join(fixtures_dir, "lmstudio_voice_profiles_test_book.json")
+        qwen_fixture_path = os.path.join(fixtures_dir, "qwen_local_full_e2e_test_book.json")
+        proofread_fixture_path = os.path.join(fixtures_dir, "proofread_text_test_book.json")
+        book_path = os.path.join(SOURCE_APP_DIR, "test_fixtures", "files", "test_book.epub")
+
+        assert os.path.exists(script_fixture_path), f"Missing fixture: {script_fixture_path}"
+        assert os.path.exists(voice_fixture_path), f"Missing fixture: {voice_fixture_path}"
+        assert os.path.exists(qwen_fixture_path), f"Missing fixture: {qwen_fixture_path}"
+        assert os.path.exists(proofread_fixture_path), f"Missing fixture: {proofread_fixture_path}"
+        assert os.path.exists(book_path), f"Missing book fixture: {book_path}"
+
+        script_payload = _read_json(script_fixture_path)
+        voice_payload = _read_json(voice_fixture_path)
+        script_model = str(((script_payload.get("metadata") or {}).get("model_name") or "").strip())
+        voice_model = str(((voice_payload.get("metadata") or {}).get("model_name") or "").strip())
+        assert script_model, "Script fixture metadata.model_name is required."
+        assert voice_model, "Voice fixture metadata.model_name is required."
+
+        config_patch = {
+            "llm": {
+                "base_url": "http://127.0.0.1:1/v1",
+                "api_key": "local",
+                "model_name": script_model,
+                "llm_workers": 1,
+            },
+            "tts": {
+                "mode": "local",
+                "local_backend": "qwen",
+                "device": "cpu",
+                "language": "English",
+                "parallel_workers": 1,
+            },
+            "generation": {
+                "legacy_mode": False,
+                "chunk_size": 600,
+                "max_tokens": 1024,
+                "temperature": 0.2,
+                "top_p": 0.9,
+                "top_k": 20,
+                "min_p": 0.0,
+                "presence_penalty": 0.0,
+                "banned_tokens": [],
+                "temperament_words": 150,
+            },
+        }
+
+        console_errors: list[str] = []
+        page_errors: list[str] = []
+        warnings: list[str] = []
+        http_failures: list[str] = []
+        expected_speakers = {
+            str(item).strip()
+            for item in (((voice_payload.get("metadata") or {}).get("speakers")) or [])
+            if str(item).strip()
+        }
+        assert expected_speakers, "Voice fixture metadata.speakers must include at least one speaker."
+
+        with _report_directory("threadspeak_stage4_proofread_report_") as report_root:
+            script_lm_trace = os.path.join(report_root, "lm-script-trace.jsonl")
+            voice_lm_trace = os.path.join(report_root, "lm-voice-trace.jsonl")
+            qwen_report = os.path.join(report_root, "qwen-report.json")
+            qwen_trace = os.path.join(report_root, "qwen-trace.jsonl")
+            proofread_report = os.path.join(report_root, "proofread-report.json")
+            proofread_trace = os.path.join(report_root, "proofread-trace.jsonl")
+            env_overrides = {
+                "THREADSPEAK_E2E_SIM_ENABLED": "1",
+                "THREADSPEAK_E2E_QWEN_FIXTURE": os.path.abspath(qwen_fixture_path),
+                "THREADSPEAK_E2E_QWEN_REPORT_PATH": qwen_report,
+                "THREADSPEAK_E2E_QWEN_TRACE_PATH": qwen_trace,
+                "THREADSPEAK_E2E_PROOFREAD_FIXTURE": os.path.abspath(proofread_fixture_path),
+                "THREADSPEAK_E2E_PROOFREAD_REPORT_PATH": proofread_report,
+                "THREADSPEAK_E2E_PROOFREAD_TRACE_PATH": proofread_trace,
+                "THREADSPEAK_E2E_PROOFREAD_FALLBACK": "chunk_text",
+                "THREADSPEAK_E2E_SIM_STRICT": "1",
+            }
+
+            with LMStudioSimServer(
+                script_fixture_path,
+                trace_path=script_lm_trace,
+                trace_label="stage4-script-lm",
+            ) as script_server:
+                with LMStudioSimServer(
+                    voice_fixture_path,
+                    trace_path=voice_lm_trace,
+                    trace_label="stage4-voice-lm",
+                ) as voice_server:
+                    config_patch["llm"]["base_url"] = f"{script_server.base_url}/v1"
+                    with _IsolatedServer(config_patch=config_patch, env_overrides=env_overrides) as app_server:
+                        with sync_playwright() as playwright:
+                            browser = playwright.chromium.launch(headless=True)
+                            context = browser.new_context()
+                            page = context.new_page()
+
+                            def _on_console(message):
+                                text = str(message.text or "").strip()
+                                kind = str(message.type or "").strip().lower()
+                                if kind == "error":
+                                    console_errors.append(text)
+                                elif kind == "warning":
+                                    warnings.append(text)
+
+                            def _on_page_error(err):
+                                page_errors.append(str(err))
+
+                            def _on_response(response):
+                                try:
+                                    status = int(response.status)
+                                except Exception:
+                                    status = 0
+                                if status >= 400:
+                                    method = str(getattr(response.request, "method", "") or "")
+                                    http_failures.append(f"{status} {method} {response.url}")
+
+                            page.on("console", _on_console)
+                            page.on("pageerror", _on_page_error)
+                            page.on("response", _on_response)
+
+                            try:
+                                _run_stage1_to_voices_tab(
+                                    page=page,
+                                    app_base_url=app_server.base_url,
+                                    book_path=book_path,
+                                )
+
+                                _switch_llm_via_setup_ui(
+                                    page,
+                                    llm_base_url=f"{voice_server.base_url}/v1",
+                                    llm_model_name=voice_model,
+                                )
+
+                                page.locator('.nav-link[data-tab="voices"]').click()
+                                _wait_for_activity(
+                                    "Waiting for Voices tab",
+                                    lambda: {"visible": bool(page.locator("#voices-tab").is_visible())},
+                                    lambda snapshot: bool(snapshot.get("visible")),
+                                )
+
+                                pre_generation_states = _read_voice_card_states(page)
+                                speaker_list = set(pre_generation_states.keys())
+                                assert speaker_list == expected_speakers, f"Unexpected speaker rows before generation: {speaker_list}"
+                                eligible_speakers = {
+                                    speaker
+                                    for speaker, state in pre_generation_states.items()
+                                    if not bool(state.get("alias_active")) and not bool(state.get("narrator_threshold_active"))
+                                }
+                                assert eligible_speakers, "No eligible voice cards available for outstanding generation."
+
+                                page.locator("#generate-outstanding-voices-btn").click()
+                                _wait_for_voice_generation_completion(page, eligible_speakers)
+
+                                post_generation_states = _read_voice_card_states(page)
+                                speaker_list = set(post_generation_states.keys())
+                                assert speaker_list == expected_speakers, f"Unexpected speaker rows after generation: {speaker_list}"
+
+                                for speaker in sorted(eligible_speakers):
+                                    state = post_generation_states.get(speaker) or {}
+                                    ref_audio = str(state.get("ref_audio") or "").strip()
+                                    assert ref_audio, f"Missing design ref audio for eligible speaker {speaker}"
+                                    assert bool(state.get("retry")), f"Expected Retry state for eligible speaker {speaker}: {state}"
+
+                                playable_speakers = [
+                                    speaker
+                                    for speaker, state in sorted(post_generation_states.items())
+                                    if str(state.get("ref_audio") or "").strip()
+                                ]
+                                assert playable_speakers, "No playable voice previews available after outstanding generation."
+                                for speaker in playable_speakers:
+                                    card_selector = f'.voice-card[data-voice="{speaker}"]'
+                                    ref_audio = page.locator(f"{card_selector} .design-ref-audio").input_value().strip()
+                                    page.locator(f"{card_selector} .design-play-btn").click()
+                                    _wait_for_preview_playback(page, speaker=speaker, ref_audio=ref_audio)
+
+                                _wait_for_nav_unlocked(page, '.nav-link[data-tab="editor"]', "Editor tab")
+                                page.locator('.nav-link[data-tab="editor"]').click()
+                                _wait_for_activity(
+                                    "Waiting for Editor tab",
+                                    lambda: {"visible": bool(page.locator("#editor-tab").is_visible())},
+                                    lambda snapshot: bool(snapshot.get("visible")),
+                                )
+
+                                page.locator("#editor-chapter-select").select_option("__whole_project__")
+                                _wait_for_activity(
+                                    "Waiting for Whole Project chunks before render",
+                                    lambda: page.evaluate(
+                                        """() => {
+                                            const rows = Array.from(document.querySelectorAll('#chunks-table-body tr'));
+                                            let textRows = 0;
+                                            for (const row of rows) {
+                                                const textVal = String(row.querySelector('textarea.chunk-text')?.value || '').trim();
+                                                if (textVal) textRows += 1;
+                                            }
+                                            return { rows: rows.length, text_rows: textRows };
+                                        }"""
+                                    ),
+                                    lambda snapshot: int(snapshot.get("text_rows") or 0) > 0,
+                                )
+
+                                pre_render_audio = _fetch_task_status(app_server.base_url, "audio")
+                                pre_recent_jobs = list((pre_render_audio or {}).get("recent_jobs") or [])
+                                baseline_job_id = int(((pre_recent_jobs[0] or {}).get("id") or 0)) if pre_recent_jobs else 0
+
+                                render_pending_button = page.locator("#btn-batch-fast")
+                                assert render_pending_button.is_enabled(), "Render Pending button should be enabled before stage-3 run."
+                                with page.expect_response(
+                                    lambda response: (
+                                        response.url.endswith("/api/generate_batch_fast")
+                                        and response.request.method == "POST"
+                                        and response.status == 200
+                                    ),
+                                    timeout=10000,
+                                ):
+                                    render_pending_button.click()
+
+                                _wait_for_editor_audio_completion(app_server.base_url, baseline_job_id=baseline_job_id)
+
+                                _wait_for_nav_unlocked(page, '.nav-link[data-tab="voices"]', "Voices tab")
+                                page.locator('.nav-link[data-tab="voices"]').click()
+                                _wait_for_activity(
+                                    "Waiting for Voices tab reload",
+                                    lambda: {"visible": bool(page.locator("#voices-tab").is_visible())},
+                                    lambda snapshot: bool(snapshot.get("visible")),
+                                )
+
+                                _wait_for_nav_unlocked(page, '.nav-link[data-tab="editor"]', "Editor tab")
+                                page.locator('.nav-link[data-tab="editor"]').click()
+                                _wait_for_activity(
+                                    "Waiting for Editor tab reload",
+                                    lambda: {"visible": bool(page.locator("#editor-tab").is_visible())},
+                                    lambda snapshot: bool(snapshot.get("visible")),
+                                )
+
+                                page.locator("#editor-chapter-select").select_option("__whole_project__")
+                                _wait_for_activity(
+                                    "Waiting for Whole Project rows after reload",
+                                    lambda: {
+                                        "rows": int(
+                                            page.evaluate(
+                                                "() => document.querySelectorAll('#chunks-table-body tr').length"
+                                            )
+                                        ),
+                                        "text_rows": int(
+                                            page.evaluate(
+                                                """() => {
+                                                    let n = 0;
+                                                    for (const row of Array.from(document.querySelectorAll('#chunks-table-body tr'))) {
+                                                        const text = String(row.querySelector('textarea.chunk-text')?.value || '').trim();
+                                                        if (text) n += 1;
+                                                    }
+                                                    return n;
+                                                }"""
+                                            )
+                                        ),
+                                    },
+                                    lambda snapshot: int(snapshot.get("text_rows") or 0) > 0,
+                                )
+
+                                words_text = page.locator("#editor-estimate-words").inner_text().strip()
+                                words_value = int("".join(ch for ch in words_text if ch.isdigit()) or "0")
+                                assert words_value == 0, f"Expected remaining words to be 0, got: {words_text}"
+                                errors_text = page.locator("#editor-estimate-errors").inner_text().strip().lower()
+                                assert errors_text.startswith("0 clip"), f"Expected 0 errors, got: {errors_text}"
+
+                                page.locator("#editor-chapter-select").select_option("__whole_project__")
+                                _wait_for_activity(
+                                    "Waiting for Whole Project rows",
+                                    lambda: {
+                                        "rows": int(
+                                            page.evaluate(
+                                                "() => document.querySelectorAll('#chunks-table-body tr').length"
+                                            )
+                                        )
+                                    },
+                                    lambda snapshot: int(snapshot.get("rows") or 0) > 0,
+                                )
+
+                                audio_check = page.evaluate(
+                                    """() => {
+                                        const rows = Array.from(document.querySelectorAll('#chunks-table-body tr'));
+                                        const details = [];
+                                        let textRows = 0;
+                                        for (const row of rows) {
+                                            const text = String(row.querySelector('textarea.chunk-text')?.value || '').trim();
+                                            if (!text) continue;
+                                            textRows += 1;
+                                            const audio = row.querySelector('audio.chunk-audio');
+                                            const audioPath = String(audio?.getAttribute('data-audio-path') || '').trim();
+                                            const done = row.classList.contains('status-done');
+                                            if (!audioPath || !done) {
+                                                details.push({
+                                                    id: String(row.getAttribute('data-id') || ''),
+                                                    has_audio: Boolean(audioPath),
+                                                    status_done: done,
+                                                });
+                                            }
+                                        }
+                                        return { text_rows: textRows, missing: details };
+                                    }"""
+                                )
+                                assert int(audio_check.get("text_rows") or 0) > 0, "Expected at least one text clip row in Whole Project view."
+                                assert not audio_check.get("missing"), f"Rows missing audio or done status: {audio_check.get('missing')}"
+
+                                _wait_for_nav_unlocked(page, '.nav-link[data-tab="proofread"]', "Proofread tab")
+                                page.locator('.nav-link[data-tab="proofread"]').click()
+                                _wait_for_activity(
+                                    "Waiting for Proofread tab",
+                                    lambda: page.evaluate(
+                                        """() => ({
+                                            visible: !!document.querySelector('#proofread-tab') && getComputedStyle(document.querySelector('#proofread-tab')).display !== 'none',
+                                            has_book_btn: !!document.querySelector('#btn-proofread-book'),
+                                            has_logs: !!document.querySelector('#proofread-logs'),
+                                            has_table: !!document.querySelector('#proofread-table-body')
+                                        })"""
+                                    ),
+                                    lambda snapshot: bool(
+                                        snapshot.get("visible")
+                                        and snapshot.get("has_book_btn")
+                                        and snapshot.get("has_logs")
+                                        and snapshot.get("has_table")
+                                    ),
+                                )
+
+                                page.locator("#proofread-chapter-select").select_option("__whole_project__")
+                                _wait_for_activity(
+                                    "Waiting for Proofread rows before run",
+                                    lambda: page.evaluate(
+                                        """() => ({
+                                            row_count: document.querySelectorAll('#proofread-table-body tr[data-proofread-id]').length,
+                                            chapter_value: String(document.querySelector('#proofread-chapter-select')?.value || '')
+                                        })"""
+                                    ),
+                                    lambda snapshot: (
+                                        int(snapshot.get("row_count") or 0) > 0
+                                        and str(snapshot.get("chapter_value") or "") == "__whole_project__"
+                                    ),
+                                )
+
+                                with page.expect_response(
+                                    lambda response: (
+                                        response.url.endswith("/api/proofread")
+                                        and response.request.method == "POST"
+                                        and response.status == 200
+                                    ),
+                                    timeout=10000,
+                                ):
+                                    page.locator("#btn-proofread-book").click()
+
+                                _wait_for_proofread_completion(app_server.base_url)
+
+                                page.locator("#proofread-chapter-select").select_option("__whole_project__")
+                                final_snapshot = _wait_for_activity(
+                                    "Waiting for proofread strict pass summary",
+                                    lambda: {
+                                        "status": _fetch_task_status(app_server.base_url, "proofread"),
+                                        "ui": page.evaluate(
+                                            """() => {
+                                                const parseIntFrom = (id) => {
+                                                    const raw = String(document.querySelector(id)?.innerText || '').trim();
+                                                    const digits = raw.replace(/[^0-9]/g, '');
+                                                    return digits ? Number.parseInt(digits, 10) : 0;
+                                                };
+                                                return {
+                                                    row_count: document.querySelectorAll('#proofread-table-body tr[data-proofread-id]').length,
+                                                    chapter_value: String(document.querySelector('#proofread-chapter-select')?.value || ''),
+                                                    passed: parseIntFrom('#proofread-passed'),
+                                                    failed: parseIntFrom('#proofread-failed'),
+                                                    auto_failed: parseIntFrom('#proofread-auto-failed'),
+                                                    phase_text: String(document.querySelector('#proofread-phase')?.innerText || '').trim().toLowerCase(),
+                                                };
+                                            }"""
+                                        ),
+                                    },
+                                    lambda snapshot: (
+                                        not bool((snapshot.get("status") or {}).get("running"))
+                                        and str(((snapshot.get("ui") or {}).get("chapter_value") or "")) == "__whole_project__"
+                                        and int(((snapshot.get("ui") or {}).get("row_count") or 0)) > 0
+                                        and int(((snapshot.get("ui") or {}).get("failed") or 0)) == 0
+                                        and int(((snapshot.get("ui") or {}).get("auto_failed") or 0)) == 0
+                                        and int(((snapshot.get("ui") or {}).get("passed") or 0))
+                                        == int(((snapshot.get("ui") or {}).get("row_count") or 0))
+                                    ),
+                                )
+                                ui_summary = dict(final_snapshot.get("ui") or {})
+                                assert int(ui_summary.get("row_count") or 0) > 0
+                                assert int(ui_summary.get("failed") or 0) == 0
+                                assert int(ui_summary.get("auto_failed") or 0) == 0
+                                assert int(ui_summary.get("passed") or 0) == int(ui_summary.get("row_count") or 0)
+
+                                assert not console_errors, _report_console(console_errors, page_errors, warnings)
+                                assert not page_errors, _report_console(console_errors, page_errors, warnings)
+                            except Exception as exc:
+                                script_logs = ""
+                                proofread_logs = ""
+                                try:
+                                    script_logs = page.locator("#script-logs").inner_text(timeout=2000)
+                                except Exception:
+                                    script_logs = ""
+                                try:
+                                    proofread_logs = page.locator("#proofread-logs").inner_text(timeout=2000)
+                                except Exception:
+                                    proofread_logs = ""
+                                raise AssertionError(
+                                    f"Stage-4 proofread UI flow failed: {exc}\n"
+                                    f"Script logs tail:\n{script_logs[-2000:]}\n"
+                                    f"Proofread logs tail:\n{proofread_logs[-2000:]}\n"
+                                    f"HTTP failures:\n{chr(10).join(http_failures[-20:]) or 'none'}\n"
+                                    f"LM script trace tail ({script_lm_trace}):\n{_tail_file(script_lm_trace)}\n"
+                                    f"LM voice trace tail ({voice_lm_trace}):\n{_tail_file(voice_lm_trace)}\n"
+                                    f"Qwen trace tail ({qwen_trace}):\n{_tail_file(qwen_trace)}\n"
+                                    f"Qwen report tail ({qwen_report}):\n{_tail_file(qwen_report)}\n"
+                                    f"Proofread trace tail ({proofread_trace}):\n{_tail_file(proofread_trace)}\n"
+                                    f"Proofread report tail ({proofread_report}):\n{_tail_file(proofread_report)}\n"
+                                    f"{_report_console(console_errors, page_errors, warnings)}"
+                                ) from exc
+                            finally:
+                                context.close()
+                                browser.close()
+
+                script_server.assert_all_consumed()
+                voice_server.assert_all_consumed()
+
+            if os.path.exists(qwen_report):
+                report_payload = _read_json(qwen_report)
+                pending = dict(report_payload.get("pending") or {})
+                allowed_pending = {"generate_voice_clone", "generate_voice_design"}
+                disallowed_pending = {
+                    key: value
+                    for key, value in pending.items()
+                    if str(key) not in allowed_pending
+                }
+                assert not disallowed_pending, f"Unexpected pending Qwen interactions: {disallowed_pending}"
+
+
+def test_e2e_stage5_export_merged_nonlegacy_ui_only():
+    """
+    Top-level rule:
+    once browser interactions begin, this flow uses UI navigation/actions only.
+    """
+    with _exclusive_run_lock("stage5_export_merged_nonlegacy_ui_only"):
+        fixtures_dir = os.path.join(SOURCE_APP_DIR, "test_fixtures", "e2e_sim")
+        script_fixture_path = os.path.join(fixtures_dir, "lmstudio_generate_script_test_book.json")
+        voice_fixture_path = os.path.join(fixtures_dir, "lmstudio_voice_profiles_test_book.json")
+        qwen_fixture_path = os.path.join(fixtures_dir, "qwen_local_full_e2e_test_book.json")
+        proofread_fixture_path = os.path.join(fixtures_dir, "proofread_text_test_book.json")
+        book_path = os.path.join(SOURCE_APP_DIR, "test_fixtures", "files", "test_book.epub")
+
+        assert os.path.exists(script_fixture_path), f"Missing fixture: {script_fixture_path}"
+        assert os.path.exists(voice_fixture_path), f"Missing fixture: {voice_fixture_path}"
+        assert os.path.exists(qwen_fixture_path), f"Missing fixture: {qwen_fixture_path}"
+        assert os.path.exists(proofread_fixture_path), f"Missing fixture: {proofread_fixture_path}"
+        assert os.path.exists(book_path), f"Missing book fixture: {book_path}"
+
+        script_payload = _read_json(script_fixture_path)
+        voice_payload = _read_json(voice_fixture_path)
+        script_model = str(((script_payload.get("metadata") or {}).get("model_name") or "").strip())
+        voice_model = str(((voice_payload.get("metadata") or {}).get("model_name") or "").strip())
+        assert script_model, "Script fixture metadata.model_name is required."
+        assert voice_model, "Voice fixture metadata.model_name is required."
+
+        config_patch = {
+            "llm": {
+                "base_url": "http://127.0.0.1:1/v1",
+                "api_key": "local",
+                "model_name": script_model,
+                "llm_workers": 1,
+            },
+            "tts": {
+                "mode": "local",
+                "local_backend": "qwen",
+                "device": "cpu",
+                "language": "English",
+                "parallel_workers": 1,
+            },
+            "generation": {
+                "legacy_mode": False,
+                "chunk_size": 600,
+                "max_tokens": 1024,
+                "temperature": 0.2,
+                "top_p": 0.9,
+                "top_k": 20,
+                "min_p": 0.0,
+                "presence_penalty": 0.0,
+                "banned_tokens": [],
+                "temperament_words": 150,
+            },
+        }
+
+        console_errors: list[str] = []
+        page_errors: list[str] = []
+        warnings: list[str] = []
+        http_failures: list[str] = []
+        expected_speakers = {
+            str(item).strip()
+            for item in (((voice_payload.get("metadata") or {}).get("speakers")) or [])
+            if str(item).strip()
+        }
+        assert expected_speakers, "Voice fixture metadata.speakers must include at least one speaker."
+
+        with _report_directory("threadspeak_stage5_export_report_") as report_root:
+            script_lm_trace = os.path.join(report_root, "lm-script-trace.jsonl")
+            voice_lm_trace = os.path.join(report_root, "lm-voice-trace.jsonl")
+            qwen_report = os.path.join(report_root, "qwen-report.json")
+            qwen_trace = os.path.join(report_root, "qwen-trace.jsonl")
+            proofread_report = os.path.join(report_root, "proofread-report.json")
+            proofread_trace = os.path.join(report_root, "proofread-trace.jsonl")
+            env_overrides = {
+                "THREADSPEAK_E2E_SIM_ENABLED": "1",
+                "THREADSPEAK_E2E_QWEN_FIXTURE": os.path.abspath(qwen_fixture_path),
+                "THREADSPEAK_E2E_QWEN_REPORT_PATH": qwen_report,
+                "THREADSPEAK_E2E_QWEN_TRACE_PATH": qwen_trace,
+                "THREADSPEAK_E2E_PROOFREAD_FIXTURE": os.path.abspath(proofread_fixture_path),
+                "THREADSPEAK_E2E_PROOFREAD_REPORT_PATH": proofread_report,
+                "THREADSPEAK_E2E_PROOFREAD_TRACE_PATH": proofread_trace,
+                "THREADSPEAK_E2E_PROOFREAD_FALLBACK": "chunk_text",
+                "THREADSPEAK_E2E_SIM_STRICT": "1",
+            }
+
+            with LMStudioSimServer(
+                script_fixture_path,
+                trace_path=script_lm_trace,
+                trace_label="stage5-script-lm",
+            ) as script_server:
+                with LMStudioSimServer(
+                    voice_fixture_path,
+                    trace_path=voice_lm_trace,
+                    trace_label="stage5-voice-lm",
+                ) as voice_server:
+                    config_patch["llm"]["base_url"] = f"{script_server.base_url}/v1"
+                    with _IsolatedServer(config_patch=config_patch, env_overrides=env_overrides) as app_server:
+                        with sync_playwright() as playwright:
+                            browser = playwright.chromium.launch(headless=True)
+                            context = browser.new_context()
+                            page = context.new_page()
+
+                            def _on_console(message):
+                                text = str(message.text or "").strip()
+                                kind = str(message.type or "").strip().lower()
+                                if kind == "error":
+                                    console_errors.append(text)
+                                elif kind == "warning":
+                                    warnings.append(text)
+
+                            def _on_page_error(err):
+                                page_errors.append(str(err))
+
+                            def _on_response(response):
+                                try:
+                                    status = int(response.status)
+                                except Exception:
+                                    status = 0
+                                if status >= 400:
+                                    method = str(getattr(response.request, "method", "") or "")
+                                    http_failures.append(f"{status} {method} {response.url}")
+
+                            page.on("console", _on_console)
+                            page.on("pageerror", _on_page_error)
+                            page.on("response", _on_response)
+
+                            try:
+                                _run_stage1_to_voices_tab(
+                                    page=page,
+                                    app_base_url=app_server.base_url,
+                                    book_path=book_path,
+                                )
+                                _run_stage2_to_stage4_proofread_flow(
+                                    page=page,
+                                    app_base_url=app_server.base_url,
+                                    voice_server_base_url=f"{voice_server.base_url}/v1",
+                                    voice_model_name=voice_model,
+                                    expected_speakers=expected_speakers,
+                                )
+
+                                _wait_for_nav_unlocked(page, '.nav-link[data-tab="audio"]', "Export tab")
+                                page.locator('.nav-link[data-tab="audio"]').click()
+                                _wait_for_activity(
+                                    "Waiting for Export tab",
+                                    lambda: page.evaluate(
+                                        """() => ({
+                                            visible: !!document.querySelector('#audio-tab') && getComputedStyle(document.querySelector('#audio-tab')).display !== 'none',
+                                            has_merge_btn: !!document.querySelector('#btn-merge'),
+                                            has_logs: !!document.querySelector('#audio-logs'),
+                                            has_chapter_select: !!document.querySelector('#export-chapter-select')
+                                        })"""
+                                    ),
+                                    lambda snapshot: bool(
+                                        snapshot.get("visible")
+                                        and snapshot.get("has_merge_btn")
+                                        and snapshot.get("has_logs")
+                                        and snapshot.get("has_chapter_select")
+                                    ),
+                                )
+
+                                page.locator("#export-chapter-select").select_option("")
+                                _wait_for_activity(
+                                    "Waiting for full-project export scope selection",
+                                    lambda: {
+                                        "chapter_value": page.evaluate(
+                                            "() => String(document.querySelector('#export-chapter-select')?.value || '')"
+                                        )
+                                    },
+                                    lambda snapshot: str(snapshot.get("chapter_value") or "") == "",
+                                )
+
+                                with page.expect_response(
+                                    lambda response: (
+                                        response.url.endswith("/api/merge")
+                                        and response.request.method == "POST"
+                                        and response.status == 200
+                                    ),
+                                    timeout=10000,
+                                ):
+                                    page.locator("#btn-merge").click()
+                                    _confirm_modal_if_present(page, timeout_ms=4000)
+
+                                _wait_for_audio_merge_completion(app_server.base_url)
+
+                                _wait_for_activity(
+                                    "Waiting for merged export UI readiness",
+                                    lambda: page.evaluate(
+                                        """() => ({
+                                            player_visible: !!document.querySelector('#audio-player-container')
+                                                && getComputedStyle(document.querySelector('#audio-player-container')).display !== 'none',
+                                            audio_src: String(document.querySelector('#main-audio')?.getAttribute('src') || ''),
+                                            download_href: String(document.querySelector('#download-link')?.getAttribute('href') || ''),
+                                        })"""
+                                    ),
+                                    lambda snapshot: bool(
+                                        snapshot.get("player_visible")
+                                        and ("/api/audiobook" in str(snapshot.get("audio_src") or "") or "/api/audiobook" in str(snapshot.get("download_href") or ""))
+                                    ),
+                                )
+
+                                mp3_response = requests.get(f"{app_server.base_url}/api/audiobook", timeout=30)
+                                _assert_status(mp3_response, 200, "download merged audiobook")
+                                content_type = str(mp3_response.headers.get("content-type") or "").lower()
+                                assert "audio/mpeg" in content_type, f"Expected audio/mpeg content-type, got: {content_type}"
+                                assert len(mp3_response.content) > 1024, "Merged audiobook download is unexpectedly small."
+
+                                assert app_server.layout is not None, "Missing isolated runtime layout."
+                                isolated_mp3 = app_server.layout.audiobook_path
+                                assert os.path.exists(isolated_mp3), f"Merged output not found: {isolated_mp3}"
+                                isolated_size = os.path.getsize(isolated_mp3)
+                                assert isolated_size > 1024, f"Merged output is too small: {isolated_size} bytes"
+                                assert _looks_like_mp3(isolated_mp3), f"Merged output is not recognized as MP3: {isolated_mp3}"
+                                duration_seconds = _audio_duration_seconds(isolated_mp3)
+                                assert duration_seconds > 240.0, (
+                                    f"Merged audiobook duration must be > 4 minutes, got {duration_seconds:.2f}s"
+                                )
+
+                                assert not console_errors, _report_console(console_errors, page_errors, warnings)
+                                assert not page_errors, _report_console(console_errors, page_errors, warnings)
+                            except Exception as exc:
+                                script_logs = ""
+                                proofread_logs = ""
+                                audio_logs = ""
+                                try:
+                                    script_logs = page.locator("#script-logs").inner_text(timeout=2000)
+                                except Exception:
+                                    script_logs = ""
+                                try:
+                                    proofread_logs = page.locator("#proofread-logs").inner_text(timeout=2000)
+                                except Exception:
+                                    proofread_logs = ""
+                                try:
+                                    audio_logs = page.locator("#audio-logs").inner_text(timeout=2000)
+                                except Exception:
+                                    audio_logs = ""
+                                raise AssertionError(
+                                    f"Stage-5 export UI flow failed: {exc}\n"
+                                    f"Script logs tail:\n{script_logs[-2000:]}\n"
+                                    f"Proofread logs tail:\n{proofread_logs[-2000:]}\n"
+                                    f"Audio logs tail:\n{audio_logs[-2000:]}\n"
+                                    f"HTTP failures:\n{chr(10).join(http_failures[-20:]) or 'none'}\n"
+                                    f"LM script trace tail ({script_lm_trace}):\n{_tail_file(script_lm_trace)}\n"
+                                    f"LM voice trace tail ({voice_lm_trace}):\n{_tail_file(voice_lm_trace)}\n"
+                                    f"Qwen trace tail ({qwen_trace}):\n{_tail_file(qwen_trace)}\n"
+                                    f"Qwen report tail ({qwen_report}):\n{_tail_file(qwen_report)}\n"
+                                    f"Proofread trace tail ({proofread_trace}):\n{_tail_file(proofread_trace)}\n"
+                                    f"Proofread report tail ({proofread_report}):\n{_tail_file(proofread_report)}\n"
                                     f"{_report_console(console_errors, page_errors, warnings)}"
                                 ) from exc
                             finally:

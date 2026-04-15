@@ -7,11 +7,13 @@ by default runtime paths.
 
 from .fixture_queue import ScriptedInteractionQueue, load_fixture_payload
 from .lmstudio_server import LMStudioSimServer
+from .proofread_text_sim import ProofreadTextSimProvider
 from .qwen_local_sim import QwenLocalSimProvider
 
 __all__ = [
     "ScriptedInteractionQueue",
     "load_fixture_payload",
     "LMStudioSimServer",
+    "ProofreadTextSimProvider",
     "QwenLocalSimProvider",
 ]

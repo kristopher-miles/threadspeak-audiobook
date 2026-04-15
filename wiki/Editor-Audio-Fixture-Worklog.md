@@ -36,10 +36,10 @@ rtk app/env/bin/python app/scripts/capture_editor_audio_fixtures.py \
 
 ## Capture Records
 
-- Status: partial (2 failed lines)
-- Last run timestamp: 2026-04-15T07:47:12.929887+00:00
+- Status: complete
+- Last run timestamp: 2026-04-15T10:25:35.886101+00:00
 - Backend used: mlx
-- Captured lines: 70
+- Captured lines: 72
 - Captured speakers: 6
 - Qwen fixture path: `app/test_fixtures/e2e_sim/qwen_local_editor_audio_test_book.json`
 - Manifest path: `app/test_fixtures/e2e_sim/editor_audio_test_book_manifest.json`

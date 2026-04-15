@@ -22,6 +22,14 @@ Default runtime behavior is unchanged when these env vars are not set.
   - Optional report file written by the local Qwen simulator (pending/consumed state).
 - `THREADSPEAK_E2E_SIM_STRICT=1`
   - Strict fixture matching for both simulators. Defaults to strict when fixture omits `strict`.
+- `THREADSPEAK_E2E_PROOFREAD_FIXTURE=/abs/path/to/proofread_text_fixture.json`
+  - Enables transcript replay for proofread/ASR flows.
+- `THREADSPEAK_E2E_PROOFREAD_FALLBACK=chunk_text`
+  - Missing-entry policy for proofread transcript fixture (`chunk_text` or `fail`).
+- `THREADSPEAK_E2E_PROOFREAD_REPORT_PATH=/tmp/proofread-report.json`
+  - Optional report output for proofread transcript replay.
+- `THREADSPEAK_E2E_PROOFREAD_TRACE_PATH=/tmp/proofread-trace.jsonl`
+  - Optional trace output for proofread transcript replay.
 
 ## LM Studio Fixture Format
 
@@ -86,6 +94,35 @@ Supported method keys:
 - `generate_voice_clone`
 - `generate_voice_design`
 
+## Proofread Transcript Fixture Format
+
+Path:
+- `app/test_fixtures/e2e_sim/proofread_text_test_book.json`
+
+Top-level shape:
+
+```json
+{
+  "strict": true,
+  "fallback_mode": "chunk_text",
+  "entries": [
+    {
+      "audio_path": "voicelines/voiceline_<uid>_narrator.mp3",
+      "transcript_text": "Transcript text returned to proofread.",
+      "uid": "<optional>",
+      "speaker": "NARRATOR",
+      "line_id": 0
+    }
+  ]
+}
+```
+
+Rules:
+- `audio_path` must match the clip path loaded in chunk data.
+- `transcript_text` is returned through the normal `transcribe_audio_path` path.
+- If an entry is missing and `fallback_mode=chunk_text`, test mode derives transcript from current chunk text.
+- If strict is enabled and no fixture/fallback transcript is available, proofread hard-fails.
+
 Audio shape options per interaction:
 - `audio` object for one output spec (replicated as needed).
 - `audios` list for explicit per-item outputs in batch-like calls.
@@ -99,6 +136,12 @@ Run the simulator resource tests:
 
 ```bash
 rtk app/env/bin/python -m pytest -q app/test_e2e_sim_resources.py
+```
+
+Run the proofread transcript simulator tests:
+
+```bash
+rtk app/env/bin/python -m pytest -q app/test_proofread_text_sim.py
 ```
 
 Run the captured Generate Script replay test:
@@ -180,6 +223,12 @@ Build the full harness profile (phase fixtures + combined Qwen fixture):
 rtk app/env/bin/python app/scripts/build_full_e2e_harness_profile.py
 ```
 
+Build the proofread transcript fixture from captured non-legacy editor artifacts:
+
+```bash
+rtk app/env/bin/python app/scripts/build_proofread_text_fixture.py
+```
+
 The test starts:
 - an isolated app server clone,
 - a local LM Studio simulator server,
@@ -189,4 +238,5 @@ Then it validates:
 - `/api/voices/suggest_description` via LM Studio simulation,
 - `/api/voices/design_generate` via local Qwen simulation,
 - `/api/generate_batch` line-by-line editor generation via local Qwen simulation,
+- `/api/proofread` transcript reads via proofread text fixture simulation,
 - fixture consumption (no unconsumed scripted interactions).

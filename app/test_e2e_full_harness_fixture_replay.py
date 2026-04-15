@@ -185,10 +185,12 @@ def test_full_harness_fixtures_replay():
     script_lm_fixture = os.path.join(SOURCE_REPO_DIR, harness["phases"]["generate_script"]["lm_fixture"])
     voice_lm_fixture = os.path.join(SOURCE_REPO_DIR, harness["phases"]["voice_profiles"]["lm_fixture"])
     qwen_fixture = os.path.join(SOURCE_REPO_DIR, harness["phases"]["editor_audio"]["qwen_fixture"])
+    proofread_text_fixture = os.path.join(SOURCE_REPO_DIR, harness["phases"]["proofread"]["text_fixture"])
 
     assert os.path.exists(script_lm_fixture)
     assert os.path.exists(voice_lm_fixture)
     assert os.path.exists(qwen_fixture)
+    assert os.path.exists(proofread_text_fixture)
 
     script_model = str(harness["phases"]["generate_script"]["model_name"])
     voice_model = str(harness["phases"]["voice_profiles"]["model_name"])
@@ -210,6 +212,8 @@ def test_full_harness_fixtures_replay():
                         "THREADSPEAK_E2E_SIM_ENABLED": "1",
                         "THREADSPEAK_E2E_QWEN_FIXTURE": qwen_fixture,
                         "THREADSPEAK_E2E_QWEN_REPORT_PATH": qwen_report,
+                        "THREADSPEAK_E2E_PROOFREAD_FIXTURE": proofread_text_fixture,
+                        "THREADSPEAK_E2E_PROOFREAD_FALLBACK": "chunk_text",
                         "THREADSPEAK_E2E_SIM_STRICT": "1",
                     }
                 ) as app_server:

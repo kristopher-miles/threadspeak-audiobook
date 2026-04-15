@@ -20,6 +20,7 @@ EDITOR_QWEN_DEFAULT = os.path.join(APP_DIR, "test_fixtures", "e2e_sim", "qwen_lo
 VOICE_MANIFEST_DEFAULT = os.path.join(APP_DIR, "test_fixtures", "e2e_sim", "voice_profiles_test_book_manifest.json")
 OUTPUT_QWEN_DEFAULT = os.path.join(APP_DIR, "test_fixtures", "e2e_sim", "qwen_local_full_e2e_test_book.json")
 OUTPUT_HARNESS_DEFAULT = os.path.join(APP_DIR, "test_fixtures", "e2e_sim", "full_e2e_test_book_harness.json")
+PROOFREAD_TEXT_DEFAULT = os.path.join(APP_DIR, "test_fixtures", "e2e_sim", "proofread_text_test_book.json")
 
 
 def _read_json(path: str) -> Dict[str, Any]:
@@ -100,6 +101,7 @@ def build_full_harness(
     voice_manifest_path: str,
     output_qwen_fixture: str,
     output_harness_manifest: str,
+    proofread_text_fixture: str,
 ) -> Dict[str, Any]:
     script_lm_abs = os.path.abspath(script_lm_fixture)
     voice_lm_abs = os.path.abspath(voice_lm_fixture)
@@ -108,8 +110,9 @@ def build_full_harness(
     voice_manifest_abs = os.path.abspath(voice_manifest_path)
     output_qwen_abs = os.path.abspath(output_qwen_fixture)
     output_harness_abs = os.path.abspath(output_harness_manifest)
+    proofread_text_abs = os.path.abspath(proofread_text_fixture)
 
-    for path in (script_lm_abs, voice_lm_abs, voice_qwen_abs, editor_qwen_abs, voice_manifest_abs):
+    for path in (script_lm_abs, voice_lm_abs, voice_qwen_abs, editor_qwen_abs, voice_manifest_abs, proofread_text_abs):
         if not os.path.exists(path):
             raise FileNotFoundError(path)
 
@@ -176,6 +179,10 @@ def build_full_harness(
             "editor_audio": {
                 "qwen_fixture": os.path.relpath(output_qwen_abs, REPO_ROOT),
             },
+            "proofread": {
+                "text_fixture": os.path.relpath(proofread_text_abs, REPO_ROOT),
+                "fallback_mode": "chunk_text",
+            },
         },
         "component_fixtures": {
             "script_lm": os.path.relpath(script_lm_abs, REPO_ROOT),
@@ -183,6 +190,7 @@ def build_full_harness(
             "voice_qwen": os.path.relpath(voice_qwen_abs, REPO_ROOT),
             "editor_qwen": os.path.relpath(editor_qwen_abs, REPO_ROOT),
             "voice_manifest": os.path.relpath(voice_manifest_abs, REPO_ROOT),
+            "proofread_text": os.path.relpath(proofread_text_abs, REPO_ROOT),
         },
     }
 
@@ -205,6 +213,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--voice-qwen", default=VOICE_QWEN_DEFAULT)
     parser.add_argument("--editor-qwen", default=EDITOR_QWEN_DEFAULT)
     parser.add_argument("--voice-manifest", default=VOICE_MANIFEST_DEFAULT)
+    parser.add_argument("--proofread-text", default=PROOFREAD_TEXT_DEFAULT)
     parser.add_argument("--output-qwen", default=OUTPUT_QWEN_DEFAULT)
     parser.add_argument("--output-harness", default=OUTPUT_HARNESS_DEFAULT)
     return parser.parse_args()
@@ -218,6 +227,7 @@ def main() -> None:
         voice_qwen_fixture=args.voice_qwen,
         editor_qwen_fixture=args.editor_qwen,
         voice_manifest_path=args.voice_manifest,
+        proofread_text_fixture=args.proofread_text,
         output_qwen_fixture=args.output_qwen,
         output_harness_manifest=args.output_harness,
     )

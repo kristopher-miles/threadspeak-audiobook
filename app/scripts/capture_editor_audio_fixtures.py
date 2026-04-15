@@ -774,6 +774,12 @@ def capture_editor_audio_fixtures(
             }
             response = requests.post(f"{server.base_url}/api/config/setup", json=setup_generation, timeout=60)
             _assert_status(response, 200, "configure editor generation setup")
+            threshold_response = requests.post(
+                f"{server.base_url}/api/voices/settings",
+                json={"value": 0},
+                timeout=60,
+            )
+            _assert_status(threshold_response, 200, "set narrator threshold to 0 for capture")
 
             chunks_response = requests.get(f"{server.base_url}/api/chunks", timeout=60)
             _assert_status(chunks_response, 200, "load chunks before generation")

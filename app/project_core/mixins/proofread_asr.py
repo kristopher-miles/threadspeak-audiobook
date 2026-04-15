@@ -47,6 +47,58 @@ from project_core.chunking import _coerce_bool, get_speaker, _is_structural_text
 
 class ProjectProofreadASRMixin:
         """Compute and persist per-chunk proofreading outcomes from ASR output."""
+        def _maybe_init_e2e_proofread_text_sim_provider(self):
+            if getattr(self, "_e2e_proofread_sim_provider_initialized", False):
+                return getattr(self, "_e2e_proofread_sim_provider", None)
+
+            setattr(self, "_e2e_proofread_sim_provider_initialized", True)
+            fixture_path = str(os.getenv("THREADSPEAK_E2E_PROOFREAD_FIXTURE") or "").strip()
+            if not fixture_path:
+                setattr(self, "_e2e_proofread_sim_provider", None)
+                return None
+
+            try:
+                from e2e_sim.proofread_text_sim import ProofreadTextSimProvider
+
+                provider = ProofreadTextSimProvider(fixture_path)
+                setattr(self, "_e2e_proofread_sim_provider", provider)
+                print(f"E2E proofread transcript simulator enabled from fixture: {fixture_path}")
+                return provider
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to initialize proofread text E2E simulator from fixture '{fixture_path}': {e}"
+                ) from e
+
+        def _resolve_e2e_proofread_fallback_text(self, relative_audio_path):
+            target_audio_path = str(relative_audio_path or "").strip().replace("\\", "/")
+            while target_audio_path.startswith("./"):
+                target_audio_path = target_audio_path[2:]
+            if not target_audio_path:
+                return None
+
+            runtime_map = getattr(self, "_proofread_runtime_fallback_map", None)
+            if isinstance(runtime_map, dict):
+                mapped = str(runtime_map.get(target_audio_path) or "").strip()
+                if mapped:
+                    return mapped
+
+            chunk = None
+            chunks = self.load_chunks_raw()
+            for item in chunks:
+                item_audio_path = str((item or {}).get("audio_path") or "").strip().replace("\\", "/")
+                while item_audio_path.startswith("./"):
+                    item_audio_path = item_audio_path[2:]
+                if item_audio_path == target_audio_path:
+                    chunk = item
+                    break
+            if not chunk:
+                return None
+
+            dictionary_entries = self.load_dictionary_entries()
+            expected_text, _ = apply_dictionary_to_text(chunk.get("text", ""), dictionary_entries)
+            fallback_text = str(expected_text or chunk.get("text") or "").strip()
+            return fallback_text or None
+
         def get_asr_engine(self):
             settings = self._load_asr_settings()
             if not settings.get("enabled", True):
@@ -590,6 +642,27 @@ class ProjectProofreadASRMixin:
             if cached is not None:
                 return cached
 
+            proofread_sim_provider = self._maybe_init_e2e_proofread_text_sim_provider()
+            if proofread_sim_provider is not None:
+                fallback_text = None
+                if proofread_sim_provider.fallback_mode == "chunk_text":
+                    fallback_text = self._resolve_e2e_proofread_fallback_text(relative_audio_path)
+
+                simulated_text = proofread_sim_provider.resolve_transcript(
+                    relative_audio_path,
+                    fallback_text=fallback_text,
+                )
+                if simulated_text is None:
+                    simulated_text = ""
+                result = {
+                    "text": simulated_text,
+                    "normalized_text": self._normalize_asr_text(simulated_text),
+                    "cached": False,
+                    "simulated": True,
+                }
+                self._store_cached_transcription(relative_audio_path, result)
+                return result
+
             full_path = os.path.join(self.root_dir, relative_audio_path)
             result = self.get_asr_engine().transcribe_file(full_path)
             result["normalized_text"] = self._normalize_asr_text(result.get("text"))
@@ -602,8 +675,13 @@ class ProjectProofreadASRMixin:
             if not paths:
                 return {}
 
-            engine = self.get_asr_engine()
-            max_workers = max(int(getattr(engine, "num_workers", 1) or 1), 1)
+            proofread_sim_provider = self._maybe_init_e2e_proofread_text_sim_provider()
+            if proofread_sim_provider is not None:
+                settings = self._load_asr_settings()
+                max_workers = max(int(settings.get("parallel_workers", 1) or 1), 1)
+            else:
+                engine = self.get_asr_engine()
+                max_workers = max(int(getattr(engine, "num_workers", 1) or 1), 1)
             results = {}
 
             def transcribe_one(path):
@@ -769,36 +847,44 @@ class ProjectProofreadASRMixin:
 
                 if asr_needed:
                     asr_started_at = time.time()
-                    transcript_map = self.transcribe_audio_paths_bulk(
-                        [base["audio_path"] for _, _, base in asr_needed],
-                        progress_callback=lambda completed, total, path: emit_progress({
-                            "phase": "proofread_transcribe",
-                            "message": (
-                                f"Transcribed {completed}/{total} proofread clip(s) in parallel. "
-                                f"Latest: {path}"
-                                + (
-                                    f" ETA {int((max(total - completed, 0) / (completed / max(time.time() - asr_started_at, 0.001))))}s."
+                    self._proofread_runtime_fallback_map = {
+                        str((base.get("audio_path") or "")).strip(): str(expected_text or "").strip()
+                        for _, expected_text, base in asr_needed
+                        if str((base.get("audio_path") or "")).strip()
+                    }
+                    try:
+                        transcript_map = self.transcribe_audio_paths_bulk(
+                            [base["audio_path"] for _, _, base in asr_needed],
+                            progress_callback=lambda completed, total, path: emit_progress({
+                                "phase": "proofread_transcribe",
+                                "message": (
+                                    f"Transcribed {completed}/{total} proofread clip(s) in parallel. "
+                                    f"Latest: {path}"
+                                    + (
+                                        f" ETA {int((max(total - completed, 0) / (completed / max(time.time() - asr_started_at, 0.001))))}s."
+                                        if completed > 0 and total > completed
+                                        else ""
+                                    )
+                                ).strip(),
+                                "transcribed": completed,
+                                "transcribe_total": total,
+                                "processed": processed,
+                                "pending_total": len(pending_indices),
+                                "passed": passed,
+                                "failed": failed,
+                                "auto_failed": auto_failed,
+                                "skipped": skipped,
+                                "eta_seconds": (
+                                    round(max(total - completed, 0) / (completed / max(time.time() - asr_started_at, 0.001)), 1)
                                     if completed > 0 and total > completed
-                                    else ""
-                                )
-                            ).strip(),
-                            "transcribed": completed,
-                            "transcribe_total": total,
-                            "processed": processed,
-                            "pending_total": len(pending_indices),
-                            "passed": passed,
-                            "failed": failed,
-                            "auto_failed": auto_failed,
-                            "skipped": skipped,
-                            "eta_seconds": (
-                                round(max(total - completed, 0) / (completed / max(time.time() - asr_started_at, 0.001)), 1)
-                                if completed > 0 and total > completed
-                                else 0.0 if total and completed >= total
-                                else None
-                            ),
-                            "elapsed_seconds": round(time.time() - asr_started_at, 2),
-                        }),
-                    )
+                                    else 0.0 if total and completed >= total
+                                    else None
+                                ),
+                                "elapsed_seconds": round(time.time() - asr_started_at, 2),
+                            }),
+                        )
+                    finally:
+                        self._proofread_runtime_fallback_map = None
                     for index, expected_text, base in asr_needed:
                         transcript = transcript_map.get(base["audio_path"], {})
                         metrics = self._proofread_similarity_metrics(expected_text, transcript.get("text", ""))
