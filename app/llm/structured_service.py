@@ -21,6 +21,9 @@ from .tool_streaming_service import ToolStreamingService
 class StructuredLLMService:
     """Route structured requests through tool-calling or JSON fallback per model."""
 
+    _MAX_TOOL_EMPTY_LENGTH_RETRIES = 2
+    _MAX_TOOL_RETRY_TOKENS = 16384
+
     def __init__(
         self,
         *,
@@ -173,53 +176,68 @@ class StructuredLLMService:
                 )
             return None
 
-        try:
-            completion = self._chat_service.complete(
-                client=client,
-                model_name=runtime.model_name,
-                params=ChatCompletionParams(
-                    messages=tool_messages,
-                    temperature=temperature,
-                    top_p=top_p,
-                    presence_penalty=presence_penalty,
-                    max_tokens=max_tokens,
-                    extra_body=extra_body,
-                    tools=tool_spec,
-                    tool_choice="required",
-                    parallel_tool_calls=False,
-                ),
-            )
-        except Exception:
-            return None
+        retries = 0
+        request_max_tokens = int(max_tokens) if max_tokens is not None else None
 
-        args_payload = self._extract_tool_arguments(completion.raw_response)
-        parsed = self._unwrap_contract_payload(contract, args_payload)
-        if self._matches_contract(parsed, contract):
-            return StructuredLLMResult(
-                mode="tool",
-                parsed=parsed,
-                text=self._payload_to_text(parsed),
-                raw_payload=self._payload_to_text(args_payload),
-                tool_call_observed=True,
-                finish_reason=completion.finish_reason,
-                prompt_tokens=completion.prompt_tokens,
-                completion_tokens=completion.completion_tokens,
-            )
+        while True:
+            try:
+                completion = self._chat_service.complete(
+                    client=client,
+                    model_name=runtime.model_name,
+                    params=ChatCompletionParams(
+                        messages=tool_messages,
+                        temperature=temperature,
+                        top_p=top_p,
+                        presence_penalty=presence_penalty,
+                        max_tokens=request_max_tokens,
+                        extra_body=extra_body,
+                        tools=tool_spec,
+                        tool_choice="required",
+                        parallel_tool_calls=False,
+                    ),
+                )
+            except Exception:
+                return None
 
-        # Some models ignore tool-calling and still return valid JSON text.
-        parsed_text = self._parse_json_like_payload(completion.text, contract.root_type)
-        if self._matches_contract(parsed_text, contract):
-            return StructuredLLMResult(
-                mode="tool",
-                parsed=parsed_text,
-                text=self._payload_to_text(parsed_text),
-                raw_payload=completion.text,
-                tool_call_observed=False,
+            args_payload = self._extract_tool_arguments(completion.raw_response)
+            parsed = self._unwrap_contract_payload(contract, args_payload)
+            if self._matches_contract(parsed, contract):
+                return StructuredLLMResult(
+                    mode="tool",
+                    parsed=parsed,
+                    text=self._payload_to_text(parsed),
+                    raw_payload=self._payload_to_text(args_payload),
+                    tool_call_observed=True,
+                    finish_reason=completion.finish_reason,
+                    prompt_tokens=completion.prompt_tokens,
+                    completion_tokens=completion.completion_tokens,
+                )
+
+            # Some models ignore tool-calling and still return valid JSON text.
+            parsed_text = self._parse_json_like_payload(completion.text, contract.root_type)
+            if self._matches_contract(parsed_text, contract):
+                return StructuredLLMResult(
+                    mode="tool",
+                    parsed=parsed_text,
+                    text=self._payload_to_text(parsed_text),
+                    raw_payload=completion.text,
+                    tool_call_observed=False,
+                    finish_reason=completion.finish_reason,
+                    prompt_tokens=completion.prompt_tokens,
+                    completion_tokens=completion.completion_tokens,
+                )
+
+            if not self._should_retry_tool_length_empty(
+                completion_text=completion.text,
                 finish_reason=completion.finish_reason,
-                prompt_tokens=completion.prompt_tokens,
-                completion_tokens=completion.completion_tokens,
-            )
-        return None
+                args_payload=args_payload,
+                current_max_tokens=request_max_tokens,
+                retry_index=retries,
+            ):
+                return None
+
+            retries += 1
+            request_max_tokens = self._next_tool_retry_max_tokens(request_max_tokens)
 
     def _run_json_mode(
         self,
@@ -487,3 +505,33 @@ class StructuredLLMService:
     def _set_cached_strategy(self, cache_key: str, strategy: str) -> None:
         with self._cache_lock:
             self._strategy_cache[cache_key] = strategy
+
+    @classmethod
+    def _should_retry_tool_length_empty(
+        cls,
+        *,
+        completion_text: str,
+        finish_reason: Optional[str],
+        args_payload: Optional[Dict[str, Any]],
+        current_max_tokens: Optional[int],
+        retry_index: int,
+    ) -> bool:
+        if retry_index >= cls._MAX_TOOL_EMPTY_LENGTH_RETRIES:
+            return False
+        if finish_reason != "length":
+            return False
+        if (completion_text or "").strip():
+            return False
+        if args_payload is not None:
+            return False
+        if current_max_tokens is None or int(current_max_tokens) <= 0:
+            return False
+        return cls._next_tool_retry_max_tokens(int(current_max_tokens)) > int(current_max_tokens)
+
+    @classmethod
+    def _next_tool_retry_max_tokens(cls, current_max_tokens: Optional[int]) -> Optional[int]:
+        if current_max_tokens is None:
+            return None
+        current = max(1, int(current_max_tokens))
+        expanded = max(current * 2, current + 512)
+        return min(cls._MAX_TOOL_RETRY_TOKENS, expanded)

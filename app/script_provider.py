@@ -2630,6 +2630,7 @@ class SQLiteScriptStore(ScriptStore):
         preserved = []
         lookup = {}
         fallback_lookup = {}
+        consumed_chunk_markers = set()
         for chunk in existing_chunks or []:
             exact_key = (
                 str(chunk.get("paragraph_id") or "").strip(),
@@ -2647,6 +2648,17 @@ class SQLiteScriptStore(ScriptStore):
             lookup.setdefault(exact_key, []).append(chunk)
             fallback_lookup.setdefault(fallback_key, []).append(chunk)
 
+        def _pop_unconsumed(mapping, key):
+            bucket = mapping.get(key)
+            while bucket:
+                candidate = bucket.pop(0)
+                marker = id(candidate)
+                if marker in consumed_chunk_markers:
+                    continue
+                consumed_chunk_markers.add(marker)
+                return candidate
+            return None
+
         for index, chunk in enumerate(rebuilt_chunks or []):
             normalized = self._normalize_chunk(chunk, index)
             exact_key = (
@@ -2662,11 +2674,9 @@ class SQLiteScriptStore(ScriptStore):
                 str(normalized.get("text") or ""),
                 str(normalized.get("instruct") or ""),
             )
-            matched = None
-            if lookup.get(exact_key):
-                matched = lookup[exact_key].pop(0)
-            elif fallback_lookup.get(fallback_key):
-                matched = fallback_lookup[fallback_key].pop(0)
+            matched = _pop_unconsumed(lookup, exact_key)
+            if matched is None:
+                matched = _pop_unconsumed(fallback_lookup, fallback_key)
             if matched:
                 for field in ("uid", "status", "audio_path", "audio_validation", "proofread", "auto_regen_count"):
                     if field in matched:

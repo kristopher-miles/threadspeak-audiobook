@@ -1,0 +1,85 @@
+{
+  "captured_at": "2026-04-15T07:19:17.821306+00:00",
+  "source_book": "app/test_fixtures/files/test_book.epub",
+  "llm_model": "qwen/qwen3.5-9b",
+  "tts_local_backend": "mlx",
+  "speakers": [
+    "Bitera",
+    "Father",
+    "Kisten",
+    "Maddie",
+    "Mother",
+    "NARRATOR"
+  ],
+  "voice_profiles": [
+    {
+      "speaker": "Bitera",
+      "description": "A young [child or juvenile] female voice with bright, slightly elevated pitch, no accent, mischievous trickster archetype, playful and confident quality. Quick-paced cadence with sharp diction for emphasis on plans and execution. Clear, crystalline vocal texture with light weight to suggest agility and speed.",
+      "sample_text": "Maddie, you could walk right past them—they’ll think you’re a stray. Give them something to fuss over while Kisten and I do the work. I want you to be charming,",
+      "generated_ref_text": "Maddie, you could walk right past them—they’ll think you’re a stray. Give them something to fuss over while Kisten and I do the work. I want you to be charming,",
+      "ref_audio": "clone_voices/test_book_bitera.wav",
+      "fixture_audio_path": "app/test_fixtures/e2e_sim/audio/voice_profiles_test_book/01_Bitera.wav",
+      "audio_sha256": "acedc1c59bb3422afd777f40a24cac36cb3c733923c224b50588a27d90cca9b8",
+      "audio_size": 852558,
+      "sample_rate": 24000
+    },
+    {
+      "speaker": "Father",
+      "description": "A middle-aged male voice with warm, resonant mid-range timbre, no accent, gentle patriarch archetype, relaxed and amused emotional baseline quality. Steady, unhurried pacing with conversational warmth. Slight vocal weight to suggest comfort and presence without dominance.",
+      "sample_text": "Come here, kitty,",
+      "generated_ref_text": "Come here, kitty,",
+      "ref_audio": "clone_voices/test_book_father.wav",
+      "fixture_audio_path": "app/test_fixtures/e2e_sim/audio/voice_profiles_test_book/02_Father.wav",
+      "audio_sha256": "dfbea078e63ff8ad708a9747f5259a41ee9fc274bbcf57952db7c2b2de97829e",
+      "audio_size": 73038,
+      "sample_rate": 24000
+    },
+    {
+      "speaker": "Kisten",
+      "description": "A young boy voice with warm mid-range pitch, no accent, playful hero archetype, confident and mischievous quality. Medium-paced cadence with quick bursts of energy when excited and steady calm during planning or stealth. Clear diction with slight playfulness in consonants to suggest feline agility.",
+      "sample_text": "A mother, a father, and a very small child who appears to be mostly interested in grass. I am not. I was merely… assessing the situation. There are three of them,",
+      "generated_ref_text": "A mother, a father, and a very small child who appears to be mostly interested in grass. I am not. I was merely… assessing the situation. There are three of them,",
+      "ref_audio": "clone_voices/test_book_kisten.wav",
+      "fixture_audio_path": "app/test_fixtures/e2e_sim/audio/voice_profiles_test_book/03_Kisten.wav",
+      "audio_sha256": "3431d9a728531c9c9e88346cbdd1d366a2debff4bf8cf71e50bf8aa8266a6be0",
+      "audio_size": 672078,
+      "sample_rate": 24000
+    },
+    {
+      "speaker": "Maddie",
+      "description": "A teenaged girl voice with a soft, confident timbre and mid-range pitch, strong Southern American accent, playful tomboyish cat archetype, mischievous and self-assured quality. Moderate pace with rhythmic, conversational cadence that balances casual teasing tones with moments of strategic focus. Slightly sly vocal texture with warm resonance in the lower register.",
+      "sample_text": "Don’t even think about it. You want me to be bait. Those humans are wide awake. And I get the strawberry. One slice, The strawberry,",
+      "generated_ref_text": "Don’t even think about it. You want me to be bait. Those humans are wide awake. And I get the strawberry. One slice, The strawberry,",
+      "ref_audio": "clone_voices/test_book_maddie.wav",
+      "fixture_audio_path": "app/test_fixtures/e2e_sim/audio/voice_profiles_test_book/04_Maddie.wav",
+      "audio_sha256": "a985e50250b940a1c4ab7017269e97fba8d68bfcb434a548a7472ab9c32191bd",
+      "audio_size": 457038,
+      "sample_rate": 24000
+    },
+    {
+      "speaker": "Mother",
+      "description": "A mid-forties female voice with warm, soft timbre and neutral pitch, no accent, gentle maternal character archetype. Calmly affectionate emotional baseline. Moderate to slow-paced cadence suitable for narration. Natural vocal resonance typical of a comfortable conversational speaker.",
+      "sample_text": "Oh!",
+      "generated_ref_text": "Oh!",
+      "ref_audio": "clone_voices/test_book_mother.wav",
+      "fixture_audio_path": "app/test_fixtures/e2e_sim/audio/voice_profiles_test_book/05_Mother.wav",
+      "audio_sha256": "078997837d4d1cffcecab84c546713b58fb59800b8283b121168079eaac787be",
+      "audio_size": 30798,
+      "sample_rate": 24000
+    },
+    {
+      "speaker": "NARRATOR",
+      "description": "A middle-aged neutral voice with warm and resonant baritone timbre, light Southern American accent strength + Southern American, Elderly Sage archetype, grounded and reflective emotional/vibe quality. Moderate-paced cadence with thoughtful pauses between phrases. Rich vocal texture with deep chest resonance for gravitas in narration passages.",
+      "sample_text": "Bitera clutched the chunk of cake against her chest, Kisten right behind her, both of them tearing across the lawn toward the oak tree where Maddie was already waiting, impeccably groomed, as if she had simply been sitting there all afternoon.",
+      "generated_ref_text": "Bitera clutched the chunk of cake against her chest, Kisten right behind her, both of them tearing across the lawn toward the oak tree where Maddie was already waiting, impeccably groomed, as if she had simply been sitting there all afternoon.",
+      "ref_audio": "clone_voices/test_book_narrator.wav",
+      "fixture_audio_path": "app/test_fixtures/e2e_sim/audio/voice_profiles_test_book/06_NARRATOR.wav",
+      "audio_sha256": "7cdcf89bc3bb3a2aff9a9b86eb06ab01fab583b494cb9cc2a5387b327960dc3f",
+      "audio_size": 721998,
+      "sample_rate": 24000
+    }
+  ],
+  "lm_fixture_path": "app/test_fixtures/e2e_sim/lmstudio_voice_profiles_test_book.json",
+  "qwen_fixture_path": "app/test_fixtures/e2e_sim/qwen_local_voice_profiles_test_book.json",
+  "asset_dir": "app/test_fixtures/e2e_sim/audio/voice_profiles_test_book"
+}

@@ -169,3 +169,52 @@ class ScriptProviderTests(unittest.TestCase):
             self.assertEqual(summary["percentage"], 33)
         finally:
             manager.shutdown_script_store(flush=True)
+
+    def test_preserve_chunk_state_does_not_reuse_same_uid_between_exact_and_fallback_matches(self):
+        root = self._make_root()
+        manager = ProjectManager(root)
+        try:
+            existing = [
+                {
+                    "uid": "chunk-a",
+                    "speaker": "NARRATOR",
+                    "text": "Repeated line.",
+                    "instruct": "Neutral.",
+                    "chapter": "Chapter 1",
+                    "paragraph_id": "p1",
+                    "status": "done",
+                },
+                {
+                    "uid": "chunk-b",
+                    "speaker": "NARRATOR",
+                    "text": "Repeated line.",
+                    "instruct": "Neutral.",
+                    "chapter": "Chapter 1",
+                    "paragraph_id": "p2",
+                    "status": "pending",
+                },
+            ]
+            rebuilt = [
+                {
+                    "speaker": "NARRATOR",
+                    "text": "Repeated line.",
+                    "instruct": "Neutral.",
+                    "chapter": "Chapter 1",
+                    "paragraph_id": "p1",
+                },
+                {
+                    "speaker": "NARRATOR",
+                    "text": "Repeated line.",
+                    "instruct": "Neutral.",
+                    "chapter": "Chapter 1",
+                    "paragraph_id": "p3",
+                },
+            ]
+
+            preserved = manager.script_store._preserve_chunk_state_for_entries(existing, rebuilt)
+            preserved_uids = [chunk.get("uid") for chunk in preserved]
+            self.assertEqual(len(set(preserved_uids)), 2)
+            self.assertIn("chunk-a", preserved_uids)
+            self.assertIn("chunk-b", preserved_uids)
+        finally:
+            manager.shutdown_script_store(flush=True)

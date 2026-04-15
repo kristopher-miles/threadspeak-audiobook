@@ -34,16 +34,32 @@ const LEGACY_SCRIPTS = [
 ];
 
 async function bootstrap() {
+  window.__THREADSPEAK_BOOTSTRAP_DONE = false;
+  window.__THREADSPEAK_BOOTSTRAP_ERROR = null;
+  window.__THREADSPEAK_BOOTSTRAP_STEP = 'init';
+  window.__THREADSPEAK_BOOTSTRAP_LAST_ACTIVITY = Date.now();
   const root = document.getElementById('tab-fragments-root');
+  window.__THREADSPEAK_BOOTSTRAP_STEP = 'fragments';
   await loadFragments({ root, fragments: TAB_FRAGMENTS });
+  window.__THREADSPEAK_BOOTSTRAP_LAST_ACTIVITY = Date.now();
   // Ensure updated legacy scripts are fetched after backend/UI patches.
   const scriptVersion = Date.now().toString();
+  window.__THREADSPEAK_BOOTSTRAP_STEP = 'legacy-scripts';
   for (const script of LEGACY_SCRIPTS) {
     await loadClassicScript(`${script}?v=${scriptVersion}`);
+    window.__THREADSPEAK_BOOTSTRAP_STEP = `loaded:${script}`;
+    window.__THREADSPEAK_BOOTSTRAP_LAST_ACTIVITY = Date.now();
   }
+  window.__THREADSPEAK_BOOTSTRAP_DONE = true;
+  window.__THREADSPEAK_BOOTSTRAP_STEP = 'done';
+  window.__THREADSPEAK_BOOTSTRAP_LAST_ACTIVITY = Date.now();
 }
 
 bootstrap().catch((error) => {
+  window.__THREADSPEAK_BOOTSTRAP_DONE = false;
+  window.__THREADSPEAK_BOOTSTRAP_ERROR = String(error?.stack || error?.message || error || 'unknown bootstrap error');
+  window.__THREADSPEAK_BOOTSTRAP_STEP = 'error';
+  window.__THREADSPEAK_BOOTSTRAP_LAST_ACTIVITY = Date.now();
   console.error('UI bootstrap failed', error);
   const root = document.getElementById('tab-fragments-root');
   if (root) {

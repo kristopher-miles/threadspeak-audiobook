@@ -1,0 +1,87 @@
+{
+  "strict": true,
+  "metadata": {
+    "purpose": "Captured local Qwen voice-design outputs for reusable voice profiles",
+    "captured_at": "2026-04-15T07:19:17.820593+00:00",
+    "source_file": "app/test_fixtures/files/test_book.epub",
+    "speaker_count": 6,
+    "speakers": [
+      "Bitera",
+      "Father",
+      "Kisten",
+      "Maddie",
+      "Mother",
+      "NARRATOR"
+    ]
+  },
+  "methods": {
+    "generate_voice_design": [
+      {
+        "audio_wav_path": "audio/voice_profiles_test_book/01_Bitera.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "speaker": "Bitera",
+          "ref_audio": "clone_voices/test_book_bitera.wav",
+          "sample_text": "Maddie, you could walk right past them—they’ll think you’re a stray. Give them something to fuss over while Kisten and I do the work. I want you to be charming,",
+          "generated_ref_text": "Maddie, you could walk right past them—they’ll think you’re a stray. Give them something to fuss over while Kisten and I do the work. I want you to be charming,",
+          "description": "A young [child or juvenile] female voice with bright, slightly elevated pitch, no accent, mischievous trickster archetype, playful and confident quality. Quick-paced cadence with sharp diction for emphasis on plans and execution. Clear, crystalline vocal texture with light weight to suggest agility and speed."
+        }
+      },
+      {
+        "audio_wav_path": "audio/voice_profiles_test_book/02_Father.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "speaker": "Father",
+          "ref_audio": "clone_voices/test_book_father.wav",
+          "sample_text": "Come here, kitty,",
+          "generated_ref_text": "Come here, kitty,",
+          "description": "A middle-aged male voice with warm, resonant mid-range timbre, no accent, gentle patriarch archetype, relaxed and amused emotional baseline quality. Steady, unhurried pacing with conversational warmth. Slight vocal weight to suggest comfort and presence without dominance."
+        }
+      },
+      {
+        "audio_wav_path": "audio/voice_profiles_test_book/03_Kisten.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "speaker": "Kisten",
+          "ref_audio": "clone_voices/test_book_kisten.wav",
+          "sample_text": "A mother, a father, and a very small child who appears to be mostly interested in grass. I am not. I was merely… assessing the situation. There are three of them,",
+          "generated_ref_text": "A mother, a father, and a very small child who appears to be mostly interested in grass. I am not. I was merely… assessing the situation. There are three of them,",
+          "description": "A young boy voice with warm mid-range pitch, no accent, playful hero archetype, confident and mischievous quality. Medium-paced cadence with quick bursts of energy when excited and steady calm during planning or stealth. Clear diction with slight playfulness in consonants to suggest feline agility."
+        }
+      },
+      {
+        "audio_wav_path": "audio/voice_profiles_test_book/04_Maddie.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "speaker": "Maddie",
+          "ref_audio": "clone_voices/test_book_maddie.wav",
+          "sample_text": "Don’t even think about it. You want me to be bait. Those humans are wide awake. And I get the strawberry. One slice, The strawberry,",
+          "generated_ref_text": "Don’t even think about it. You want me to be bait. Those humans are wide awake. And I get the strawberry. One slice, The strawberry,",
+          "description": "A teenaged girl voice with a soft, confident timbre and mid-range pitch, strong Southern American accent, playful tomboyish cat archetype, mischievous and self-assured quality. Moderate pace with rhythmic, conversational cadence that balances casual teasing tones with moments of strategic focus. Slightly sly vocal texture with warm resonance in the lower register."
+        }
+      },
+      {
+        "audio_wav_path": "audio/voice_profiles_test_book/05_Mother.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "speaker": "Mother",
+          "ref_audio": "clone_voices/test_book_mother.wav",
+          "sample_text": "Oh!",
+          "generated_ref_text": "Oh!",
+          "description": "A mid-forties female voice with warm, soft timbre and neutral pitch, no accent, gentle maternal character archetype. Calmly affectionate emotional baseline. Moderate to slow-paced cadence suitable for narration. Natural vocal resonance typical of a comfortable conversational speaker."
+        }
+      },
+      {
+        "audio_wav_path": "audio/voice_profiles_test_book/06_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "speaker": "NARRATOR",
+          "ref_audio": "clone_voices/test_book_narrator.wav",
+          "sample_text": "Bitera clutched the chunk of cake against her chest, Kisten right behind her, both of them tearing across the lawn toward the oak tree where Maddie was already waiting, impeccably groomed, as if she had simply been sitting there all afternoon.",
+          "generated_ref_text": "Bitera clutched the chunk of cake against her chest, Kisten right behind her, both of them tearing across the lawn toward the oak tree where Maddie was already waiting, impeccably groomed, as if she had simply been sitting there all afternoon.",
+          "description": "A middle-aged neutral voice with warm and resonant baritone timbre, light Southern American accent strength + Southern American, Elderly Sage archetype, grounded and reflective emotional/vibe quality. Moderate-paced cadence with thoughtful pauses between phrases. Rich vocal texture with deep chest resonance for gravitas in narration passages."
+        }
+      }
+    ]
+  }
+}

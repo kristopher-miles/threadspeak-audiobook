@@ -20,6 +20,7 @@ from runtime_layout import LAYOUT
 
 DEFAULT_PAUSE_MS = 500  # Pause between different speakers
 SAME_SPEAKER_PAUSE_MS = 250  # Shorter pause for same speaker continuing
+TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
 def sanitize_filename(name):
@@ -106,6 +107,7 @@ class TTSEngine:
         self._clone_prompt_cache = {}
         # LoRA clone prompt cache: adapter_path -> reusable voice_clone_prompt
         self._lora_prompt_cache = {}
+        self._e2e_qwen_sim_provider = None
 
     @property
     def mode(self):
@@ -116,6 +118,36 @@ class TTSEngine:
         if self._mode != "local":
             return None
         return self._resolve_local_backend()
+
+    @staticmethod
+    def _env_flag(name, default=False):
+        raw = os.getenv(name)
+        if raw is None:
+            return bool(default)
+        return str(raw).strip().lower() in TRUE_VALUES
+
+    def _maybe_init_e2e_qwen_sim_provider(self):
+        if self._e2e_qwen_sim_provider is not None:
+            return self._e2e_qwen_sim_provider
+        if not self._env_flag("THREADSPEAK_E2E_SIM_ENABLED", default=False):
+            return None
+        if self._mode != "local":
+            return None
+        if self._resolve_local_backend() != "qwen":
+            return None
+
+        fixture_path = (os.getenv("THREADSPEAK_E2E_QWEN_FIXTURE") or "").strip()
+        if not fixture_path:
+            return None
+
+        try:
+            from e2e_sim.qwen_local_sim import QwenLocalSimProvider
+
+            self._e2e_qwen_sim_provider = QwenLocalSimProvider(fixture_path)
+            print(f"E2E local Qwen simulator enabled from fixture: {fixture_path}")
+            return self._e2e_qwen_sim_provider
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize local Qwen E2E simulator: {e}") from e
 
     @staticmethod
     def _normalize_external_url(url):
@@ -576,6 +608,12 @@ class TTSEngine:
 
     def _init_local_custom(self):
         """Load Qwen3-TTS CustomVoice model on demand."""
+        sim_provider = self._maybe_init_e2e_qwen_sim_provider()
+        if sim_provider is not None:
+            if self._local_custom_model is None:
+                self._local_custom_model = sim_provider.get_model("custom_voice")
+            return self._local_custom_model
+
         if self._local_custom_model is not None:
             return self._local_custom_model
 
@@ -604,6 +642,12 @@ class TTSEngine:
 
     def _init_local_clone(self):
         """Load Qwen3-TTS Base model (for voice cloning) on demand."""
+        sim_provider = self._maybe_init_e2e_qwen_sim_provider()
+        if sim_provider is not None:
+            if self._local_clone_model is None:
+                self._local_clone_model = sim_provider.get_model("base")
+            return self._local_clone_model
+
         if self._local_clone_model is not None:
             return self._local_clone_model
 
@@ -632,6 +676,12 @@ class TTSEngine:
 
     def _init_local_design(self):
         """Load Qwen3-TTS VoiceDesign model on demand."""
+        sim_provider = self._maybe_init_e2e_qwen_sim_provider()
+        if sim_provider is not None:
+            if self._local_design_model is None:
+                self._local_design_model = sim_provider.get_model("voice_design")
+            return self._local_design_model
+
         if self._local_design_model is not None:
             return self._local_design_model
 
@@ -664,6 +714,13 @@ class TTSEngine:
         Caches the model; if a different adapter is requested the old one
         is unloaded first to free VRAM.
         """
+        sim_provider = self._maybe_init_e2e_qwen_sim_provider()
+        if sim_provider is not None:
+            if self._local_lora_model is None or self._lora_adapter_path != adapter_path:
+                self._local_lora_model = sim_provider.get_model("lora")
+                self._lora_adapter_path = adapter_path
+            return self._local_lora_model
+
         if self._local_lora_model is not None and self._lora_adapter_path == adapter_path:
             return self._local_lora_model
 

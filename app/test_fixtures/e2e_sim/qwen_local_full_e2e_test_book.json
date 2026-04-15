@@ -1,0 +1,1102 @@
+{
+  "strict": true,
+  "unordered_methods": [
+    "generate_voice_clone"
+  ],
+  "metadata": {
+    "purpose": "Combined Qwen fixture for full e2e replay (voice design + editor audio)",
+    "captured_at": "2026-04-15T08:22:22.673199+00:00",
+    "source_file": "app/test_fixtures/files/test_book.epub",
+    "component_fixtures": {
+      "voice_qwen": "app/test_fixtures/e2e_sim/qwen_local_voice_profiles_test_book.json",
+      "editor_qwen": "app/test_fixtures/e2e_sim/qwen_local_editor_audio_test_book.json",
+      "voice_manifest": "app/test_fixtures/e2e_sim/voice_profiles_test_book_manifest.json"
+    },
+    "counts": {
+      "generate_voice_design": 6,
+      "create_voice_clone_prompt": 0,
+      "generate_voice_clone": 72
+    }
+  },
+  "methods": {
+    "generate_voice_design": [
+      {
+        "audio_wav_path": "audio/voice_profiles_test_book/01_Bitera.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "speaker": "Bitera",
+          "ref_audio": "clone_voices/test_book_bitera.wav",
+          "sample_text": "Maddie, you could walk right past them—they’ll think you’re a stray. Give them something to fuss over while Kisten and I do the work. I want you to be charming,",
+          "generated_ref_text": "Maddie, you could walk right past them—they’ll think you’re a stray. Give them something to fuss over while Kisten and I do the work. I want you to be charming,",
+          "description": "A young [child or juvenile] female voice with bright, slightly elevated pitch, no accent, mischievous trickster archetype, playful and confident quality. Quick-paced cadence with sharp diction for emphasis on plans and execution. Clear, crystalline vocal texture with light weight to suggest agility and speed."
+        }
+      },
+      {
+        "audio_wav_path": "audio/voice_profiles_test_book/02_Father.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "speaker": "Father",
+          "ref_audio": "clone_voices/test_book_father.wav",
+          "sample_text": "Come here, kitty,",
+          "generated_ref_text": "Come here, kitty,",
+          "description": "A middle-aged male voice with warm, resonant mid-range timbre, no accent, gentle patriarch archetype, relaxed and amused emotional baseline quality. Steady, unhurried pacing with conversational warmth. Slight vocal weight to suggest comfort and presence without dominance."
+        }
+      },
+      {
+        "audio_wav_path": "audio/voice_profiles_test_book/03_Kisten.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "speaker": "Kisten",
+          "ref_audio": "clone_voices/test_book_kisten.wav",
+          "sample_text": "A mother, a father, and a very small child who appears to be mostly interested in grass. I am not. I was merely… assessing the situation. There are three of them,",
+          "generated_ref_text": "A mother, a father, and a very small child who appears to be mostly interested in grass. I am not. I was merely… assessing the situation. There are three of them,",
+          "description": "A young boy voice with warm mid-range pitch, no accent, playful hero archetype, confident and mischievous quality. Medium-paced cadence with quick bursts of energy when excited and steady calm during planning or stealth. Clear diction with slight playfulness in consonants to suggest feline agility."
+        }
+      },
+      {
+        "audio_wav_path": "audio/voice_profiles_test_book/04_Maddie.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "speaker": "Maddie",
+          "ref_audio": "clone_voices/test_book_maddie.wav",
+          "sample_text": "Don’t even think about it. You want me to be bait. Those humans are wide awake. And I get the strawberry. One slice, The strawberry,",
+          "generated_ref_text": "Don’t even think about it. You want me to be bait. Those humans are wide awake. And I get the strawberry. One slice, The strawberry,",
+          "description": "A teenaged girl voice with a soft, confident timbre and mid-range pitch, strong Southern American accent, playful tomboyish cat archetype, mischievous and self-assured quality. Moderate pace with rhythmic, conversational cadence that balances casual teasing tones with moments of strategic focus. Slightly sly vocal texture with warm resonance in the lower register."
+        }
+      },
+      {
+        "audio_wav_path": "audio/voice_profiles_test_book/05_Mother.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "speaker": "Mother",
+          "ref_audio": "clone_voices/test_book_mother.wav",
+          "sample_text": "Oh!",
+          "generated_ref_text": "Oh!",
+          "description": "A mid-forties female voice with warm, soft timbre and neutral pitch, no accent, gentle maternal character archetype. Calmly affectionate emotional baseline. Moderate to slow-paced cadence suitable for narration. Natural vocal resonance typical of a comfortable conversational speaker."
+        }
+      },
+      {
+        "audio_wav_path": "audio/voice_profiles_test_book/06_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "speaker": "NARRATOR",
+          "ref_audio": "clone_voices/test_book_narrator.wav",
+          "sample_text": "Bitera clutched the chunk of cake against her chest, Kisten right behind her, both of them tearing across the lawn toward the oak tree where Maddie was already waiting, impeccably groomed, as if she had simply been sitting there all afternoon.",
+          "generated_ref_text": "Bitera clutched the chunk of cake against her chest, Kisten right behind her, both of them tearing across the lawn toward the oak tree where Maddie was already waiting, impeccably groomed, as if she had simply been sitting there all afternoon.",
+          "description": "A middle-aged neutral voice with warm and resonant baritone timbre, light Southern American accent strength + Southern American, Elderly Sage archetype, grounded and reflective emotional/vibe quality. Moderate-paced cadence with thoughtful pauses between phrases. Rich vocal texture with deep chest resonance for gravitas in narration passages."
+        }
+      }
+    ],
+    "create_voice_clone_prompt": [],
+    "generate_voice_clone": [
+      {
+        "expect": {
+          "text": "The Great Cake Caper",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0000_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "702328dc65a24ae6aa17d90a2142fb5d",
+          "line_id": 0,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_702328dc65a24ae6aa17d90a2142fb5d_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "A Tale of Mice, Squirrels, and Questionable Decisions",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0001_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "f8ce37134bdc453d9e4c380bdde360bb",
+          "line_id": 1,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_f8ce37134bdc453d9e4c380bdde360bb_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "A Testing Story",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0002_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "a6505a076aeb4e9182d55e21c332b2c0",
+          "line_id": 2,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_a6505a076aeb4e9182d55e21c332b2c0_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Chapter One: A Very Good Idea",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0003_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "08b7256982fd4e9eaa2fb496932aff2d",
+          "line_id": 3,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_08b7256982fd4e9eaa2fb496932aff2d_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "The afternoon sun filtered through the oak leaves as Kisten flicked his tail and stared across the park lawn.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0004_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "9257c833421746ef9b03f6db95776026",
+          "line_id": 4,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_9257c833421746ef9b03f6db95776026_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "A family had spread a checkered blanket near the fountain, and right in the center of it sat the most magnificent cake he had ever seen—three layers, white frosting, dotted with strawberries.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0005_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "2c1a658f3c6d42f18f049312d7362d15",
+          "line_id": 5,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_2c1a658f3c6d42f18f049312d7362d15_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "You’re drooling,",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0006_Bitera.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "5a40a5cad23740f8bce97f707e15cc60",
+          "line_id": 6,
+          "speaker": "Bitera",
+          "source_audio_path": "voicelines/voiceline_5a40a5cad23740f8bce97f707e15cc60_bitera.wav"
+        }
+      },
+      {
+        "expect": {
+          "text": "said Bitera from beside him, her tiny pink nose twitching.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0007_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "18b3a2c6376e422aa53911b419c2eee2",
+          "line_id": 7,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_18b3a2c6376e422aa53911b419c2eee2_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Kisten snapped his mouth shut.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0008_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "08ea974c2372427e8f60526e2d27737a",
+          "line_id": 8,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_08ea974c2372427e8f60526e2d27737a_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "I am not. I was merely… assessing the situation.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0009_Kisten.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "64649c9576a84ba399decb38acb01e2a",
+          "line_id": 9,
+          "speaker": "Kisten",
+          "source_audio_path": "voicelines/voiceline_64649c9576a84ba399decb38acb01e2a_kisten.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "The situation is cake,",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0010_Bitera.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "287ea8a561d54569ab60a62f9ac1a35c",
+          "line_id": 10,
+          "speaker": "Bitera",
+          "source_audio_path": "voicelines/voiceline_287ea8a561d54569ab60a62f9ac1a35c_bitera.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Bitera said flatly.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0011_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "6b0d5d7bd81e480f85f31679b05db059",
+          "line_id": 11,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_6b0d5d7bd81e480f85f31679b05db059_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "A slow, velvet-smooth voice came from behind them.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0012_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "87c33550689a49d6a95292939ecb13e5",
+          "line_id": 12,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_87c33550689a49d6a95292939ecb13e5_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Don’t even think about it.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0013_Maddie.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "52bda45675ff447cbd7850568a6489be",
+          "line_id": 13,
+          "speaker": "Maddie",
+          "source_audio_path": "voicelines/voiceline_52bda45675ff447cbd7850568a6489be_maddie.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Maddie dropped from the low branch above, landing without a sound.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0014_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "70ab5048b3bc447f94afa10a9b0de216",
+          "line_id": 14,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_70ab5048b3bc447f94afa10a9b0de216_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "The tabby cat curled her tail around her paws and regarded them both with half-lidded amber eyes.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0015_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "aae8f75e584546c29fede4c880c2bb82",
+          "line_id": 15,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_aae8f75e584546c29fede4c880c2bb82_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Those humans are wide awake.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0016_Maddie.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "f86dc57bc0fb4421879ba4d7015113f6",
+          "line_id": 16,
+          "speaker": "Maddie",
+          "source_audio_path": "voicelines/voiceline_f86dc57bc0fb4421879ba4d7015113f6_maddie.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "There are three of them,",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0017_Kisten.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "c65aac2f66cd4e58abfa9ace1617aceb",
+          "line_id": 17,
+          "speaker": "Kisten",
+          "source_audio_path": "voicelines/voiceline_c65aac2f66cd4e58abfa9ace1617aceb_kisten.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Kisten said, counting quietly.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0018_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "25c43a54d95343489447a5515f2595b8",
+          "line_id": 18,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_25c43a54d95343489447a5515f2595b8_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "A mother, a father, and a very small child who appears to be mostly interested in grass.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0019_Kisten.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "3c3edb1fbf4743f4a5e9b5575b0bb142",
+          "line_id": 19,
+          "speaker": "Kisten",
+          "source_audio_path": "voicelines/voiceline_3c3edb1fbf4743f4a5e9b5575b0bb142_kisten.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "The child is a distraction,",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0020_Bitera.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "b3c00ab8dce14bd59198c304eee6b5b1",
+          "line_id": 20,
+          "speaker": "Bitera",
+          "source_audio_path": "voicelines/voiceline_b3c00ab8dce14bd59198c304eee6b5b1_bitera.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Bitera said, her dark eyes bright.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0021_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "f888d4e2fb6449e89e66d8321ddc3174",
+          "line_id": 21,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_f888d4e2fb6449e89e66d8321ddc3174_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Maddie, you could walk right past them—they’ll think you’re a stray.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0022_Bitera.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "d46695294e5849f393b058777d9b610a",
+          "line_id": 22,
+          "speaker": "Bitera",
+          "source_audio_path": "voicelines/voiceline_d46695294e5849f393b058777d9b610a_bitera.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Give them something to fuss over while Kisten and I do the work.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0023_Bitera.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "f5f01f5aabbe4c15b4a94a0c4f5b5c16",
+          "line_id": 23,
+          "speaker": "Bitera",
+          "source_audio_path": "voicelines/voiceline_f5f01f5aabbe4c15b4a94a0c4f5b5c16_bitera.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Maddie’s ear flicked.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0024_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "56b720a9b0cd447aa18dd18cfa0b19cd",
+          "line_id": 24,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_56b720a9b0cd447aa18dd18cfa0b19cd_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "You want me to be bait.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0025_Maddie.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "2c44287b4c2241d7a5b866f818162bfa",
+          "line_id": 25,
+          "speaker": "Maddie",
+          "source_audio_path": "voicelines/voiceline_2c44287b4c2241d7a5b866f818162bfa_maddie.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "I want you to be charming,",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0026_Bitera.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "b5a89dc53b7d4a158606069fab31c358",
+          "line_id": 26,
+          "speaker": "Bitera",
+          "source_audio_path": "voicelines/voiceline_b5a89dc53b7d4a158606069fab31c358_bitera.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Bitera corrected.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0027_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "3405813cb5df4ecd98e25057c383fe36",
+          "line_id": 27,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_3405813cb5df4ecd98e25057c383fe36_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "You’re good at that.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0028_Bitera.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "16f05894a1f341cc942f089d5b2deebc",
+          "line_id": 28,
+          "speaker": "Bitera",
+          "source_audio_path": "voicelines/voiceline_16f05894a1f341cc942f089d5b2deebc_bitera.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "There was a long pause. Kisten watched Maddie’s gaze drift back toward the cake.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0029_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "9d9bf41896d54771b0961d97737bb468",
+          "line_id": 29,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_9d9bf41896d54771b0961d97737bb468_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "He could tell the moment she made up her mind—her whiskers twitched just slightly.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0030_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "412d1ef11c1c4be1949ff08562c7845a",
+          "line_id": 30,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_412d1ef11c1c4be1949ff08562c7845a_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "One slice,",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0031_Maddie.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "d13c2a100ccc4618aa8c8e104357b42e",
+          "line_id": 31,
+          "speaker": "Maddie",
+          "source_audio_path": "voicelines/voiceline_d13c2a100ccc4618aa8c8e104357b42e_maddie.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Maddie said.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0032_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "7cc26f18f91b43f19a579f20720345f3",
+          "line_id": 32,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_7cc26f18f91b43f19a579f20720345f3_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "And I get the strawberry.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0033_Maddie.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "d9542a3428d740a0bc212bcca8b22d03",
+          "line_id": 33,
+          "speaker": "Maddie",
+          "source_audio_path": "voicelines/voiceline_d9542a3428d740a0bc212bcca8b22d03_maddie.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Kisten grinned.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0034_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "52b9e7b1cf3a466296948263b4be7b36",
+          "line_id": 34,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_52b9e7b1cf3a466296948263b4be7b36_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Deal.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0035_Kisten.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "8a402cfdf23442a7bdf99270b1513fcf",
+          "line_id": 35,
+          "speaker": "Kisten",
+          "source_audio_path": "voicelines/voiceline_8a402cfdf23442a7bdf99270b1513fcf_kisten.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Bitera was already gone, slipping through the grass like a gray ribbon.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0036_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "3d327a69d2b04be09057c1e7e001f01e",
+          "line_id": 36,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_3d327a69d2b04be09057c1e7e001f01e_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Kisten took a breath, checked the wind, and followed.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0037_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "480dd74387c142c59f5a7de21af2863d",
+          "line_id": 37,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_480dd74387c142c59f5a7de21af2863d_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Chapter Two: The Great Caper",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0038_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "ce94fe2b9a444fda8f4cefa6655cd5d7",
+          "line_id": 38,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_ce94fe2b9a444fda8f4cefa6655cd5d7_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "The plan, Kisten had to admit, was working almost too well.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0039_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "f03a5c8fcde548399fbe5db59db63eb3",
+          "line_id": 39,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_f03a5c8fcde548399fbe5db59db63eb3_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Maddie had sauntered up to the picnic blanket with the easy confidence of someone who owned the entire park.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0040_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "8c52d7c309224a16aa1311d067584776",
+          "line_id": 40,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_8c52d7c309224a16aa1311d067584776_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "The mother had said",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0041_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "15e2e370491a40adb4eaa4a978284513",
+          "line_id": 41,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_15e2e370491a40adb4eaa4a978284513_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Oh!",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0042_Mother.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "3ca7e6258a374c6599edbf302e1143a0",
+          "line_id": 42,
+          "speaker": "Mother",
+          "source_audio_path": "voicelines/voiceline_3ca7e6258a374c6599edbf302e1143a0_mother.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "and the father had said",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0043_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "5dec1578a1ca4e8a81cb715d65ec077d",
+          "line_id": 43,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_5dec1578a1ca4e8a81cb715d65ec077d_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Come here, kitty,",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0044_Father.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "0944d94eaf314f939bd3e39bf885c71b",
+          "line_id": 44,
+          "speaker": "Father",
+          "source_audio_path": "voicelines/voiceline_0944d94eaf314f939bd3e39bf885c71b_father.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "and the small child had shrieked with joy and lunged at Maddie’s tail.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0045_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "b820382318d540c590415625d1713622",
+          "line_id": 45,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_b820382318d540c590415625d1713622_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Maddie bore all of this with tremendous dignity, which Kisten found privately impressive.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0046_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "f7f4b6d3b110411d925d2aa6ecc8d376",
+          "line_id": 46,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_f7f4b6d3b110411d925d2aa6ecc8d376_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Now,",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0047_Bitera.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "3116cdc2005043c4ba978787bd49b7d4",
+          "line_id": 47,
+          "speaker": "Bitera",
+          "source_audio_path": "voicelines/voiceline_3116cdc2005043c4ba978787bd49b7d4_bitera.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Bitera whispered from beside him in the tall grass.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0048_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "99f370ec82044bf7b6a3f3a28303724c",
+          "line_id": 48,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_99f370ec82044bf7b6a3f3a28303724c_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "They moved fast.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0049_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "c99de21e64ef4780b8bfd1d4ce354c76",
+          "line_id": 49,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_c99de21e64ef4780b8bfd1d4ce354c76_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Bitera darted straight to the cake plate while Kisten circled wide, watching for danger.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0050_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "74ace2b26eb74bfe891cdc634a29b7cf",
+          "line_id": 50,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_74ace2b26eb74bfe891cdc634a29b7cf_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "The cake sat on a paper plate at the very edge of the blanket.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0051_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "a1fadc47f8454cfc8f111b9497c282b0",
+          "line_id": 51,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_a1fadc47f8454cfc8f111b9497c282b0_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Up close, it smelled of vanilla and sugar and everything wonderful in the world.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0052_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "09e05faeffd24f979b2dc6028e6165c2",
+          "line_id": 52,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_09e05faeffd24f979b2dc6028e6165c2_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Can you lift it?",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0053_Kisten.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "2fca38ac88ea4154961df2815632f105",
+          "line_id": 53,
+          "speaker": "Kisten",
+          "source_audio_path": "voicelines/voiceline_2fca38ac88ea4154961df2815632f105_kisten.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "he whispered.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0054_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "47002c191b294891a02e3a10ddc84110",
+          "line_id": 54,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_47002c191b294891a02e3a10ddc84110_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Half a slice,",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0055_Bitera.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "531bccee829942ccb39bf859d08ee010",
+          "line_id": 55,
+          "speaker": "Bitera",
+          "source_audio_path": "voicelines/voiceline_531bccee829942ccb39bf859d08ee010_bitera.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Bitera said, already working at the edge of the frosting with quick, precise paws.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0056_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "dac41337370340cdb81f06727d4149e9",
+          "line_id": 56,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_dac41337370340cdb81f06727d4149e9_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "More than enough.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0057_Bitera.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "169b2c0b73754c869afd27e27a1d11e7",
+          "line_id": 57,
+          "speaker": "Bitera",
+          "source_audio_path": "voicelines/voiceline_169b2c0b73754c869afd27e27a1d11e7_bitera.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "A shadow fell over them. Kisten froze.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0058_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "1f8eef5bcda749438e387664c1997faa",
+          "line_id": 58,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_1f8eef5bcda749438e387664c1997faa_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "He turned very slowly to find the small child standing three feet away, staring at him with enormous brown eyes and a fistful of grass.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0059_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "4b47a4ebe0294efbade60e6ccc7b8551",
+          "line_id": 59,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_4b47a4ebe0294efbade60e6ccc7b8551_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Nobody moved. A bee hummed past.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0060_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "4adc7ace64904be5a137d1913cba1554",
+          "line_id": 60,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_4adc7ace64904be5a137d1913cba1554_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "The child sat down heavily in the grass and went back to examining a pebble.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0061_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "4f8cbbc9a6cf4f899272e55b10f54b80",
+          "line_id": 61,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_4f8cbbc9a6cf4f899272e55b10f54b80_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Kisten let out a breath that felt like it had been stored since morning.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0062_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "0f01fc152e014f81809d9bacab325179",
+          "line_id": 62,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_0f01fc152e014f81809d9bacab325179_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Go,",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0063_Kisten.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "ea6f5f3f210642e7bca4a0a34431f720",
+          "line_id": 63,
+          "speaker": "Kisten",
+          "source_audio_path": "voicelines/voiceline_ea6f5f3f210642e7bca4a0a34431f720_kisten.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "he hissed.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0064_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "cb2808d1775647788b8a6ac9b6dcfa5c",
+          "line_id": 64,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_cb2808d1775647788b8a6ac9b6dcfa5c_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "They ran.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0065_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "d61307fc7bb540858e5fa1cf413779f2",
+          "line_id": 65,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_d61307fc7bb540858e5fa1cf413779f2_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Bitera clutched the chunk of cake against her chest, Kisten right behind her, both of them tearing across the lawn toward the oak tree where Maddie was already waiting, impeccably groomed, as if she had simply been sitting there all afternoon.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0066_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "5acd022e6543423a9e9c546d00fe5967",
+          "line_id": 66,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_5acd022e6543423a9e9c546d00fe5967_narrator.mp3 | voicelines/voiceline_5acd022e6543423a9e9c546d00fe5967_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "The strawberry,",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0067_Maddie.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "e7bab6fb50be4c539d53fa42c26aeb25",
+          "line_id": 67,
+          "speaker": "Maddie",
+          "source_audio_path": "voicelines/voiceline_e7bab6fb50be4c539d53fa42c26aeb25_maddie.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "she said, extending one paw.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0068_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "a1178670cfaf4333b748306229ff4c91",
+          "line_id": 68,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_a1178670cfaf4333b748306229ff4c91_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "Bitera handed it over without argument.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0069_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "ebb913fdde0c4231abb447adc051f668",
+          "line_id": 69,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_ebb913fdde0c4231abb447adc051f668_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "The three of them ate together in the shade, and Kisten decided it was,",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0070_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "9d90fe136ebd422d90c62fbea4ca80a3",
+          "line_id": 70,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_9d90fe136ebd422d90c62fbea4ca80a3_narrator.mp3"
+        }
+      },
+      {
+        "expect": {
+          "text": "without question, the best cake he had ever tasted.",
+          "has_prompt": true
+        },
+        "audio_wav_path": "audio/editor_audio_test_book/0071_NARRATOR.wav",
+        "sample_rate": 24000,
+        "metadata": {
+          "uid": "f92bfa2a6fc64a5ea4e1173d373b3772",
+          "line_id": 71,
+          "speaker": "NARRATOR",
+          "source_audio_path": "voicelines/voiceline_f92bfa2a6fc64a5ea4e1173d373b3772_narrator.mp3"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,282 @@
+{
+  "strict": true,
+  "metadata": {
+    "purpose": "Captured LM Studio voice suggestions for reusable voice profiles",
+    "captured_at": "2026-04-15T07:19:17.820437+00:00",
+    "source_file": "app/test_fixtures/files/test_book.epub",
+    "model_name": "qwen/qwen3.5-9b",
+    "speaker_count": 6,
+    "speakers": [
+      "Bitera",
+      "Father",
+      "Kisten",
+      "Maddie",
+      "Mother",
+      "NARRATOR"
+    ]
+  },
+  "routes": {
+    "GET /api/v1/models": [
+      {
+        "response": {
+          "models": [
+            {
+              "key": "qwen/qwen3.5-9b",
+              "display_name": "qwen/qwen3.5-9b",
+              "loaded_instances": [
+                {
+                  "id": "qwen/qwen3.5-9b"
+                }
+              ],
+              "capabilities": {
+                "trained_for_tool_use": true
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "POST /v1/chat/completions": [
+      {
+        "expect": {
+          "model": "qwen/qwen3.5-9b",
+          "tool_choice": "required"
+        },
+        "response": {
+          "id": "chatcmpl-voice-profile-1",
+          "object": "chat.completion",
+          "created": 1776237557,
+          "model": "qwen/qwen3.5-9b",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                  {
+                    "id": "call-voice-profile-1",
+                    "type": "function",
+                    "function": {
+                      "name": "submit_voice_description",
+                      "arguments": "{\"voice\": \"A young [child or juvenile] female voice with bright, slightly elevated pitch, no accent, mischievous trickster archetype, playful and confident quality. Quick-paced cadence with sharp diction for emphasis on plans and execution. Clear, crystalline vocal texture with light weight to suggest agility and speed.\"}"
+                    }
+                  }
+                ]
+              },
+              "finish_reason": "tool_calls"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 24,
+            "total_tokens": 124
+          }
+        },
+        "metadata": {
+          "speaker": "Bitera"
+        }
+      },
+      {
+        "expect": {
+          "model": "qwen/qwen3.5-9b",
+          "tool_choice": "required"
+        },
+        "response": {
+          "id": "chatcmpl-voice-profile-2",
+          "object": "chat.completion",
+          "created": 1776237557,
+          "model": "qwen/qwen3.5-9b",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                  {
+                    "id": "call-voice-profile-2",
+                    "type": "function",
+                    "function": {
+                      "name": "submit_voice_description",
+                      "arguments": "{\"voice\": \"A middle-aged male voice with warm, resonant mid-range timbre, no accent, gentle patriarch archetype, relaxed and amused emotional baseline quality. Steady, unhurried pacing with conversational warmth. Slight vocal weight to suggest comfort and presence without dominance.\"}"
+                    }
+                  }
+                ]
+              },
+              "finish_reason": "tool_calls"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 24,
+            "total_tokens": 124
+          }
+        },
+        "metadata": {
+          "speaker": "Father"
+        }
+      },
+      {
+        "expect": {
+          "model": "qwen/qwen3.5-9b",
+          "tool_choice": "required"
+        },
+        "response": {
+          "id": "chatcmpl-voice-profile-3",
+          "object": "chat.completion",
+          "created": 1776237557,
+          "model": "qwen/qwen3.5-9b",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                  {
+                    "id": "call-voice-profile-3",
+                    "type": "function",
+                    "function": {
+                      "name": "submit_voice_description",
+                      "arguments": "{\"voice\": \"A young boy voice with warm mid-range pitch, no accent, playful hero archetype, confident and mischievous quality. Medium-paced cadence with quick bursts of energy when excited and steady calm during planning or stealth. Clear diction with slight playfulness in consonants to suggest feline agility.\"}"
+                    }
+                  }
+                ]
+              },
+              "finish_reason": "tool_calls"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 24,
+            "total_tokens": 124
+          }
+        },
+        "metadata": {
+          "speaker": "Kisten"
+        }
+      },
+      {
+        "expect": {
+          "model": "qwen/qwen3.5-9b",
+          "tool_choice": "required"
+        },
+        "response": {
+          "id": "chatcmpl-voice-profile-4",
+          "object": "chat.completion",
+          "created": 1776237557,
+          "model": "qwen/qwen3.5-9b",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                  {
+                    "id": "call-voice-profile-4",
+                    "type": "function",
+                    "function": {
+                      "name": "submit_voice_description",
+                      "arguments": "{\"voice\": \"A teenaged girl voice with a soft, confident timbre and mid-range pitch, strong Southern American accent, playful tomboyish cat archetype, mischievous and self-assured quality. Moderate pace with rhythmic, conversational cadence that balances casual teasing tones with moments of strategic focus. Slightly sly vocal texture with warm resonance in the lower register.\"}"
+                    }
+                  }
+                ]
+              },
+              "finish_reason": "tool_calls"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 24,
+            "total_tokens": 124
+          }
+        },
+        "metadata": {
+          "speaker": "Maddie"
+        }
+      },
+      {
+        "expect": {
+          "model": "qwen/qwen3.5-9b",
+          "tool_choice": "required"
+        },
+        "response": {
+          "id": "chatcmpl-voice-profile-5",
+          "object": "chat.completion",
+          "created": 1776237557,
+          "model": "qwen/qwen3.5-9b",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                  {
+                    "id": "call-voice-profile-5",
+                    "type": "function",
+                    "function": {
+                      "name": "submit_voice_description",
+                      "arguments": "{\"voice\": \"A mid-forties female voice with warm, soft timbre and neutral pitch, no accent, gentle maternal character archetype. Calmly affectionate emotional baseline. Moderate to slow-paced cadence suitable for narration. Natural vocal resonance typical of a comfortable conversational speaker.\"}"
+                    }
+                  }
+                ]
+              },
+              "finish_reason": "tool_calls"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 24,
+            "total_tokens": 124
+          }
+        },
+        "metadata": {
+          "speaker": "Mother"
+        }
+      },
+      {
+        "expect": {
+          "model": "qwen/qwen3.5-9b",
+          "tool_choice": "required"
+        },
+        "response": {
+          "id": "chatcmpl-voice-profile-6",
+          "object": "chat.completion",
+          "created": 1776237557,
+          "model": "qwen/qwen3.5-9b",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                  {
+                    "id": "call-voice-profile-6",
+                    "type": "function",
+                    "function": {
+                      "name": "submit_voice_description",
+                      "arguments": "{\"voice\": \"A middle-aged neutral voice with warm and resonant baritone timbre, light Southern American accent strength + Southern American, Elderly Sage archetype, grounded and reflective emotional/vibe quality. Moderate-paced cadence with thoughtful pauses between phrases. Rich vocal texture with deep chest resonance for gravitas in narration passages.\"}"
+                    }
+                  }
+                ]
+              },
+              "finish_reason": "tool_calls"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 24,
+            "total_tokens": 124
+          }
+        },
+        "metadata": {
+          "speaker": "NARRATOR"
+        }
+      }
+    ]
+  }
+}

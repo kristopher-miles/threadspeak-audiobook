@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "captured_at": "2026-04-15T08:22:22.674785+00:00",
+  "source_file": "app/test_fixtures/files/test_book.epub",
+  "phases": {
+    "generate_script": {
+      "lm_fixture": "app/test_fixtures/e2e_sim/lmstudio_generate_script_test_book.json",
+      "model_name": "qwen/qwen3.5-9b"
+    },
+    "voice_profiles": {
+      "lm_fixture": "app/test_fixtures/e2e_sim/lmstudio_voice_profiles_test_book.json",
+      "model_name": "qwen/qwen3.5-9b"
+    },
+    "editor_audio": {
+      "qwen_fixture": "app/test_fixtures/e2e_sim/qwen_local_full_e2e_test_book.json"
+    }
+  },
+  "component_fixtures": {
+    "script_lm": "app/test_fixtures/e2e_sim/lmstudio_generate_script_test_book.json",
+    "voice_lm": "app/test_fixtures/e2e_sim/lmstudio_voice_profiles_test_book.json",
+    "voice_qwen": "app/test_fixtures/e2e_sim/qwen_local_voice_profiles_test_book.json",
+    "editor_qwen": "app/test_fixtures/e2e_sim/qwen_local_editor_audio_test_book.json",
+    "voice_manifest": "app/test_fixtures/e2e_sim/voice_profiles_test_book_manifest.json"
+  }
+}
