@@ -2365,6 +2365,7 @@ def _clear_project_derived_state(preserve_input_file=True, preserve_reusable_voi
             os.remove(path)
 
     _clear_directory_contents(VOICELINES_DIR)
+    _clear_directory_contents(os.path.join(LAYOUT.exports_dir, "_wip"))
     if not preserve_reusable_voices:
         _clear_directory_contents(DESIGNED_VOICES_DIR)
         _clear_directory_contents(CLONE_VOICES_DIR)

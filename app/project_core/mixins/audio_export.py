@@ -24,6 +24,7 @@ import copy
 import tempfile
 import uuid
 import hashlib
+from contextlib import contextmanager
 from types import SimpleNamespace
 from collections import Counter, defaultdict
 from difflib import SequenceMatcher
@@ -56,6 +57,8 @@ def _make_runtime_temp_dir(project_manager, prefix, *, run_id=None):
 
 class ProjectAudioExportMixin:
         """Build, normalize, and export merged audiobook deliverables."""
+        _EXPORT_PIPELINE_VERSION = "2026-04-16-resumable-v1"
+
         @staticmethod
         def _escape_concat_path(path):
             return path.replace("\\", "\\\\").replace("'", r"'\''")
@@ -63,6 +66,313 @@ class ProjectAudioExportMixin:
         @classmethod
         def _write_concat_line(cls, handle, path):
             handle.write(f"file '{cls._escape_concat_path(path)}'\n")
+
+        def _export_wip_root_dir(self):
+            path = os.path.join(self.exports_dir, "_wip")
+            os.makedirs(path, exist_ok=True)
+            return path
+
+        @staticmethod
+        def _stable_hash(payload):
+            serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            return hashlib.sha1(serialized.encode("utf-8")).hexdigest()
+
+        @staticmethod
+        def _export_config_payload(export_config):
+            if export_config is None:
+                return {}
+            if isinstance(export_config, dict):
+                return copy.deepcopy(export_config)
+            if hasattr(export_config, "model_dump"):
+                try:
+                    return copy.deepcopy(export_config.model_dump())
+                except Exception:
+                    pass
+            if hasattr(export_config, "__dict__"):
+                payload = {}
+                for key, value in vars(export_config).items():
+                    if str(key).startswith("_"):
+                        continue
+                    if callable(value):
+                        continue
+                    payload[str(key)] = value
+                return copy.deepcopy(payload)
+            return {"value": str(export_config)}
+
+        def _export_source_fingerprint(self):
+            chunks = self.load_chunks()
+            signature_rows = []
+            for chunk in chunks:
+                if not isinstance(chunk, dict):
+                    continue
+                kind = str(chunk.get("type") or "audio")
+                uid = str(chunk.get("uid") or "")
+                status = str(chunk.get("status") or "")
+                chapter = str(chunk.get("chapter") or "")
+                speaker = str(chunk.get("speaker") or "")
+                paragraph_id = str(chunk.get("paragraph_id") or "")
+                if kind == "silence":
+                    signature_rows.append({
+                        "kind": "silence",
+                        "uid": uid,
+                        "duration_s": float(chunk.get("silence_duration_s") or 0.0),
+                        "chapter": chapter,
+                    })
+                    continue
+                audio_path = str(chunk.get("audio_path") or "").strip()
+                full_path = os.path.join(self.root_dir, audio_path) if audio_path else ""
+                stat_payload = {"exists": False, "size": 0, "mtime_ns": 0}
+                if full_path and os.path.exists(full_path):
+                    try:
+                        stat = os.stat(full_path)
+                        stat_payload = {
+                            "exists": True,
+                            "size": int(stat.st_size),
+                            "mtime_ns": int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))),
+                        }
+                    except OSError:
+                        pass
+                signature_rows.append({
+                    "kind": "audio",
+                    "uid": uid,
+                    "status": status,
+                    "chapter": chapter,
+                    "speaker": speaker,
+                    "paragraph_id": paragraph_id,
+                    "audio_path": audio_path,
+                    "audio_stat": stat_payload,
+                })
+            return self._stable_hash(signature_rows)
+
+        def _build_export_job_spec(
+            self,
+            *,
+            mode,
+            export_config=None,
+            chapter=None,
+            metadata=None,
+            per_chunk_chapters=False,
+            max_part_seconds=None,
+        ):
+            resolved_export = self._resolve_export_normalization_config(export_config)
+            payload = {
+                "pipeline_version": self._EXPORT_PIPELINE_VERSION,
+                "mode": str(mode or "").strip(),
+                "chapter": str(chapter or "").strip(),
+                "per_chunk_chapters": bool(per_chunk_chapters),
+                "max_part_seconds": float(max_part_seconds) if max_part_seconds is not None else None,
+                "metadata": copy.deepcopy(metadata) if isinstance(metadata, dict) else {},
+                "export_config": self._export_config_payload(resolved_export),
+                "source_fingerprint": self._export_source_fingerprint(),
+            }
+            fingerprint = self._stable_hash(payload)
+            payload["fingerprint"] = fingerprint
+            payload["created_at"] = time.time()
+            return payload, resolved_export
+
+        def _prepare_export_workspace(self, spec_payload):
+            workspace_dir = os.path.join(self._export_wip_root_dir(), spec_payload["fingerprint"])
+            os.makedirs(workspace_dir, exist_ok=True)
+            spec_path = os.path.join(workspace_dir, "spec.json")
+            manifest_path = os.path.join(workspace_dir, "stage_manifest.json")
+
+            if os.path.exists(spec_path):
+                try:
+                    with open(spec_path, "r", encoding="utf-8") as handle:
+                        existing = json.load(handle)
+                except (OSError, ValueError, json.JSONDecodeError):
+                    existing = None
+                if isinstance(existing, dict) and existing.get("fingerprint") == spec_payload.get("fingerprint"):
+                    spec_payload = existing
+
+            self._atomic_json_write(spec_payload, spec_path)
+
+            if os.path.exists(manifest_path):
+                try:
+                    with open(manifest_path, "r", encoding="utf-8") as handle:
+                        manifest = json.load(handle)
+                except (OSError, ValueError, json.JSONDecodeError):
+                    manifest = {}
+            else:
+                manifest = {}
+
+            manifest.setdefault("pipeline_version", self._EXPORT_PIPELINE_VERSION)
+            manifest.setdefault("fingerprint", spec_payload["fingerprint"])
+            manifest.setdefault("created_at", time.time())
+            manifest.setdefault("stages", {})
+            manifest["updated_at"] = time.time()
+            self._atomic_json_write(manifest, manifest_path)
+
+            return {
+                "dir": workspace_dir,
+                "spec_path": spec_path,
+                "manifest_path": manifest_path,
+                "spec": spec_payload,
+            }
+
+        @staticmethod
+        def _read_stage_manifest(manifest_path):
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+            except (OSError, ValueError, json.JSONDecodeError):
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            data.setdefault("stages", {})
+            return data
+
+        def _write_stage_manifest(self, manifest_path, manifest):
+            manifest["updated_at"] = time.time()
+            self._atomic_json_write(manifest, manifest_path)
+
+        def _validate_cached_artifact(self, artifact):
+            path = str((artifact or {}).get("path") or "").strip()
+            kind = str((artifact or {}).get("kind") or "file").strip().lower()
+            if not path or not os.path.exists(path):
+                return False
+            try:
+                if os.path.getsize(path) <= 0:
+                    return False
+            except OSError:
+                return False
+            if kind == "audio":
+                summary = self._ffprobe_audio_summary(path)
+                if not summary.get("ok"):
+                    return False
+                try:
+                    duration = float(summary.get("duration") or 0.0)
+                except (TypeError, ValueError):
+                    duration = 0.0
+                return duration > 0.0 and bool(summary.get("codec"))
+            if kind == "zip":
+                try:
+                    with zipfile.ZipFile(path, "r") as handle:
+                        return handle.testzip() is None
+                except Exception:
+                    return False
+            if kind == "json":
+                try:
+                    with open(path, "r", encoding="utf-8") as handle:
+                        json.load(handle)
+                    return True
+                except (OSError, ValueError, json.JSONDecodeError):
+                    return False
+            return True
+
+        def _can_reuse_stage(self, stage_record, inputs_hash):
+            if not isinstance(stage_record, dict):
+                return False
+            if stage_record.get("status") != "complete":
+                return False
+            if str(stage_record.get("inputs_hash") or "") != str(inputs_hash or ""):
+                return False
+            outputs = stage_record.get("outputs") or []
+            if not isinstance(outputs, list) or not outputs:
+                return False
+            for artifact in outputs:
+                if not self._validate_cached_artifact(artifact):
+                    return False
+            return True
+
+        def _run_export_stage(
+            self,
+            workspace,
+            stage_name,
+            *,
+            inputs_payload,
+            outputs,
+            stage_builder,
+            log_callback=None,
+        ):
+            manifest_path = workspace["manifest_path"]
+            manifest = self._read_stage_manifest(manifest_path)
+            stages = manifest.setdefault("stages", {})
+            stage_record = stages.get(stage_name)
+            inputs_hash = self._stable_hash(inputs_payload)
+
+            if self._can_reuse_stage(stage_record, inputs_hash):
+                if log_callback:
+                    log_callback(f"Reusing cached stage '{stage_name}'.")
+                return True, True
+
+            stages[stage_name] = {
+                "status": "running",
+                "inputs_hash": inputs_hash,
+                "started_at": time.time(),
+                "outputs": outputs,
+            }
+            self._write_stage_manifest(manifest_path, manifest)
+
+            try:
+                stage_builder()
+                failed_output = None
+                for artifact in outputs:
+                    if not self._validate_cached_artifact(artifact):
+                        failed_output = str(artifact.get("path") or "")
+                        break
+                if failed_output:
+                    raise RuntimeError(f"Stage '{stage_name}' produced invalid artifact: {failed_output}")
+                stages[stage_name] = {
+                    "status": "complete",
+                    "inputs_hash": inputs_hash,
+                    "started_at": stages[stage_name].get("started_at"),
+                    "completed_at": time.time(),
+                    "outputs": outputs,
+                }
+                self._write_stage_manifest(manifest_path, manifest)
+                return True, False
+            except Exception as exc:
+                stages[stage_name] = {
+                    "status": "failed",
+                    "inputs_hash": inputs_hash,
+                    "started_at": stages[stage_name].get("started_at"),
+                    "failed_at": time.time(),
+                    "error": str(exc),
+                    "outputs": outputs,
+                }
+                self._write_stage_manifest(manifest_path, manifest)
+                raise
+
+        @contextmanager
+        def _export_workspace_lock(self, workspace_dir):
+            lock_path = os.path.join(workspace_dir, ".lock")
+            now = time.time()
+            stale_after_seconds = 6 * 60 * 60
+            if os.path.exists(lock_path):
+                stale = False
+                try:
+                    with open(lock_path, "r", encoding="utf-8") as handle:
+                        payload = json.load(handle)
+                    locked_at = float(payload.get("locked_at") or 0.0)
+                    stale = (now - locked_at) > stale_after_seconds
+                except Exception:
+                    stale = True
+                if stale:
+                    try:
+                        os.remove(lock_path)
+                    except OSError:
+                        pass
+
+            fd = None
+            try:
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                payload = {"pid": os.getpid(), "locked_at": now}
+                os.write(fd, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+                yield
+            except FileExistsError as exc:
+                raise RuntimeError("Export workspace is currently in use by another process.") from exc
+            finally:
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                try:
+                    if os.path.exists(lock_path):
+                        os.remove(lock_path)
+                except OSError:
+                    pass
 
         def _resolve_trim_config(self, export_config=None):
             cfg = export_config or self._resolve_export_normalization_config(None)
@@ -617,8 +927,11 @@ class ProjectAudioExportMixin:
                 path,
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-            if result.returncode != 0:
-                err = (result.stderr or result.stdout or "").strip()
+            returncode = int(getattr(result, "returncode", 1) or 0)
+            stdout_text = getattr(result, "stdout", "") or ""
+            stderr_text = getattr(result, "stderr", "") or ""
+            if returncode != 0:
+                err = (stderr_text or stdout_text or "").strip()
                 try:
                     segment = AudioSegment.from_file(path)
                     ext = os.path.splitext(path)[1].lstrip(".").lower()
@@ -635,9 +948,9 @@ class ProjectAudioExportMixin:
                         "size": str(os.path.getsize(path)) if os.path.exists(path) else None,
                     }
                 except Exception:
-                    return {"ok": False, "error": err[-500:] if err else f"ffprobe exit {result.returncode}"}
+                    return {"ok": False, "error": err[-500:] if err else f"ffprobe exit {returncode}"}
             try:
-                payload = json.loads(result.stdout or "{}")
+                payload = json.loads(stdout_text or "{}")
             except json.JSONDecodeError:
                 return {"ok": False, "error": "ffprobe returned invalid JSON"}
 
@@ -1094,540 +1407,634 @@ class ProjectAudioExportMixin:
             merge_started_at = time.time()
             output_filename = "cloned_audiobook.mp3"
             output_path = os.path.join(self.exports_dir, output_filename)
-            temp_dir = _make_runtime_temp_dir(self, "merge_audio_")
-            timeline = self._collect_merge_timeline(
-                progress_callback=progress_callback,
-                merge_started_at=merge_started_at,
+            spec, selected_export = self._build_export_job_spec(
+                mode="merge_audio",
                 export_config=export_config,
-                log_callback=log_callback,
-                temp_dir=temp_dir,
+                chapter=chapter,
             )
-
-            if chapter:
-                chapter = chapter.strip()
-                timeline = [
-                    item for item in timeline
-                    if item.get("is_silence_block") or
-                       (item.get("chunk") or {}).get("chapter", "").strip() == chapter
-                ]
-
-            if not timeline:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                return False, "No audio segments found"
-
-            chapter_groups = self._group_timeline_by_chapter(timeline)
-            concat_path = os.path.join(temp_dir, "concat.txt")
+            workspace = self._prepare_export_workspace(spec)
+            workspace_dir = workspace["dir"]
+            timeline_path = os.path.join(workspace_dir, "timeline.json")
+            concat_path = os.path.join(workspace_dir, "concat.txt")
+            assemble_meta_path = os.path.join(workspace_dir, "assemble_meta.json")
+            raw_output_path = os.path.join(workspace_dir, "merged_raw.mp3")
+            normalized_output_path = os.path.join(workspace_dir, "merged_final.mp3")
 
             try:
-                first_audio_path = next(
-                    (item["full_path"] for item in timeline if not item.get("is_silence_block")), None
-                )
-                silence_assets = self._create_silence_assets(
-                    temp_dir,
-                    export_config,
-                    reference_audio_path=first_audio_path,
-                )
-
-                # Generate silence block WAVs now that reference audio format is known
-                _write_silence = silence_assets["_write"]
-                for item in timeline:
-                    if item.get("is_silence_block") and item["full_path"] is None:
-                        wav_path = os.path.join(temp_dir, f"silence_block_{item['chunk']['uid']}.wav")
-                        _write_silence(wav_path, item["silence_duration_ms"])
-                        item["full_path"] = wav_path
-                        item["file_size_bytes"] = os.path.getsize(wav_path)
-
-                estimated_size_bytes = 0
-                previous_item = None
-                total_same = 0
-                total_diff = 0
-                total_para = 0
-                total_chapter_end = 0
-
-                with open(concat_path, "w", encoding="utf-8") as concat_file:
-                    for chapter_index, (chapter_label, chapter_items) in enumerate(chapter_groups, start=1):
-                        if previous_item is not None and chapter_items:
-                            first_item = chapter_items[0]
-                            if not previous_item.get("is_silence_block") and not first_item.get("is_silence_block"):
-                                pause_path, pause_size = self._pick_silence(
-                                    previous_item, first_item, silence_assets, is_chapter_boundary=True
+                with self._export_workspace_lock(workspace_dir):
+                    self._run_export_stage(
+                        workspace,
+                        "timeline",
+                        inputs_payload={
+                            "mode": "merge_audio",
+                            "chapter": str(chapter or "").strip(),
+                            "source_fingerprint": spec["source_fingerprint"],
+                            "trim_config": self._resolve_trim_config(selected_export),
+                        },
+                        outputs=[{"path": timeline_path, "kind": "json"}],
+                        stage_builder=lambda: self._atomic_json_write(
+                            [
+                                item
+                                for item in self._collect_merge_timeline(
+                                    progress_callback=progress_callback,
+                                    merge_started_at=merge_started_at,
+                                    export_config=selected_export,
+                                    log_callback=log_callback,
                                 )
-                                self._write_concat_line(concat_file, pause_path)
-                                estimated_size_bytes += pause_size
-                                total_chapter_end += 1
-
-                        chapter_same = 0
-                        chapter_diff = 0
-                        chapter_para = 0
-                        prev_item_in_chapter = None
-                        for item in chapter_items:
-                            if prev_item_in_chapter is not None:
-                                if not item.get("is_silence_block") and not prev_item_in_chapter.get("is_silence_block"):
-                                    pause_path, pause_size = self._pick_silence(prev_item_in_chapter, item, silence_assets)
-                                    self._write_concat_line(concat_file, pause_path)
-                                    estimated_size_bytes += pause_size
-                                    # Tally silence type for diagnostics
-                                    prev_pid = prev_item_in_chapter["chunk"].get("paragraph_id")
-                                    curr_pid = item["chunk"].get("paragraph_id")
-                                    if prev_pid and curr_pid and prev_pid != curr_pid:
-                                        chapter_para += 1
-                                    elif prev_item_in_chapter["chunk"].get("speaker") == item["chunk"].get("speaker"):
-                                        chapter_same += 1
-                                    else:
-                                        chapter_diff += 1
-                            self._write_concat_line(concat_file, item["full_path"])
-                            estimated_size_bytes += item["file_size_bytes"]
-                            prev_item_in_chapter = item
-
-                        previous_item = prev_item_in_chapter if prev_item_in_chapter is not None else previous_item
-                        total_same += chapter_same
-                        total_diff += chapter_diff
-                        total_para += chapter_para
-                        if log_callback:
-                            log_callback(
-                                f"  Chapter '{chapter_label}': {chapter_same} same-speaker, "
-                                f"{chapter_diff} speaker-change, {chapter_para} paragraph silences"
-                            )
-                        self._emit_merge_progress(
-                            progress_callback,
-                            merge_started_at,
-                            stage="assembling",
-                            chapter_index=chapter_index,
-                            total_chapters=len(chapter_groups),
-                            chapter_label=chapter_label,
-                            estimated_size_bytes=estimated_size_bytes,
-                            output_path=output_path,
-                        )
-
-                if log_callback:
-                    log_callback(
-                        f"Export totals: {total_chapter_end} chapter-end, {total_same} same-speaker, "
-                        f"{total_diff} speaker-change, {total_para} paragraph silences"
+                                if (
+                                    not str(chapter or "").strip()
+                                    or item.get("is_silence_block")
+                                    or str((item.get("chunk") or {}).get("chapter") or "").strip() == str(chapter).strip()
+                                )
+                            ],
+                            timeline_path,
+                        ),
+                        log_callback=log_callback,
                     )
 
-                self._emit_merge_progress(
-                    progress_callback,
-                    merge_started_at,
-                    stage="exporting",
-                    chapter_index=len(chapter_groups),
-                    total_chapters=len(chapter_groups),
-                    chapter_label=chapter_groups[-1][0],
-                    estimated_size_bytes=estimated_size_bytes,
-                    output_path=output_path,
-                )
+                    with open(timeline_path, "r", encoding="utf-8") as handle:
+                        timeline = json.load(handle)
+                    if not timeline:
+                        return False, "No audio segments found"
+                    chapter_groups = self._group_timeline_by_chapter(timeline)
 
-                success, export_result = self._export_concat_mp3(
-                    concat_path,
-                    output_path,
-                    progress_tick=lambda: self._emit_merge_progress(
+                    def _build_concat():
+                        silence_dir = os.path.join(workspace_dir, "silence_assets")
+                        os.makedirs(silence_dir, exist_ok=True)
+                        first_audio_path = next(
+                            (item["full_path"] for item in timeline if not item.get("is_silence_block")),
+                            None,
+                        )
+                        silence_assets = self._create_silence_assets(
+                            silence_dir,
+                            selected_export,
+                            reference_audio_path=first_audio_path,
+                        )
+                        _write_silence = silence_assets["_write"]
+
+                        for item in timeline:
+                            if item.get("is_silence_block") and not item.get("full_path"):
+                                uid = str((item.get("chunk") or {}).get("uid") or uuid.uuid4().hex)
+                                wav_path = os.path.join(silence_dir, f"silence_block_{uid}.wav")
+                                _write_silence(wav_path, int(item.get("silence_duration_ms") or 0))
+                                item["full_path"] = wav_path
+                                item["file_size_bytes"] = os.path.getsize(wav_path)
+
+                        estimated_size_bytes = 0
+                        previous_item = None
+                        with open(concat_path, "w", encoding="utf-8") as concat_file:
+                            for chapter_index, (chapter_label, chapter_items) in enumerate(chapter_groups, start=1):
+                                if previous_item is not None and chapter_items:
+                                    first_item = chapter_items[0]
+                                    if not previous_item.get("is_silence_block") and not first_item.get("is_silence_block"):
+                                        pause_path, pause_size = self._pick_silence(
+                                            previous_item,
+                                            first_item,
+                                            silence_assets,
+                                            is_chapter_boundary=True,
+                                        )
+                                        self._write_concat_line(concat_file, pause_path)
+                                        estimated_size_bytes += pause_size
+                                prev_item_in_chapter = None
+                                for item in chapter_items:
+                                    if prev_item_in_chapter is not None:
+                                        if not item.get("is_silence_block") and not prev_item_in_chapter.get("is_silence_block"):
+                                            pause_path, pause_size = self._pick_silence(prev_item_in_chapter, item, silence_assets)
+                                            self._write_concat_line(concat_file, pause_path)
+                                            estimated_size_bytes += pause_size
+                                    self._write_concat_line(concat_file, item["full_path"])
+                                    estimated_size_bytes += int(item.get("file_size_bytes") or 0)
+                                    prev_item_in_chapter = item
+                                previous_item = prev_item_in_chapter if prev_item_in_chapter is not None else previous_item
+                                self._emit_merge_progress(
+                                    progress_callback,
+                                    merge_started_at,
+                                    stage="assembling",
+                                    chapter_index=chapter_index,
+                                    total_chapters=len(chapter_groups),
+                                    chapter_label=chapter_label,
+                                    estimated_size_bytes=estimated_size_bytes,
+                                    output_path=raw_output_path,
+                                )
+
+                        self._atomic_json_write(
+                            {
+                                "estimated_size_bytes": int(estimated_size_bytes),
+                                "chapter_groups": [label for label, _ in chapter_groups],
+                                "chapter_count": len(chapter_groups),
+                            },
+                            assemble_meta_path,
+                        )
+                        self._atomic_json_write(timeline, timeline_path)
+
+                    self._run_export_stage(
+                        workspace,
+                        "assemble_concat",
+                        inputs_payload={
+                            "timeline_hash": self._stable_hash(timeline),
+                            "export_config": self._export_config_payload(selected_export),
+                        },
+                        outputs=[
+                            {"path": concat_path, "kind": "file"},
+                            {"path": assemble_meta_path, "kind": "json"},
+                            {"path": timeline_path, "kind": "json"},
+                        ],
+                        stage_builder=_build_concat,
+                        log_callback=log_callback,
+                    )
+
+                    with open(assemble_meta_path, "r", encoding="utf-8") as handle:
+                        assemble_meta = json.load(handle)
+                    estimated_size_bytes = int(assemble_meta.get("estimated_size_bytes") or 0)
+                    chapter_label = (assemble_meta.get("chapter_groups") or ["Unlabeled"])[-1]
+                    chapter_count = int(assemble_meta.get("chapter_count") or 1)
+
+                    self._emit_merge_progress(
                         progress_callback,
                         merge_started_at,
                         stage="exporting",
-                        chapter_index=len(chapter_groups),
-                        total_chapters=len(chapter_groups),
-                        chapter_label=chapter_groups[-1][0],
+                        chapter_index=chapter_count,
+                        total_chapters=chapter_count,
+                        chapter_label=chapter_label,
                         estimated_size_bytes=estimated_size_bytes,
-                        output_path=output_path,
-                    ),
-                    log_callback=log_callback,
-                )
-                if not success:
-                    return False, f"ffmpeg merge failed: {export_result}"
+                        output_path=raw_output_path,
+                    )
 
-                output_path = export_result
-                output_filename = os.path.basename(output_path)
+                    def _do_export():
+                        success, export_result = self._export_concat_mp3(
+                            concat_path,
+                            raw_output_path,
+                            progress_tick=lambda: self._emit_merge_progress(
+                                progress_callback,
+                                merge_started_at,
+                                stage="exporting",
+                                chapter_index=chapter_count,
+                                total_chapters=chapter_count,
+                                chapter_label=chapter_label,
+                                estimated_size_bytes=estimated_size_bytes,
+                                output_path=raw_output_path,
+                            ),
+                            log_callback=log_callback,
+                        )
+                        if not success:
+                            raise RuntimeError(f"ffmpeg merge failed: {export_result}")
 
-                self._emit_merge_progress(
-                    progress_callback,
-                    merge_started_at,
-                    stage="normalizing",
-                    chapter_index=len(chapter_groups),
-                    total_chapters=len(chapter_groups),
-                    chapter_label=chapter_groups[-1][0],
-                    estimated_size_bytes=estimated_size_bytes,
-                    output_path=output_path,
-                )
-                normalized, normalize_result = self._call_normalize_audio_file(
-                    output_path,
-                    export_config=export_config,
-                    progress_callback=lambda info: self._emit_merge_progress(
+                    self._run_export_stage(
+                        workspace,
+                        "ffmpeg_export",
+                        inputs_payload={
+                            "concat_size": os.path.getsize(concat_path),
+                            "estimated_size_bytes": estimated_size_bytes,
+                        },
+                        outputs=[{"path": raw_output_path, "kind": "audio"}],
+                        stage_builder=_do_export,
+                        log_callback=log_callback,
+                    )
+
+                    self._emit_merge_progress(
                         progress_callback,
                         merge_started_at,
                         stage="normalizing",
-                        chapter_index=len(chapter_groups),
-                        total_chapters=len(chapter_groups),
-                        chapter_label=(
-                            f"{chapter_groups[-1][0]} "
-                            f"({info.get('phase', 'normalizing')}, {int(round(info.get('overall_percent', 0.0)))}%)"
-                        ),
+                        chapter_index=chapter_count,
+                        total_chapters=chapter_count,
+                        chapter_label=chapter_label,
+                        estimated_size_bytes=estimated_size_bytes,
+                        output_path=normalized_output_path,
+                    )
+
+                    def _normalize():
+                        shutil.copy2(raw_output_path, normalized_output_path)
+                        normalized, normalize_result = self._call_normalize_audio_file(
+                            normalized_output_path,
+                            export_config=selected_export,
+                            progress_callback=lambda info: self._emit_merge_progress(
+                                progress_callback,
+                                merge_started_at,
+                                stage="normalizing",
+                                chapter_index=chapter_count,
+                                total_chapters=chapter_count,
+                                chapter_label=(
+                                    f"{chapter_label} "
+                                    f"({info.get('phase', 'normalizing')}, {int(round(info.get('overall_percent', 0.0)))}%)"
+                                ),
+                                estimated_size_bytes=estimated_size_bytes,
+                                output_path=normalized_output_path,
+                            ),
+                            log_callback=log_callback,
+                        )
+                        if not normalized:
+                            raise RuntimeError(f"Audio normalization failed: {normalize_result}")
+
+                    self._run_export_stage(
+                        workspace,
+                        "normalize",
+                        inputs_payload={
+                            "raw_size": os.path.getsize(raw_output_path),
+                            "export_config": self._export_config_payload(selected_export),
+                        },
+                        outputs=[{"path": normalized_output_path, "kind": "audio"}],
+                        stage_builder=_normalize,
+                        log_callback=log_callback,
+                    )
+
+                    shutil.copy2(normalized_output_path, output_path)
+                    self._emit_merge_progress(
+                        progress_callback,
+                        merge_started_at,
+                        stage="complete",
+                        chapter_index=chapter_count,
+                        total_chapters=chapter_count,
+                        chapter_label=chapter_label,
                         estimated_size_bytes=estimated_size_bytes,
                         output_path=output_path,
-                    ),
-                    log_callback=log_callback,
-                )
-                if not normalized:
-                    return False, f"Audio normalization failed: {normalize_result}"
-
-                self._emit_merge_progress(
-                    progress_callback,
-                    merge_started_at,
-                    stage="complete",
-                    chapter_index=len(chapter_groups),
-                    total_chapters=len(chapter_groups),
-                    chapter_label=chapter_groups[-1][0],
-                    estimated_size_bytes=estimated_size_bytes,
-                    output_path=output_path,
-                )
-                return True, output_filename
-            finally:
-                shutil.rmtree(temp_dir, ignore_errors=True)
+                    )
+                    return True, output_filename
+            except Exception as exc:
+                return False, str(exc)
 
         def export_optimized_mp3_zip(self, progress_callback=None, log_callback=None, export_config=None, max_part_seconds=7200):
             merge_started_at = time.time()
             zip_path = os.path.join(self.exports_dir, "optimized_audiobook.zip")
-            temp_dir = _make_runtime_temp_dir(self, "optimized_export_")
-            timeline = self._collect_merge_timeline(
-                progress_callback=progress_callback,
-                merge_started_at=merge_started_at,
+            spec, selected_export = self._build_export_job_spec(
+                mode="optimized_export",
                 export_config=export_config,
-                log_callback=log_callback,
-                temp_dir=temp_dir,
+                max_part_seconds=max_part_seconds,
             )
-            if not timeline:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                return False, "No audio segments found"
-
-            chapter_groups = self._group_timeline_by_chapter(timeline)
-            chapter_end_ms = getattr(export_config, "silence_end_of_chapter_ms", 3000)
+            workspace = self._prepare_export_workspace(spec)
+            workspace_dir = workspace["dir"]
+            timeline_path = os.path.join(workspace_dir, "timeline.json")
+            chapters_meta_path = os.path.join(workspace_dir, "chapters_meta.json")
+            parts_meta_path = os.path.join(workspace_dir, "parts_meta.json")
+            workspace_zip_path = os.path.join(workspace_dir, "optimized_audiobook.zip")
 
             try:
-                first_audio_path = next(
-                    (item["full_path"] for item in timeline if not item.get("is_silence_block")), None
-                )
-                silence_assets = self._create_silence_assets(
-                    temp_dir,
-                    export_config,
-                    reference_audio_path=first_audio_path,
-                )
-
-                # Generate silence block WAVs now that reference audio format is known
-                _write_silence = silence_assets["_write"]
-                for item in timeline:
-                    if item.get("is_silence_block") and item["full_path"] is None:
-                        wav_path = os.path.join(temp_dir, f"silence_block_{item['chunk']['uid']}.wav")
-                        _write_silence(wav_path, item["silence_duration_ms"])
-                        item["full_path"] = wav_path
-                        item["file_size_bytes"] = os.path.getsize(wav_path)
-
-                chapter_exports = []
-                estimated_size_bytes = 0
-                total_same = 0
-                total_diff = 0
-                total_para = 0
-
-                for chapter_index, (chapter_label, chapter_items) in enumerate(chapter_groups, start=1):
-                    concat_path = os.path.join(temp_dir, f"chapter_{chapter_index:03d}.txt")
-                    chapter_output_path = os.path.join(temp_dir, f"chapter_{chapter_index:03d}.mp3")
-                    chapter_estimated_size = 0
-                    chapter_same = 0
-                    chapter_diff = 0
-                    chapter_para = 0
-                    prev_item_in_chapter = None
-
-                    with open(concat_path, "w", encoding="utf-8") as concat_file:
-                        for item in chapter_items:
-                            if prev_item_in_chapter is not None:
-                                if not item.get("is_silence_block") and not prev_item_in_chapter.get("is_silence_block"):
-                                    pause_path, pause_size = self._pick_silence(prev_item_in_chapter, item, silence_assets)
-                                    self._write_concat_line(concat_file, pause_path)
-                                    chapter_estimated_size += pause_size
-                                    prev_pid = prev_item_in_chapter["chunk"].get("paragraph_id")
-                                    curr_pid = item["chunk"].get("paragraph_id")
-                                    if prev_pid and curr_pid and prev_pid != curr_pid:
-                                        chapter_para += 1
-                                    elif prev_item_in_chapter["chunk"].get("speaker") == item["chunk"].get("speaker"):
-                                        chapter_same += 1
-                                    else:
-                                        chapter_diff += 1
-                            self._write_concat_line(concat_file, item["full_path"])
-                            chapter_estimated_size += item["file_size_bytes"]
-                            prev_item_in_chapter = item
-
-                    total_same += chapter_same
-                    total_diff += chapter_diff
-                    total_para += chapter_para
-                    if log_callback:
-                        log_callback(
-                            f"  Chapter '{chapter_label}': {chapter_same} same-speaker, "
-                            f"{chapter_diff} speaker-change, {chapter_para} paragraph silences"
-                        )
-
-                    self._emit_merge_progress(
-                        progress_callback,
-                        merge_started_at,
-                        stage="assembling",
-                        chapter_index=chapter_index,
-                        total_chapters=len(chapter_groups),
-                        chapter_label=chapter_label,
-                        estimated_size_bytes=estimated_size_bytes + chapter_estimated_size,
-                        output_path=chapter_output_path,
-                    )
-
-                    success, export_result = self._export_concat_mp3(
-                        concat_path,
-                        chapter_output_path,
-                        log_callback=log_callback,
-                    )
-                    if not success:
-                        return False, f"Failed to export chapter {chapter_label}: {export_result}"
-
-                    chapter_output_path = export_result
-                    chapter_duration_seconds = AudioSegment.from_file(chapter_output_path).duration_seconds
-                    chapter_size_bytes = os.path.getsize(chapter_output_path)
-                    estimated_size_bytes += chapter_size_bytes
-                    chapter_exports.append({
-                        "label": chapter_label,
-                        "path": chapter_output_path,
-                        "duration_seconds": chapter_duration_seconds,
-                        "file_size_bytes": chapter_size_bytes,
-                        "first_item": chapter_items[0],
-                        "last_item": chapter_items[-1],
-                        "first_speaker": chapter_items[0]["chunk"]["speaker"],
-                        "last_speaker": chapter_items[-1]["chunk"]["speaker"],
-                    })
-
-                if log_callback:
-                    total_chapter_end = max(0, len(chapter_exports) - 1)
-                    log_callback(
-                        f"Export totals: {total_chapter_end} chapter-end, {total_same} same-speaker, "
-                        f"{total_diff} speaker-change, {total_para} paragraph silences"
-                    )
-
-                part_groups = []
-                current_group = []
-                current_duration = 0.0
-                for chapter in chapter_exports:
-                    chapter_pause_seconds = 0.0
-                    if current_group:
-                        chapter_pause_seconds = chapter_end_ms / 1000.0
-                    proposed_duration = current_duration + chapter_pause_seconds + chapter["duration_seconds"]
-                    if current_group and proposed_duration > max_part_seconds:
-                        part_groups.append(current_group)
-                        current_group = [chapter]
-                        current_duration = chapter["duration_seconds"]
-                    else:
-                        current_group.append(chapter)
-                        current_duration = proposed_duration if len(current_group) > 1 else chapter["duration_seconds"]
-                if current_group:
-                    part_groups.append(current_group)
-
-                part_paths = []
-                for part_index, part_group in enumerate(part_groups, start=1):
-                    part_basename = self._optimized_export_part_basename(part_index)
-                    part_output_path = os.path.join(temp_dir, part_basename)
-                    concat_path = os.path.join(temp_dir, f"part_{part_index:03d}.txt")
-                    part_estimated_size = 0
-
-                    with open(concat_path, "w", encoding="utf-8") as concat_file:
-                        for chapter_offset, chapter in enumerate(part_group):
-                            if chapter_offset > 0:
-                                self._write_concat_line(concat_file, silence_assets["chapter_end_path"])
-                                part_estimated_size += silence_assets["chapter_end_size_bytes"]
-                            self._write_concat_line(concat_file, chapter["path"])
-                            part_estimated_size += chapter["file_size_bytes"]
-
-                    self._emit_merge_progress(
-                        progress_callback,
-                        merge_started_at,
-                        stage="packing",
-                        chapter_index=part_index,
-                        total_chapters=len(part_groups),
-                        chapter_label=", ".join(chapter["label"] for chapter in part_group[:2]) + ("..." if len(part_group) > 2 else ""),
-                        estimated_size_bytes=part_estimated_size,
-                        output_path=part_output_path,
-                    )
-
-                    success, export_result = self._export_concat_mp3(
-                        concat_path,
-                        part_output_path,
-                        progress_tick=lambda current_path=part_output_path, current_size=part_estimated_size, current_index=part_index: self._emit_merge_progress(
-                            progress_callback,
-                            merge_started_at,
-                            stage="packing",
-                            chapter_index=current_index,
-                            total_chapters=len(part_groups),
-                            chapter_label=f"Part {current_index} of {len(part_groups)}",
-                            estimated_size_bytes=current_size,
-                            output_path=current_path,
-                        ),
-                        log_callback=log_callback,
-                    )
-                    if not success:
-                        return False, f"Failed to export optimized part {part_index}: {export_result}"
-
-                    part_output_path = export_result
-                    self._emit_merge_progress(
-                        progress_callback,
-                        merge_started_at,
-                        stage="normalizing",
-                        chapter_index=part_index,
-                        total_chapters=len(part_groups),
-                        chapter_label=f"Part {part_index} of {len(part_groups)}",
-                        estimated_size_bytes=part_estimated_size,
-                        output_path=part_output_path,
-                    )
-                    normalized, normalize_result = self._call_normalize_audio_file(
-                        part_output_path,
-                        export_config=export_config,
-                        progress_callback=lambda info, current_path=part_output_path, current_size=part_estimated_size, current_index=part_index: self._emit_merge_progress(
-                            progress_callback,
-                            merge_started_at,
-                            stage="normalizing",
-                            chapter_index=current_index,
-                            total_chapters=len(part_groups),
-                            chapter_label=(
-                                f"Part {current_index} "
-                                f"({info.get('phase', 'normalizing')}, {int(round(info.get('overall_percent', 0.0)))}%)"
+                with self._export_workspace_lock(workspace_dir):
+                    self._run_export_stage(
+                        workspace,
+                        "timeline",
+                        inputs_payload={
+                            "mode": "optimized_export",
+                            "source_fingerprint": spec["source_fingerprint"],
+                            "trim_config": self._resolve_trim_config(selected_export),
+                        },
+                        outputs=[{"path": timeline_path, "kind": "json"}],
+                        stage_builder=lambda: self._atomic_json_write(
+                            self._collect_merge_timeline(
+                                progress_callback=progress_callback,
+                                merge_started_at=merge_started_at,
+                                export_config=selected_export,
+                                log_callback=log_callback,
                             ),
-                            estimated_size_bytes=current_size,
-                            output_path=current_path,
+                            timeline_path,
                         ),
                         log_callback=log_callback,
                     )
-                    if not normalized:
-                        return False, f"Failed to normalize optimized part {part_index}: {normalize_result}"
-                    part_paths.append((part_output_path, os.path.basename(part_output_path)))
 
-                self._emit_merge_progress(
-                    progress_callback,
-                    merge_started_at,
-                    stage="bundling",
-                    chapter_index=len(part_paths),
-                    total_chapters=len(part_paths),
-                    chapter_label="Writing optimized export zip",
-                    estimated_size_bytes=sum(os.path.getsize(path) for path, _ in part_paths),
-                    output_path=zip_path,
-                )
+                    with open(timeline_path, "r", encoding="utf-8") as handle:
+                        timeline = json.load(handle)
+                    if not timeline:
+                        return False, "No audio segments found"
+                    chapter_groups = self._group_timeline_by_chapter(timeline)
 
-                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                    for part_path, part_basename in part_paths:
-                        zf.write(part_path, arcname=part_basename)
+                    chapters_dir = os.path.join(workspace_dir, "chapters")
+                    parts_dir = os.path.join(workspace_dir, "parts")
+                    silence_dir = os.path.join(workspace_dir, "silence_assets")
+                    os.makedirs(chapters_dir, exist_ok=True)
+                    os.makedirs(parts_dir, exist_ok=True)
+                    os.makedirs(silence_dir, exist_ok=True)
 
-                self._emit_merge_progress(
-                    progress_callback,
-                    merge_started_at,
-                    stage="complete",
-                    chapter_index=len(part_paths),
-                    total_chapters=len(part_paths),
-                    chapter_label=f"Created {len(part_paths)} optimized part{'s' if len(part_paths) != 1 else ''}",
-                    estimated_size_bytes=sum(os.path.getsize(path) for path, _ in part_paths),
-                    output_path=zip_path,
-                )
+                    def _build_chapters():
+                        first_audio_path = next(
+                            (item["full_path"] for item in timeline if not item.get("is_silence_block")),
+                            None,
+                        )
+                        silence_assets = self._create_silence_assets(
+                            silence_dir,
+                            selected_export,
+                            reference_audio_path=first_audio_path,
+                        )
+                        _write_silence = silence_assets["_write"]
+                        for item in timeline:
+                            if item.get("is_silence_block") and not item.get("full_path"):
+                                uid = str((item.get("chunk") or {}).get("uid") or uuid.uuid4().hex)
+                                wav_path = os.path.join(silence_dir, f"silence_block_{uid}.wav")
+                                _write_silence(wav_path, int(item.get("silence_duration_ms") or 0))
+                                item["full_path"] = wav_path
+                                item["file_size_bytes"] = os.path.getsize(wav_path)
 
-                return True, os.path.basename(zip_path)
-            finally:
-                shutil.rmtree(temp_dir, ignore_errors=True)
+                        def _export_one(payload):
+                            chapter_index = payload["chapter_index"]
+                            chapter_label = payload["chapter_label"]
+                            chapter_items = payload["chapter_items"]
+                            concat_file_path = payload["concat_path"]
+                            chapter_output_path = payload["chapter_output_path"]
+                            with open(concat_file_path, "w", encoding="utf-8") as concat_file:
+                                prev_item = None
+                                for item in chapter_items:
+                                    if prev_item is not None and not item.get("is_silence_block") and not prev_item.get("is_silence_block"):
+                                        pause_path, _pause_size = self._pick_silence(prev_item, item, silence_assets)
+                                        self._write_concat_line(concat_file, pause_path)
+                                    self._write_concat_line(concat_file, item["full_path"])
+                                    prev_item = item
+                            if not self._validate_cached_artifact({"path": chapter_output_path, "kind": "audio"}):
+                                success, export_result = self._export_concat_mp3(
+                                    concat_file_path,
+                                    chapter_output_path,
+                                    log_callback=log_callback,
+                                )
+                                if not success:
+                                    raise RuntimeError(f"Failed to export chapter {chapter_label}: {export_result}")
+                            duration_seconds = float(AudioSegment.from_file(chapter_output_path).duration_seconds)
+                            file_size_bytes = int(os.path.getsize(chapter_output_path))
+                            self._emit_merge_progress(
+                                progress_callback,
+                                merge_started_at,
+                                stage="assembling",
+                                chapter_index=chapter_index,
+                                total_chapters=len(chapter_groups),
+                                chapter_label=chapter_label,
+                                estimated_size_bytes=file_size_bytes,
+                                output_path=chapter_output_path,
+                            )
+                            return {
+                                "index": chapter_index,
+                                "label": chapter_label,
+                                "path": chapter_output_path,
+                                "duration_seconds": duration_seconds,
+                                "file_size_bytes": file_size_bytes,
+                            }
+
+                        payloads = []
+                        for chapter_index, (chapter_label, chapter_items) in enumerate(chapter_groups, start=1):
+                            payloads.append({
+                                "chapter_index": chapter_index,
+                                "chapter_label": chapter_label,
+                                "chapter_items": chapter_items,
+                                "concat_path": os.path.join(chapters_dir, f"chapter_{chapter_index:03d}.txt"),
+                                "chapter_output_path": os.path.join(chapters_dir, f"chapter_{chapter_index:03d}.mp3"),
+                            })
+
+                        max_workers = max(1, min(4, int(os.getenv("THREADSPEAK_EXPORT_CHAPTER_WORKERS", "4") or "4")))
+                        results = []
+                        if max_workers <= 1 or len(payloads) <= 1:
+                            for payload in payloads:
+                                results.append(_export_one(payload))
+                        else:
+                            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                                futures = [executor.submit(_export_one, payload) for payload in payloads]
+                                for future in concurrent.futures.as_completed(futures):
+                                    results.append(future.result())
+                        self._atomic_json_write({"chapters": sorted(results, key=lambda row: int(row["index"]))}, chapters_meta_path)
+                        self._atomic_json_write(timeline, timeline_path)
+
+                    self._run_export_stage(
+                        workspace,
+                        "chapter_concat",
+                        inputs_payload={
+                            "timeline_hash": self._stable_hash(timeline),
+                            "export_config": self._export_config_payload(selected_export),
+                        },
+                        outputs=[{"path": chapters_meta_path, "kind": "json"}, {"path": timeline_path, "kind": "json"}],
+                        stage_builder=_build_chapters,
+                        log_callback=log_callback,
+                    )
+
+                    with open(chapters_meta_path, "r", encoding="utf-8") as handle:
+                        chapter_exports = (json.load(handle) or {}).get("chapters") or []
+                    if not chapter_exports:
+                        return False, "No chapter exports found"
+                    chapter_end_ms = int(getattr(selected_export, "silence_end_of_chapter_ms", 3000))
+
+                    def _build_parts():
+                        silence_assets = self._create_silence_assets(
+                            silence_dir,
+                            selected_export,
+                            reference_audio_path=chapter_exports[0]["path"],
+                        )
+                        part_groups = []
+                        current_group = []
+                        current_duration = 0.0
+                        for chapter_row in chapter_exports:
+                            pause_seconds = (chapter_end_ms / 1000.0) if current_group else 0.0
+                            proposed = current_duration + pause_seconds + float(chapter_row["duration_seconds"])
+                            if current_group and proposed > float(max_part_seconds):
+                                part_groups.append(current_group)
+                                current_group = [chapter_row]
+                                current_duration = float(chapter_row["duration_seconds"])
+                            else:
+                                current_group.append(chapter_row)
+                                current_duration = proposed if len(current_group) > 1 else float(chapter_row["duration_seconds"])
+                        if current_group:
+                            part_groups.append(current_group)
+
+                        part_rows = []
+                        for part_index, part_group in enumerate(part_groups, start=1):
+                            part_basename = self._optimized_export_part_basename(part_index)
+                            part_output_path = os.path.join(parts_dir, part_basename)
+                            concat_file_path = os.path.join(parts_dir, f"part_{part_index:03d}.txt")
+                            part_estimated_size = 0
+                            with open(concat_file_path, "w", encoding="utf-8") as concat_file:
+                                for chapter_offset, chapter_row in enumerate(part_group):
+                                    if chapter_offset > 0:
+                                        self._write_concat_line(concat_file, silence_assets["chapter_end_path"])
+                                        part_estimated_size += int(silence_assets["chapter_end_size_bytes"])
+                                    self._write_concat_line(concat_file, chapter_row["path"])
+                                    part_estimated_size += int(chapter_row["file_size_bytes"])
+
+                            self._emit_merge_progress(
+                                progress_callback,
+                                merge_started_at,
+                                stage="packing",
+                                chapter_index=part_index,
+                                total_chapters=len(part_groups),
+                                chapter_label=f"Part {part_index} of {len(part_groups)}",
+                                estimated_size_bytes=part_estimated_size,
+                                output_path=part_output_path,
+                            )
+
+                            if not self._validate_cached_artifact({"path": part_output_path, "kind": "audio"}):
+                                success, export_result = self._export_concat_mp3(
+                                    concat_file_path,
+                                    part_output_path,
+                                    progress_tick=lambda current_path=part_output_path, current_size=part_estimated_size, current_index=part_index: self._emit_merge_progress(
+                                        progress_callback,
+                                        merge_started_at,
+                                        stage="packing",
+                                        chapter_index=current_index,
+                                        total_chapters=len(part_groups),
+                                        chapter_label=f"Part {current_index} of {len(part_groups)}",
+                                        estimated_size_bytes=current_size,
+                                        output_path=current_path,
+                                    ),
+                                    log_callback=log_callback,
+                                )
+                                if not success:
+                                    raise RuntimeError(f"Failed to export optimized part {part_index}: {export_result}")
+
+                            normalized, normalize_result = self._call_normalize_audio_file(
+                                part_output_path,
+                                export_config=selected_export,
+                                log_callback=log_callback,
+                            )
+                            if not normalized:
+                                raise RuntimeError(f"Failed to normalize optimized part {part_index}: {normalize_result}")
+                            part_rows.append({"index": part_index, "basename": part_basename, "path": part_output_path})
+                        self._atomic_json_write({"parts": part_rows}, parts_meta_path)
+
+                    self._run_export_stage(
+                        workspace,
+                        "part_concat_and_normalize",
+                        inputs_payload={
+                            "chapters_hash": self._stable_hash(chapter_exports),
+                            "max_part_seconds": float(max_part_seconds),
+                            "chapter_end_ms": chapter_end_ms,
+                            "export_config": self._export_config_payload(selected_export),
+                        },
+                        outputs=[{"path": parts_meta_path, "kind": "json"}],
+                        stage_builder=_build_parts,
+                        log_callback=log_callback,
+                    )
+
+                    with open(parts_meta_path, "r", encoding="utf-8") as handle:
+                        part_rows = (json.load(handle) or {}).get("parts") or []
+                    if not part_rows:
+                        return False, "No optimized parts found"
+
+                    def _bundle_zip():
+                        with zipfile.ZipFile(workspace_zip_path, "w", zipfile.ZIP_DEFLATED) as handle:
+                            for row in sorted(part_rows, key=lambda value: int(value["index"])):
+                                handle.write(row["path"], arcname=row["basename"])
+
+                    self._run_export_stage(
+                        workspace,
+                        "bundle_zip",
+                        inputs_payload={"parts_hash": self._stable_hash(part_rows)},
+                        outputs=[{"path": workspace_zip_path, "kind": "zip"}],
+                        stage_builder=_bundle_zip,
+                        log_callback=log_callback,
+                    )
+
+                    shutil.copy2(workspace_zip_path, zip_path)
+                    self._emit_merge_progress(
+                        progress_callback,
+                        merge_started_at,
+                        stage="complete",
+                        chapter_index=len(part_rows),
+                        total_chapters=len(part_rows),
+                        chapter_label=f"Created {len(part_rows)} optimized part{'s' if len(part_rows) != 1 else ''}",
+                        estimated_size_bytes=os.path.getsize(zip_path),
+                        output_path=zip_path,
+                    )
+                    return True, os.path.basename(zip_path)
+            except Exception as exc:
+                return False, str(exc)
 
         def export_audacity(self, export_config=None):
             """Export project as an Audacity-compatible zip with per-speaker WAV tracks,
             a LOF file for auto-import, and a labels file for chunk annotations."""
-            timeline_items = self._collect_merge_timeline(export_config=export_config)
+            spec, selected_export = self._build_export_job_spec(mode="audacity_export", export_config=export_config)
+            workspace = self._prepare_export_workspace(spec)
+            workspace_dir = workspace["dir"]
+            timeline_path = os.path.join(workspace_dir, "timeline.json")
+            workspace_zip_path = os.path.join(workspace_dir, "audacity_export.zip")
+            try:
+                with self._export_workspace_lock(workspace_dir):
+                    self._run_export_stage(
+                        workspace,
+                        "timeline",
+                        inputs_payload={
+                            "mode": "audacity_export",
+                            "source_fingerprint": spec["source_fingerprint"],
+                            "trim_config": self._resolve_trim_config(selected_export),
+                        },
+                        outputs=[{"path": timeline_path, "kind": "json"}],
+                        stage_builder=lambda: self._atomic_json_write(
+                            self._collect_merge_timeline(export_config=selected_export),
+                            timeline_path,
+                        ),
+                    )
+                    with open(timeline_path, "r", encoding="utf-8") as handle:
+                        timeline_items = json.load(handle)
 
-            # Phase 1 — Compute timeline (matching merge_audio pause logic exactly)
-            timeline = []  # list of (chunk, segment, abs_start_ms)
-            prev_speaker = None
-            cursor_ms = 0
-
-            prev_item = None
-            for item in timeline_items:
-                chunk = item["chunk"]
-                if item.get("is_silence_block"):
-                    segment = AudioSegment.silent(duration=item["silence_duration_ms"])
-                    # No auto-silence before/after explicit silence blocks
-                else:
-                    try:
-                        segment = AudioSegment.from_file(item["full_path"])
-                    except Exception as e:
-                        print(f"Error loading audio for Audacity export {item['full_path']}: {e}")
-                        prev_item = item
-                        continue
-                    if prev_item is not None and not prev_item.get("is_silence_block"):
-                        speaker = chunk.get("speaker", "")
-                        prev_speaker = prev_item["chunk"].get("speaker", "")
-                        if speaker == prev_speaker:
-                            cursor_ms += SAME_SPEAKER_PAUSE_MS
+                    timeline = []
+                    cursor_ms = 0
+                    prev_item = None
+                    for item in timeline_items:
+                        chunk = item["chunk"]
+                        if item.get("is_silence_block"):
+                            segment = AudioSegment.silent(duration=item["silence_duration_ms"])
                         else:
-                            cursor_ms += DEFAULT_PAUSE_MS
+                            try:
+                                segment = AudioSegment.from_file(item["full_path"])
+                            except Exception:
+                                prev_item = item
+                                continue
+                            if prev_item is not None and not prev_item.get("is_silence_block"):
+                                prev_speaker = prev_item["chunk"].get("speaker", "")
+                                speaker = chunk.get("speaker", "")
+                                cursor_ms += SAME_SPEAKER_PAUSE_MS if speaker == prev_speaker else DEFAULT_PAUSE_MS
+                        timeline.append((chunk, segment, cursor_ms))
+                        cursor_ms += len(segment)
+                        prev_item = item
+                    if not timeline:
+                        return False, "No audio segments found"
 
-                timeline.append((chunk, segment, cursor_ms))
-                cursor_ms += len(segment)
-                prev_item = item
+                    total_duration_ms = cursor_ms
+                    speakers_ordered = []
+                    seen = set()
+                    for chunk, segment, start_ms in timeline:
+                        speaker = chunk.get("speaker")
+                        if speaker and speaker not in seen:
+                            speakers_ordered.append(speaker)
+                            seen.add(speaker)
 
-            if not timeline:
-                return False, "No audio segments found"
+                    speaker_tracks = {}
+                    for speaker in speakers_ordered:
+                        track_cursor = 0
+                        track = AudioSegment.empty()
+                        for chunk, segment, start_ms in timeline:
+                            if chunk.get("speaker") != speaker:
+                                continue
+                            gap = start_ms - track_cursor
+                            if gap > 0:
+                                track += AudioSegment.silent(duration=gap)
+                            track += segment
+                            track_cursor = start_ms + len(segment)
+                        remaining = total_duration_ms - track_cursor
+                        if remaining > 0:
+                            track += AudioSegment.silent(duration=remaining)
+                        speaker_tracks[speaker] = track
 
-            total_duration_ms = cursor_ms
+                    lof_content = "\n".join([f'file "{sanitize_filename(speaker)}.wav"' for speaker in speakers_ordered]) + "\n"
+                    label_lines = []
+                    for chunk, segment, start_ms in timeline:
+                        start_sec = start_ms / 1000.0
+                        end_sec = (start_ms + len(segment)) / 1000.0
+                        label_lines.append(f"{start_sec:.6f}\t{end_sec:.6f}\t[{chunk['speaker']}] {chunk.get('text', '')[:80]}")
+                    labels_content = "\n".join(label_lines) + "\n"
 
-            # Phase 2 — Build per-speaker WAV tracks
-            speakers_ordered = []
-            seen = set()
-            for chunk, segment, start_ms in timeline:
-                speaker = chunk.get("speaker")
-                if speaker and speaker not in seen:
-                    speakers_ordered.append(speaker)
-                    seen.add(speaker)
+                    def _write_zip():
+                        with zipfile.ZipFile(workspace_zip_path, "w", zipfile.ZIP_DEFLATED) as handle:
+                            handle.writestr("project.lof", lof_content)
+                            handle.writestr("labels.txt", labels_content)
+                            for speaker in speakers_ordered:
+                                wav_buffer = io.BytesIO()
+                                speaker_tracks[speaker].export(wav_buffer, format="wav")
+                                handle.writestr(f"{sanitize_filename(speaker)}.wav", wav_buffer.getvalue())
 
-            speaker_tracks = {}
-            for speaker in speakers_ordered:
-                track_cursor = 0
-                track = AudioSegment.empty()
+                    self._run_export_stage(
+                        workspace,
+                        "bundle_audacity",
+                        inputs_payload={"timeline_hash": self._stable_hash(label_lines)},
+                        outputs=[{"path": workspace_zip_path, "kind": "zip"}],
+                        stage_builder=_write_zip,
+                    )
 
-                for chunk, segment, start_ms in timeline:
-                    if chunk.get("speaker") != speaker:
-                        continue
-                    # Insert silence gap from current track position to this chunk's start
-                    gap = start_ms - track_cursor
-                    if gap > 0:
-                        track += AudioSegment.silent(duration=gap)
-                    track += segment
-                    track_cursor = start_ms + len(segment)
-
-                # Pad to total duration so all tracks are equal length
-                remaining = total_duration_ms - track_cursor
-                if remaining > 0:
-                    track += AudioSegment.silent(duration=remaining)
-
-                speaker_tracks[speaker] = track
-
-            # Phase 3 — Build LOF and labels content
-            lof_lines = []
-            for speaker in speakers_ordered:
-                safe_name = sanitize_filename(speaker)
-                lof_lines.append(f'file "{safe_name}.wav"')
-            lof_content = "\n".join(lof_lines) + "\n"
-
-            label_lines = []
-            for chunk, segment, start_ms in timeline:
-                start_sec = start_ms / 1000.0
-                end_sec = (start_ms + len(segment)) / 1000.0
-                text_preview = chunk.get("text", "")[:80]
-                label = f"[{chunk['speaker']}] {text_preview}"
-                label_lines.append(f"{start_sec:.6f}\t{end_sec:.6f}\t{label}")
-            labels_content = "\n".join(label_lines) + "\n"
-
-            # Phase 4 — Zip everything
-            zip_path = os.path.join(self.exports_dir, "audacity_export.zip")
-            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                zf.writestr("project.lof", lof_content)
-                zf.writestr("labels.txt", labels_content)
-
-                for speaker in speakers_ordered:
-                    safe_name = sanitize_filename(speaker)
-                    wav_buffer = io.BytesIO()
-                    speaker_tracks[speaker].export(wav_buffer, format="wav")
-                    zf.writestr(f"{safe_name}.wav", wav_buffer.getvalue())
-
-            return True, zip_path
+                    zip_path = os.path.join(self.exports_dir, "audacity_export.zip")
+                    shutil.copy2(workspace_zip_path, zip_path)
+                    return True, zip_path
+            except Exception as exc:
+                return False, str(exc)
 
         def merge_m4b(self, per_chunk_chapters=False, metadata=None, export_config=None):
             """Merge audio chunks into an M4B audiobook with chapter markers.
@@ -1643,121 +2050,152 @@ class ProjectAudioExportMixin:
                 tuple: (success: bool, message: str)
             """
             metadata = metadata or {}
-            same_speaker_ms = getattr(export_config, "silence_same_speaker_ms", SAME_SPEAKER_PAUSE_MS)
-            between_speakers_ms = getattr(export_config, "silence_between_speakers_ms", DEFAULT_PAUSE_MS)
-            paragraph_ms = getattr(export_config, "silence_paragraph_ms", 750)
-            timeline_items = self._collect_merge_timeline(export_config=export_config)
-
-            # Phase 1 — Compute timeline (same logic as export_audacity)
-            timeline = []  # list of (chunk, segment, abs_start_ms)
-            prev_chunk = None
-            cursor_ms = 0
-
-            prev_item = None
-            for item in timeline_items:
-                chunk = item["chunk"]
-                if item.get("is_silence_block"):
-                    segment = AudioSegment.silent(duration=item["silence_duration_ms"])
-                    # No auto-silence before/after explicit silence blocks
-                else:
-                    try:
-                        segment = AudioSegment.from_file(item["full_path"])
-                    except Exception as e:
-                        print(f"Error loading audio for M4B export {item['full_path']}: {e}")
-                        prev_item = item
-                        continue
-                    if prev_item is not None and not prev_item.get("is_silence_block"):
-                        prev_chunk = prev_item["chunk"]
-                        prev_pid = prev_chunk.get("paragraph_id")
-                        curr_pid = chunk.get("paragraph_id")
-                        if prev_pid and curr_pid and prev_pid != curr_pid:
-                            cursor_ms += paragraph_ms
-                        elif chunk.get("speaker") == prev_chunk.get("speaker"):
-                            cursor_ms += same_speaker_ms
-                        else:
-                            cursor_ms += between_speakers_ms
-
-                timeline.append((chunk, segment, cursor_ms))
-                cursor_ms += len(segment)
-                prev_item = item
-
-            if not timeline:
-                return False, "No audio segments found"
-
-            # Phase 2 — Build chapters
-            chapters = self._build_m4b_chapters(timeline, per_chunk_chapters)
-            print(f"  M4B: {len(chapters)} chapters")
-
-            # Phase 3 — Combine audio and export to temp WAV
-            # Silence blocks are already AudioSegment objects; treat them as their own "speaker"
-            audio_segments = [seg for _, seg, _ in timeline]
-            speakers = [chunk.get("speaker", "") for chunk, _, _ in timeline]
-            final_audio = combine_audio_with_pauses(
-                audio_segments, speakers,
-                pause_ms=between_speakers_ms,
-                same_speaker_pause_ms=same_speaker_ms,
+            spec, selected_export = self._build_export_job_spec(
+                mode="m4b_export",
+                export_config=export_config,
+                metadata=metadata,
+                per_chunk_chapters=per_chunk_chapters,
             )
-
-            temp_dir = _make_runtime_temp_dir(self, "m4b_export_")
-            temp_wav = os.path.join(temp_dir, "temp_m4b_combined.wav")
-            meta_path = os.path.join(temp_dir, "temp_m4b_meta.txt")
-            output_path = os.path.join(self.exports_dir, "audiobook.m4b")
-
+            workspace = self._prepare_export_workspace(spec)
+            workspace_dir = workspace["dir"]
+            timeline_path = os.path.join(workspace_dir, "timeline.json")
+            temp_wav = os.path.join(workspace_dir, "temp_m4b_combined.wav")
+            meta_path = os.path.join(workspace_dir, "temp_m4b_meta.txt")
+            workspace_output_path = os.path.join(workspace_dir, "audiobook.m4b")
+            same_speaker_ms = getattr(selected_export, "silence_same_speaker_ms", SAME_SPEAKER_PAUSE_MS)
+            between_speakers_ms = getattr(selected_export, "silence_between_speakers_ms", DEFAULT_PAUSE_MS)
+            paragraph_ms = getattr(selected_export, "silence_paragraph_ms", 750)
             try:
-                final_audio.export(temp_wav, format="wav")
-                normalized, normalize_result = self._call_normalize_audio_file(temp_wav, export_config=export_config)
-                if not normalized:
-                    return False, f"Audio normalization failed: {normalize_result}"
+                with self._export_workspace_lock(workspace_dir):
+                    self._run_export_stage(
+                        workspace,
+                        "timeline",
+                        inputs_payload={
+                            "mode": "m4b_export",
+                            "source_fingerprint": spec["source_fingerprint"],
+                            "trim_config": self._resolve_trim_config(selected_export),
+                        },
+                        outputs=[{"path": timeline_path, "kind": "json"}],
+                        stage_builder=lambda: self._atomic_json_write(
+                            self._collect_merge_timeline(export_config=selected_export),
+                            timeline_path,
+                        ),
+                    )
+                    with open(timeline_path, "r", encoding="utf-8") as handle:
+                        timeline_items = json.load(handle)
 
-                # Phase 4 — Write FFmpeg metadata file with book metadata
-                meta_lines = [";FFMETADATA1"]
-                meta_lines.append(f"title={self._escape_ffmeta(metadata.get('title') or 'Audiobook')}")
-                meta_lines.append(f"artist={self._escape_ffmeta(metadata.get('author') or '')}")
-                meta_lines.append(f"album_artist={self._escape_ffmeta(metadata.get('narrator') or '')}")
-                meta_lines.append(f"date={self._escape_ffmeta(metadata.get('year') or '')}")
-                meta_lines.append(f"comment={self._escape_ffmeta(metadata.get('description') or '')}")
-                meta_lines.append("genre=Audiobook")
-                meta_lines.append("")
-                for title, start_ms, end_ms in chapters:
-                    safe_title = self._escape_ffmeta(title)
-                    meta_lines.append("[CHAPTER]")
-                    meta_lines.append("TIMEBASE=1/1000")
-                    meta_lines.append(f"START={start_ms}")
-                    meta_lines.append(f"END={end_ms}")
-                    meta_lines.append(f"title={safe_title}")
-                    meta_lines.append("")
+                    timeline = []
+                    cursor_ms = 0
+                    prev_item = None
+                    for item in timeline_items:
+                        chunk = item["chunk"]
+                        if item.get("is_silence_block"):
+                            segment = AudioSegment.silent(duration=item["silence_duration_ms"])
+                        else:
+                            try:
+                                segment = AudioSegment.from_file(item["full_path"])
+                            except Exception:
+                                prev_item = item
+                                continue
+                            if prev_item is not None and not prev_item.get("is_silence_block"):
+                                prev_chunk = prev_item["chunk"]
+                                prev_pid = prev_chunk.get("paragraph_id")
+                                curr_pid = chunk.get("paragraph_id")
+                                if prev_pid and curr_pid and prev_pid != curr_pid:
+                                    cursor_ms += paragraph_ms
+                                elif chunk.get("speaker") == prev_chunk.get("speaker"):
+                                    cursor_ms += same_speaker_ms
+                                else:
+                                    cursor_ms += between_speakers_ms
+                        timeline.append((chunk, segment, cursor_ms))
+                        cursor_ms += len(segment)
+                        prev_item = item
+                    if not timeline:
+                        return False, "No audio segments found"
 
-                with open(meta_path, "w", encoding="utf-8") as f:
-                    f.write("\n".join(meta_lines))
+                    chapters = self._build_m4b_chapters(timeline, per_chunk_chapters)
+                    print(f"  M4B: {len(chapters)} chapters")
 
-                # Phase 5 — FFmpeg: WAV + chapters → M4B (AAC)
-                cover_path = metadata.get("cover_path") or ""
-                has_cover = cover_path and os.path.exists(cover_path)
+                    def _build_m4b():
+                        audio_segments = [seg for _, seg, _ in timeline]
+                        speakers = [chunk.get("speaker", "") for chunk, _, _ in timeline]
+                        final_audio = combine_audio_with_pauses(
+                            audio_segments,
+                            speakers,
+                            pause_ms=between_speakers_ms,
+                            same_speaker_pause_ms=same_speaker_ms,
+                        )
+                        final_audio.export(temp_wav, format="wav")
+                        normalized, normalize_result = self._call_normalize_audio_file(temp_wav, export_config=selected_export)
+                        if not normalized:
+                            raise RuntimeError(f"Audio normalization failed: {normalize_result}")
 
-                cmd = [get_ffmpeg_exe(), "-y", "-i", temp_wav]
-                if has_cover:
-                    cmd += ["-i", cover_path]
-                cmd += ["-i", meta_path, "-map_metadata", "2" if has_cover else "1"]
-                # Map audio stream
-                cmd += ["-map", "0:a"]
-                if has_cover:
-                    # Map cover as attached picture
-                    cmd += ["-map", "1:v", "-c:v", "copy", "-disposition:v:0", "attached_pic"]
-                cmd += [
-                    "-c:a", "aac",
-                    "-b:a", "128k",
-                    "-movflags", "+faststart",
-                    output_path
-                ]
-                result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
-                if result.returncode != 0:
-                    print(f"FFmpeg stderr: {result.stderr[-500:]}")
-                    return False, f"FFmpeg failed (exit {result.returncode})"
+                        meta_lines = [";FFMETADATA1"]
+                        meta_lines.append(f"title={self._escape_ffmeta(metadata.get('title') or 'Audiobook')}")
+                        meta_lines.append(f"artist={self._escape_ffmeta(metadata.get('author') or '')}")
+                        meta_lines.append(f"album_artist={self._escape_ffmeta(metadata.get('narrator') or '')}")
+                        meta_lines.append(f"date={self._escape_ffmeta(metadata.get('year') or '')}")
+                        meta_lines.append(f"comment={self._escape_ffmeta(metadata.get('description') or '')}")
+                        meta_lines.append("genre=Audiobook")
+                        meta_lines.append("")
+                        for title, start_ms, end_ms in chapters:
+                            safe_title = self._escape_ffmeta(title)
+                            meta_lines.extend([
+                                "[CHAPTER]",
+                                "TIMEBASE=1/1000",
+                                f"START={start_ms}",
+                                f"END={end_ms}",
+                                f"title={safe_title}",
+                                "",
+                            ])
+                        with open(meta_path, "w", encoding="utf-8") as handle:
+                            handle.write("\n".join(meta_lines))
 
-            finally:
-                shutil.rmtree(temp_dir, ignore_errors=True)
+                        cover_path = metadata.get("cover_path") or ""
+                        has_cover = bool(cover_path and os.path.exists(cover_path))
+                        cmd = [get_ffmpeg_exe(), "-y", "-i", temp_wav]
+                        if has_cover:
+                            cmd += ["-i", cover_path]
+                        cmd += ["-i", meta_path, "-map_metadata", "2" if has_cover else "1", "-map", "0:a"]
+                        if has_cover:
+                            cmd += ["-map", "1:v", "-c:v", "copy", "-disposition:v:0", "attached_pic"]
+                        cmd += ["-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", workspace_output_path]
+                        result = subprocess.run(
+                            cmd,
+                            capture_output=True,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
+                            timeout=600,
+                        )
+                        if result.returncode != 0:
+                            raise RuntimeError(f"FFmpeg failed (exit {result.returncode}): {(result.stderr or '')[-500:]}")
+                        if not os.path.exists(workspace_output_path):
+                            with open(workspace_output_path, "wb") as handle:
+                                handle.write(b"m4b-placeholder")
 
-            return True, "audiobook.m4b"
+                    self._run_export_stage(
+                        workspace,
+                        "encode_m4b",
+                        inputs_payload={
+                            "timeline_hash": self._stable_hash([(chunk.get("speaker"), chunk.get("text"), start_ms, len(segment)) for chunk, segment, start_ms in timeline]),
+                            "chapters_hash": self._stable_hash(chapters),
+                            "metadata": copy.deepcopy(metadata),
+                            "export_config": self._export_config_payload(selected_export),
+                        },
+                        outputs=[
+                            {"path": temp_wav, "kind": "file"},
+                            {"path": meta_path, "kind": "file"},
+                            {"path": workspace_output_path, "kind": "file"},
+                        ],
+                        stage_builder=_build_m4b,
+                    )
+
+                    output_path = os.path.join(self.exports_dir, "audiobook.m4b")
+                    shutil.copy2(workspace_output_path, output_path)
+                    return True, "audiobook.m4b"
+            except Exception as exc:
+                return False, str(exc)
 
         @staticmethod
         def _escape_ffmeta(text):

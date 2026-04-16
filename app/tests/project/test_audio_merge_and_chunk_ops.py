@@ -143,6 +143,55 @@ class MergeAudioTests(unittest.TestCase):
         self.assertFalse(success)
         self.assertIn("Audio normalization failed", message)
 
+    def test_merge_audio_reuses_cached_workspace_artifacts(self):
+        self._assert_real_mp3_concat_path()
+        self._write_wav("voicelines/clip1.wav", duration_seconds=0.5)
+        self._write_wav("voicelines/clip2.wav", duration_seconds=0.5)
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "speaker": "Narrator",
+                "text": "One.",
+                "instruct": "",
+                "chapter": "Chapter 1",
+                "status": "done",
+                "audio_path": "voicelines/clip1.wav",
+            },
+            {
+                "id": 1,
+                "speaker": "Narrator",
+                "text": "Two.",
+                "instruct": "",
+                "chapter": "Chapter 2",
+                "status": "done",
+                "audio_path": "voicelines/clip2.wav",
+            },
+        ])
+
+        original_normalize = self.manager._normalize_audio_file
+        self.manager._normalize_audio_file = lambda path, export_config=None: (True, path)
+        try:
+            first_success, _ = self.manager.merge_audio()
+        finally:
+            self.manager._normalize_audio_file = original_normalize
+        self.assertTrue(first_success)
+
+        with patch.object(self.manager, "_export_concat_mp3", side_effect=AssertionError("concat should be reused")):
+            with patch.object(self.manager, "_normalize_audio_file", side_effect=AssertionError("normalize should be reused")):
+                second_success, second_output = self.manager.merge_audio()
+        self.assertTrue(second_success)
+        self.assertEqual(second_output, "cloned_audiobook.mp3")
+
+        wip_root = os.path.join(self.root_dir, "_wip")
+        self.assertTrue(os.path.isdir(wip_root))
+        fingerprints = [name for name in os.listdir(wip_root) if os.path.isdir(os.path.join(wip_root, name))]
+        self.assertGreaterEqual(len(fingerprints), 1)
+        manifest_path = os.path.join(wip_root, fingerprints[0], "stage_manifest.json")
+        self.assertTrue(os.path.exists(manifest_path))
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        self.assertEqual((manifest.get("stages") or {}).get("normalize", {}).get("status"), "complete")
+
     def test_optimized_export_creates_ordered_zip_parts(self):
         self._assert_real_mp3_concat_path()
         with open(os.path.join(self.root_dir, "state.json"), "w", encoding="utf-8") as f:
@@ -203,6 +252,58 @@ class MergeAudioTests(unittest.TestCase):
             expected_stems = [f"my-great-book-{index:02d}" for index in range(1, len(stems) + 1)]
             self.assertEqual(stems, expected_stems)
             self.assertTrue(all(name.endswith((".mp3", ".wav")) for name in names))
+
+    def test_optimized_export_reuses_cached_workspace_artifacts(self):
+        self._assert_real_mp3_concat_path()
+        with open(os.path.join(self.root_dir, "state.json"), "w", encoding="utf-8") as f:
+            json.dump({"input_file_path": os.path.join(self.root_dir, "Cache Book.txt")}, f)
+
+        self._write_wav("voicelines/clip1.wav", duration_seconds=0.5)
+        self._write_wav("voicelines/clip2.wav", duration_seconds=0.5)
+        self._write_wav("voicelines/clip3.wav", duration_seconds=0.5)
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "speaker": "Narrator",
+                "text": "One.",
+                "instruct": "",
+                "chapter": "Chapter 1",
+                "status": "done",
+                "audio_path": "voicelines/clip1.wav",
+            },
+            {
+                "id": 1,
+                "speaker": "Narrator",
+                "text": "Two.",
+                "instruct": "",
+                "chapter": "Chapter 2",
+                "status": "done",
+                "audio_path": "voicelines/clip2.wav",
+            },
+            {
+                "id": 2,
+                "speaker": "Narrator",
+                "text": "Three.",
+                "instruct": "",
+                "chapter": "Chapter 3",
+                "status": "done",
+                "audio_path": "voicelines/clip3.wav",
+            },
+        ])
+
+        original_normalize = self.manager._normalize_audio_file
+        self.manager._normalize_audio_file = lambda path, export_config=None: (True, path)
+        try:
+            first_success, _ = self.manager.export_optimized_mp3_zip(max_part_seconds=1.4)
+        finally:
+            self.manager._normalize_audio_file = original_normalize
+        self.assertTrue(first_success)
+
+        with patch.object(self.manager, "_export_concat_mp3", side_effect=AssertionError("concat should be reused")):
+            with patch.object(self.manager, "_normalize_audio_file", side_effect=AssertionError("normalize should be reused")):
+                second_success, second_output = self.manager.export_optimized_mp3_zip(max_part_seconds=1.4)
+        self.assertTrue(second_success)
+        self.assertEqual(second_output, "optimized_audiobook.zip")
 
     def test_optimized_export_surfaces_mp3_failure_without_wav_fallback(self):
         with open(os.path.join(self.root_dir, "state.json"), "w", encoding="utf-8") as f:
