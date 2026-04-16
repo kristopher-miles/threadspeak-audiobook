@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 import tempfile
 import time
 import threading
@@ -142,6 +143,30 @@ class MergeAudioTests(unittest.TestCase):
 
         self.assertFalse(success)
         self.assertIn("Audio normalization failed", message)
+
+    def test_merge_audio_preflight_marks_missing_clip_invalid(self):
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "speaker": "Narrator",
+                "text": "Broken clip.",
+                "instruct": "",
+                "chapter": "Chapter 1",
+                "status": "done",
+                "audio_path": "voicelines/missing.wav",
+            }
+        ])
+
+        success, message = self.manager.merge_audio()
+        self.assertFalse(success)
+        self.assertIn("preflight", message.lower())
+        self.assertIn("invalid chunk audio", message.lower())
+
+        chunk = self.manager.load_chunks()[0]
+        self.assertEqual(chunk.get("status"), "error")
+        validation = chunk.get("audio_validation") or {}
+        self.assertFalse(validation.get("is_valid", True))
+        self.assertIn("missing", str(validation.get("error", "")).lower())
 
     def test_merge_audio_reuses_cached_workspace_artifacts(self):
         self._assert_real_mp3_concat_path()
@@ -304,6 +329,87 @@ class MergeAudioTests(unittest.TestCase):
                 second_success, second_output = self.manager.export_optimized_mp3_zip(max_part_seconds=1.4)
         self.assertTrue(second_success)
         self.assertEqual(second_output, "optimized_audiobook.zip")
+
+    def test_optimized_parallel_failures_are_retried_serially(self):
+        self._assert_real_mp3_concat_path()
+        self._write_wav("voicelines/clip1.wav", duration_seconds=0.5)
+        self._write_wav("voicelines/clip2.wav", duration_seconds=0.5)
+        self._write_wav("voicelines/clip3.wav", duration_seconds=0.5)
+        self.manager.save_chunks([
+            {"id": 0, "speaker": "Narrator", "text": "One.", "instruct": "", "chapter": "Chapter 1", "status": "done", "audio_path": "voicelines/clip1.wav"},
+            {"id": 1, "speaker": "Narrator", "text": "Two.", "instruct": "", "chapter": "Chapter 2", "status": "done", "audio_path": "voicelines/clip2.wav"},
+            {"id": 2, "speaker": "Narrator", "text": "Three.", "instruct": "", "chapter": "Chapter 3", "status": "done", "audio_path": "voicelines/clip3.wav"},
+        ])
+
+        calls = {}
+        lock = threading.Lock()
+        original_export = self.manager._export_concat_mp3
+        original_normalize = self.manager._normalize_audio_file
+
+        def flaky_export(concat_path, output_path, progress_tick=None, log_callback=None):
+            basename = os.path.basename(output_path)
+            if basename.startswith("chapter_"):
+                with lock:
+                    attempt = calls.get(basename, 0) + 1
+                    calls[basename] = attempt
+                if attempt == 1:
+                    return False, "simulated transient chapter failure"
+            return original_export(concat_path, output_path, progress_tick=progress_tick, log_callback=log_callback)
+
+        self.manager._export_concat_mp3 = flaky_export
+        self.manager._normalize_audio_file = lambda path, export_config=None: (True, path)
+        previous_workers = os.environ.get("THREADSPEAK_EXPORT_CHAPTER_WORKERS")
+        os.environ["THREADSPEAK_EXPORT_CHAPTER_WORKERS"] = "4"
+        try:
+            success, output_filename = self.manager.export_optimized_mp3_zip(max_part_seconds=1.4)
+        finally:
+            self.manager._export_concat_mp3 = original_export
+            self.manager._normalize_audio_file = original_normalize
+            if previous_workers is None:
+                os.environ.pop("THREADSPEAK_EXPORT_CHAPTER_WORKERS", None)
+            else:
+                os.environ["THREADSPEAK_EXPORT_CHAPTER_WORKERS"] = previous_workers
+
+        self.assertTrue(success)
+        self.assertEqual(output_filename, "optimized_audiobook.zip")
+        self.assertTrue(any(name.startswith("chapter_") and count >= 2 for name, count in calls.items()))
+
+    def test_optimized_parallel_failure_exhausts_retries_and_aborts(self):
+        self._write_wav("voicelines/clip1.wav", duration_seconds=0.5)
+        self._write_wav("voicelines/clip2.wav", duration_seconds=0.5)
+        self._write_wav("voicelines/clip3.wav", duration_seconds=0.5)
+        self.manager.save_chunks([
+            {"id": 0, "speaker": "Narrator", "text": "One.", "instruct": "", "chapter": "Chapter 1", "status": "done", "audio_path": "voicelines/clip1.wav"},
+            {"id": 1, "speaker": "Narrator", "text": "Two.", "instruct": "", "chapter": "Chapter 2", "status": "done", "audio_path": "voicelines/clip2.wav"},
+            {"id": 2, "speaker": "Narrator", "text": "Three.", "instruct": "", "chapter": "Chapter 3", "status": "done", "audio_path": "voicelines/clip3.wav"},
+        ])
+
+        original_export = self.manager._export_concat_mp3
+        original_normalize = self.manager._normalize_audio_file
+
+        def always_fail_chapter(concat_path, output_path, progress_tick=None, log_callback=None):
+            basename = os.path.basename(output_path)
+            if basename.startswith("chapter_"):
+                return False, "simulated persistent chapter failure"
+            return original_export(concat_path, output_path, progress_tick=progress_tick, log_callback=log_callback)
+
+        self.manager._export_concat_mp3 = always_fail_chapter
+        self.manager._normalize_audio_file = lambda path, export_config=None: (True, path)
+        previous_workers = os.environ.get("THREADSPEAK_EXPORT_CHAPTER_WORKERS")
+        os.environ["THREADSPEAK_EXPORT_CHAPTER_WORKERS"] = "4"
+        try:
+            success, message = self.manager.export_optimized_mp3_zip(max_part_seconds=1.4)
+        finally:
+            self.manager._export_concat_mp3 = original_export
+            self.manager._normalize_audio_file = original_normalize
+            if previous_workers is None:
+                os.environ.pop("THREADSPEAK_EXPORT_CHAPTER_WORKERS", None)
+            else:
+                os.environ["THREADSPEAK_EXPORT_CHAPTER_WORKERS"] = previous_workers
+
+        self.assertFalse(success)
+        self.assertIn("parallel + serial retries", message)
+        self.assertIn("simulated persistent chapter failure", message)
 
     def test_optimized_export_surfaces_mp3_failure_without_wav_fallback(self):
         with open(os.path.join(self.root_dir, "state.json"), "w", encoding="utf-8") as f:

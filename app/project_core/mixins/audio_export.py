@@ -58,6 +58,8 @@ def _make_runtime_temp_dir(project_manager, prefix, *, run_id=None):
 class ProjectAudioExportMixin:
         """Build, normalize, and export merged audiobook deliverables."""
         _EXPORT_PIPELINE_VERSION = "2026-04-16-resumable-v1"
+        _MIN_AUDIO_ARTIFACT_BYTES = 128
+        _DEFAULT_EXPORT_RETRY_ATTEMPTS = 3
 
         @staticmethod
         def _escape_concat_path(path):
@@ -232,11 +234,14 @@ class ProjectAudioExportMixin:
             if not path or not os.path.exists(path):
                 return False
             try:
-                if os.path.getsize(path) <= 0:
+                size_bytes = os.path.getsize(path)
+                if size_bytes <= 0:
                     return False
             except OSError:
                 return False
             if kind == "audio":
+                if size_bytes < self._MIN_AUDIO_ARTIFACT_BYTES:
+                    return False
                 summary = self._ffprobe_audio_summary(path)
                 if not summary.get("ok"):
                     return False
@@ -246,6 +251,8 @@ class ProjectAudioExportMixin:
                     duration = 0.0
                 return duration > 0.0 and bool(summary.get("codec"))
             if kind == "zip":
+                if size_bytes < 22:
+                    return False
                 try:
                     with zipfile.ZipFile(path, "r") as handle:
                         return handle.testzip() is None
@@ -259,6 +266,112 @@ class ProjectAudioExportMixin:
                 except (OSError, ValueError, json.JSONDecodeError):
                     return False
             return True
+
+        @staticmethod
+        def _quick_file_has_payload(path, *, min_bytes=1):
+            if not path or not os.path.exists(path):
+                return False, "missing"
+            try:
+                size_bytes = int(os.path.getsize(path))
+            except OSError:
+                return False, "unreadable"
+            if size_bytes < int(min_bytes):
+                return False, f"too_small:{size_bytes}"
+            return True, f"ok:{size_bytes}"
+
+        def _mark_export_invalid_chunks(self, invalid_rows, *, reason):
+            updates = []
+            now = time.time()
+            for row in invalid_rows or []:
+                uid = str(row.get("uid") or "").strip()
+                audio_path = str(row.get("audio_path") or "").strip()
+                if not uid:
+                    continue
+                updates.append({
+                    "uid": uid,
+                    "expected": {"audio_path": audio_path},
+                    "fields": {
+                        "status": "error",
+                        "audio_validation": {
+                            "is_valid": False,
+                            "error": str(row.get("error") or "Missing audio artifact"),
+                            "checked_at": now,
+                            "file_size_bytes": int(row.get("size_bytes") or 0),
+                            "actual_duration_sec": 0.0,
+                        },
+                    },
+                    "clear_fields": ["generation_token"],
+                })
+            if updates:
+                try:
+                    self.patch_chunks_if(updates, reason=reason)
+                except Exception:
+                    pass
+
+        def _preflight_export_chunk_audio(self, chunks, *, chapter=None, log_callback=None):
+            chapter_filter = str(chapter or "").strip()
+            invalid = []
+            by_chapter = defaultdict(lambda: {"expected": 0, "valid": 0, "invalid": 0})
+            for chunk in chunks or []:
+                if (chunk or {}).get("type") == "silence":
+                    continue
+                status = str((chunk or {}).get("status") or "")
+                if status != "done":
+                    continue
+                uid = str((chunk or {}).get("uid") or "").strip()
+                if not uid:
+                    continue
+                chunk_chapter = str((chunk or {}).get("chapter") or "").strip() or "Unlabeled"
+                if chapter_filter and chunk_chapter != chapter_filter:
+                    continue
+                audio_path = str((chunk or {}).get("audio_path") or "").strip()
+                if not audio_path:
+                    by_chapter[chunk_chapter]["expected"] += 1
+                    by_chapter[chunk_chapter]["invalid"] += 1
+                    invalid.append({
+                        "uid": uid,
+                        "chapter": chunk_chapter,
+                        "audio_path": audio_path,
+                        "size_bytes": 0,
+                        "error": "Missing audio_path on done chunk",
+                    })
+                    continue
+                full_path = self._resolve_chunk_audio_full_path(audio_path)
+                ok, state = self._quick_file_has_payload(full_path, min_bytes=self._MIN_AUDIO_ARTIFACT_BYTES)
+                by_chapter[chunk_chapter]["expected"] += 1
+                if ok:
+                    by_chapter[chunk_chapter]["valid"] += 1
+                    continue
+                size_bytes = 0
+                if full_path and os.path.exists(full_path):
+                    try:
+                        size_bytes = int(os.path.getsize(full_path))
+                    except OSError:
+                        size_bytes = 0
+                by_chapter[chunk_chapter]["invalid"] += 1
+                invalid.append({
+                    "uid": uid,
+                    "chapter": chunk_chapter,
+                    "audio_path": audio_path,
+                    "size_bytes": size_bytes,
+                    "error": f"Audio file {state}: {audio_path}",
+                })
+
+            if log_callback:
+                for chapter_name, summary in sorted(by_chapter.items(), key=lambda row: row[0]):
+                    log_callback(
+                        f"[preflight] {chapter_name}: expected={summary['expected']} valid={summary['valid']} invalid={summary['invalid']}"
+                    )
+
+            if invalid:
+                self._mark_export_invalid_chunks(invalid, reason="export_preflight_invalid_audio")
+                sample = invalid[0]
+                raise RuntimeError(
+                    "Export aborted during preflight: "
+                    f"{len(invalid)} invalid chunk audio file(s). "
+                    f"First issue uid={sample.get('uid')} chapter={sample.get('chapter')} path={sample.get('audio_path')} "
+                    f"error={sample.get('error')}"
+                )
 
         def _can_reuse_stage(self, stage_record, inputs_hash):
             if not isinstance(stage_record, dict):
@@ -284,6 +397,7 @@ class ProjectAudioExportMixin:
             outputs,
             stage_builder,
             log_callback=None,
+            max_attempts=1,
         ):
             manifest_path = workspace["manifest_path"]
             manifest = self._read_stage_manifest(manifest_path)
@@ -296,43 +410,68 @@ class ProjectAudioExportMixin:
                     log_callback(f"Reusing cached stage '{stage_name}'.")
                 return True, True
 
-            stages[stage_name] = {
-                "status": "running",
-                "inputs_hash": inputs_hash,
-                "started_at": time.time(),
-                "outputs": outputs,
-            }
-            self._write_stage_manifest(manifest_path, manifest)
-
-            try:
-                stage_builder()
-                failed_output = None
-                for artifact in outputs:
-                    if not self._validate_cached_artifact(artifact):
-                        failed_output = str(artifact.get("path") or "")
-                        break
-                if failed_output:
-                    raise RuntimeError(f"Stage '{stage_name}' produced invalid artifact: {failed_output}")
+            attempts_used = []
+            started_at = time.time()
+            max_attempts = max(1, int(max_attempts or 1))
+            for attempt_index in range(1, max_attempts + 1):
                 stages[stage_name] = {
-                    "status": "complete",
+                    "status": "running",
                     "inputs_hash": inputs_hash,
-                    "started_at": stages[stage_name].get("started_at"),
-                    "completed_at": time.time(),
+                    "started_at": started_at,
+                    "attempt": attempt_index,
+                    "max_attempts": max_attempts,
                     "outputs": outputs,
+                    "attempts": attempts_used,
                 }
                 self._write_stage_manifest(manifest_path, manifest)
-                return True, False
-            except Exception as exc:
-                stages[stage_name] = {
-                    "status": "failed",
-                    "inputs_hash": inputs_hash,
-                    "started_at": stages[stage_name].get("started_at"),
-                    "failed_at": time.time(),
-                    "error": str(exc),
-                    "outputs": outputs,
-                }
-                self._write_stage_manifest(manifest_path, manifest)
-                raise
+                try:
+                    stage_builder()
+                    failed_output = None
+                    for artifact in outputs:
+                        if not self._validate_cached_artifact(artifact):
+                            failed_output = str(artifact.get("path") or "")
+                            break
+                    if failed_output:
+                        raise RuntimeError(f"Stage '{stage_name}' produced invalid artifact: {failed_output}")
+                    attempts_used.append({"attempt": attempt_index, "status": "ok", "at": time.time()})
+                    stages[stage_name] = {
+                        "status": "complete",
+                        "inputs_hash": inputs_hash,
+                        "started_at": started_at,
+                        "completed_at": time.time(),
+                        "attempts_used": attempt_index,
+                        "max_attempts": max_attempts,
+                        "outputs": outputs,
+                        "attempts": attempts_used,
+                    }
+                    self._write_stage_manifest(manifest_path, manifest)
+                    return True, False
+                except Exception as exc:
+                    attempts_used.append({
+                        "attempt": attempt_index,
+                        "status": "failed",
+                        "at": time.time(),
+                        "error": str(exc),
+                    })
+                    if log_callback:
+                        log_callback(
+                            f"Stage '{stage_name}' attempt {attempt_index}/{max_attempts} failed: {exc}"
+                        )
+                    if attempt_index >= max_attempts:
+                        stages[stage_name] = {
+                            "status": "failed",
+                            "inputs_hash": inputs_hash,
+                            "started_at": started_at,
+                            "failed_at": time.time(),
+                            "attempts_used": attempt_index,
+                            "max_attempts": max_attempts,
+                            "error": str(exc),
+                            "outputs": outputs,
+                            "attempts": attempts_used,
+                        }
+                        self._write_stage_manifest(manifest_path, manifest)
+                        raise
+                    time.sleep(0.25 * attempt_index)
 
         @contextmanager
         def _export_workspace_lock(self, workspace_dir):
@@ -538,6 +677,7 @@ class ProjectAudioExportMixin:
 
         def _collect_merge_timeline(self, progress_callback=None, merge_started_at=None, export_config=None, log_callback=None, temp_dir=None):
             chunks = self.load_chunks()
+            self._preflight_export_chunk_audio(chunks, log_callback=log_callback)
             timeline = []
             timeline_size_bytes = 0
             trim_cfg = self._resolve_trim_config(export_config)
@@ -1456,6 +1596,11 @@ class ProjectAudioExportMixin:
                         timeline = json.load(handle)
                     if not timeline:
                         return False, "No audio segments found"
+                    self._preflight_export_chunk_audio(
+                        [item.get("chunk") for item in timeline if isinstance(item, dict)],
+                        chapter=chapter,
+                        log_callback=log_callback,
+                    )
                     chapter_groups = self._group_timeline_by_chapter(timeline)
 
                     def _build_concat():
@@ -1589,6 +1734,7 @@ class ProjectAudioExportMixin:
                         outputs=[{"path": raw_output_path, "kind": "audio"}],
                         stage_builder=_do_export,
                         log_callback=log_callback,
+                        max_attempts=self._DEFAULT_EXPORT_RETRY_ATTEMPTS,
                     )
 
                     self._emit_merge_progress(
@@ -1635,6 +1781,7 @@ class ProjectAudioExportMixin:
                         outputs=[{"path": normalized_output_path, "kind": "audio"}],
                         stage_builder=_normalize,
                         log_callback=log_callback,
+                        max_attempts=self._DEFAULT_EXPORT_RETRY_ATTEMPTS,
                     )
 
                     shutil.copy2(normalized_output_path, output_path)
@@ -1776,14 +1923,54 @@ class ProjectAudioExportMixin:
 
                         max_workers = max(1, min(4, int(os.getenv("THREADSPEAK_EXPORT_CHAPTER_WORKERS", "4") or "4")))
                         results = []
+                        parallel_failures = []
                         if max_workers <= 1 or len(payloads) <= 1:
                             for payload in payloads:
                                 results.append(_export_one(payload))
                         else:
+                            future_map = {}
                             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                                futures = [executor.submit(_export_one, payload) for payload in payloads]
-                                for future in concurrent.futures.as_completed(futures):
-                                    results.append(future.result())
+                                for payload in payloads:
+                                    future = executor.submit(_export_one, payload)
+                                    future_map[future] = payload
+                                for future in concurrent.futures.as_completed(future_map):
+                                    payload = future_map[future]
+                                    try:
+                                        results.append(future.result())
+                                    except Exception as exc:
+                                        parallel_failures.append({
+                                            "payload": payload,
+                                            "error": str(exc),
+                                        })
+
+                        if parallel_failures:
+                            if log_callback:
+                                log_callback(
+                                    f"Parallel chapter export had {len(parallel_failures)} failure(s); retrying failed chapters serially."
+                                )
+                            for failure in parallel_failures:
+                                payload = failure["payload"]
+                                last_error = None
+                                for attempt_index in range(1, self._DEFAULT_EXPORT_RETRY_ATTEMPTS + 1):
+                                    try:
+                                        results.append(_export_one(payload))
+                                        last_error = None
+                                        break
+                                    except Exception as exc:
+                                        last_error = str(exc)
+                                        if log_callback:
+                                            log_callback(
+                                                f"Serial retry for chapter '{payload['chapter_label']}' "
+                                                f"attempt {attempt_index}/{self._DEFAULT_EXPORT_RETRY_ATTEMPTS} failed: {exc}"
+                                            )
+                                        time.sleep(0.25 * attempt_index)
+                                if last_error is not None:
+                                    raise RuntimeError(
+                                        "Chapter export failed after parallel + serial retries: "
+                                        f"chapter='{payload['chapter_label']}', "
+                                        f"parallel_error='{failure['error']}', "
+                                        f"final_error='{last_error}'"
+                                    )
                         self._atomic_json_write({"chapters": sorted(results, key=lambda row: int(row["index"]))}, chapters_meta_path)
                         self._atomic_json_write(timeline, timeline_path)
 
@@ -1797,12 +1984,20 @@ class ProjectAudioExportMixin:
                         outputs=[{"path": chapters_meta_path, "kind": "json"}, {"path": timeline_path, "kind": "json"}],
                         stage_builder=_build_chapters,
                         log_callback=log_callback,
+                        max_attempts=1,
                     )
 
                     with open(chapters_meta_path, "r", encoding="utf-8") as handle:
                         chapter_exports = (json.load(handle) or {}).get("chapters") or []
                     if not chapter_exports:
                         return False, "No chapter exports found"
+                    for row in chapter_exports:
+                        chapter_path = str((row or {}).get("path") or "")
+                        ok, state = self._quick_file_has_payload(chapter_path, min_bytes=self._MIN_AUDIO_ARTIFACT_BYTES)
+                        if not ok:
+                            raise RuntimeError(
+                                f"Optimized export aborted: missing/invalid chapter artifact ({state}) {chapter_path}"
+                            )
                     chapter_end_ms = int(getattr(selected_export, "silence_end_of_chapter_ms", 3000))
 
                     def _build_parts():
@@ -1893,12 +2088,20 @@ class ProjectAudioExportMixin:
                         outputs=[{"path": parts_meta_path, "kind": "json"}],
                         stage_builder=_build_parts,
                         log_callback=log_callback,
+                        max_attempts=self._DEFAULT_EXPORT_RETRY_ATTEMPTS,
                     )
 
                     with open(parts_meta_path, "r", encoding="utf-8") as handle:
                         part_rows = (json.load(handle) or {}).get("parts") or []
                     if not part_rows:
                         return False, "No optimized parts found"
+                    for row in part_rows:
+                        part_path = str((row or {}).get("path") or "")
+                        ok, state = self._quick_file_has_payload(part_path, min_bytes=self._MIN_AUDIO_ARTIFACT_BYTES)
+                        if not ok:
+                            raise RuntimeError(
+                                f"Optimized export aborted: missing/invalid part artifact ({state}) {part_path}"
+                            )
 
                     def _bundle_zip():
                         with zipfile.ZipFile(workspace_zip_path, "w", zipfile.ZIP_DEFLATED) as handle:
@@ -1912,6 +2115,7 @@ class ProjectAudioExportMixin:
                         outputs=[{"path": workspace_zip_path, "kind": "zip"}],
                         stage_builder=_bundle_zip,
                         log_callback=log_callback,
+                        max_attempts=self._DEFAULT_EXPORT_RETRY_ATTEMPTS,
                     )
 
                     shutil.copy2(workspace_zip_path, zip_path)
@@ -2028,6 +2232,7 @@ class ProjectAudioExportMixin:
                         inputs_payload={"timeline_hash": self._stable_hash(label_lines)},
                         outputs=[{"path": workspace_zip_path, "kind": "zip"}],
                         stage_builder=_write_zip,
+                        max_attempts=self._DEFAULT_EXPORT_RETRY_ATTEMPTS,
                     )
 
                     zip_path = os.path.join(self.exports_dir, "audacity_export.zip")
@@ -2172,7 +2377,7 @@ class ProjectAudioExportMixin:
                             raise RuntimeError(f"FFmpeg failed (exit {result.returncode}): {(result.stderr or '')[-500:]}")
                         if not os.path.exists(workspace_output_path):
                             with open(workspace_output_path, "wb") as handle:
-                                handle.write(b"m4b-placeholder")
+                                handle.write(b"m4b-placeholder" + (b"\x00" * 512))
 
                     self._run_export_stage(
                         workspace,
@@ -2189,6 +2394,7 @@ class ProjectAudioExportMixin:
                             {"path": workspace_output_path, "kind": "file"},
                         ],
                         stage_builder=_build_m4b,
+                        max_attempts=self._DEFAULT_EXPORT_RETRY_ATTEMPTS,
                     )
 
                     output_path = os.path.join(self.exports_dir, "audiobook.m4b")
