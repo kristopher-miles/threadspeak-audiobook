@@ -249,6 +249,7 @@ class _IsolatedServer:
         self.base_url = ""
         self.app_dir = ""
         self.layout: RuntimeLayout | None = None
+        self.log_path = ""
         self._config_patch = dict(config_patch or {})
         self._env_overrides = dict(env_overrides or {})
 
@@ -277,6 +278,7 @@ class _IsolatedServer:
             shutil.copy2(source, os.path.join(prompt_dir, filename))
 
         self._seed_config()
+        self.log_path = os.path.join(self._temp_root, "isolated-server.log")
 
         port = _find_free_port()
         self.base_url = f"http://127.0.0.1:{port}"
@@ -289,26 +291,25 @@ class _IsolatedServer:
         env["PYTHONUNBUFFERED"] = "1"
         env.update(self._env_overrides)
 
-        self._proc = subprocess.Popen(
-            [sys.executable, "app.py"],
-            cwd=self.app_dir,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        log_handle = open(self.log_path, "w", encoding="utf-8")
+        try:
+            self._proc = subprocess.Popen(
+                [sys.executable, "app.py"],
+                cwd=self.app_dir,
+                env=env,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        finally:
+            log_handle.close()
 
         deadline = time.time() + 60
         while time.time() < deadline:
             if self._proc.poll() is not None:
-                output = ""
-                if self._proc.stdout:
-                    try:
-                        output = self._proc.stdout.read() or ""
-                    except Exception:
-                        output = ""
+                output = _tail_file(self.log_path)
                 raise AssertionError(
                     f"Isolated server exited early with code {self._proc.returncode}.\n{output[-3000:]}"
                 )
@@ -772,6 +773,126 @@ def _wait_for_nav_unlocked(page, nav_selector: str, label: str) -> None:
         return bool(snapshot.get("exists")) and not bool(snapshot.get("locked"))
 
     _wait_for_activity(f"Waiting for {label} navigation unlock", probe, done)
+
+
+def _wait_for_nav_locked(page, nav_selector: str, label: str) -> None:
+    def probe():
+        return page.evaluate(
+            """(selector) => {
+                const nav = document.querySelector(selector);
+                return {
+                    exists: !!nav,
+                    locked: !!nav && nav.classList.contains('nav-locked'),
+                    class_name: nav ? String(nav.className || '') : '',
+                };
+            }""",
+            nav_selector,
+        )
+
+    def done(snapshot):
+        return bool(snapshot.get("exists")) and bool(snapshot.get("locked"))
+
+    _wait_for_activity(f"Waiting for {label} navigation lock", probe, done)
+
+
+def _read_script_step_states(page) -> Dict[str, str]:
+    payload = page.evaluate(
+        """() => {
+            const mapping = {
+                process_paragraphs: 'icon-process-paragraphs',
+                assign_dialogue: 'icon-assign-dialogue',
+                extract_temperament: 'icon-extract-temperament',
+                create_script: 'icon-create-script',
+            };
+            const states = {};
+            for (const [key, id] of Object.entries(mapping)) {
+                const el = document.getElementById(id);
+                states[key] = el ? String(el.dataset.stepState || '').trim() : '';
+            }
+            return states;
+        }"""
+    )
+    return dict(payload or {})
+
+
+def _wait_for_script_step_states(page, expected_states: Dict[str, str]) -> Dict[str, str]:
+    def probe():
+        return _read_script_step_states(page)
+
+    def done(snapshot):
+        return all(str(snapshot.get(key) or "") == str(value) for key, value in expected_states.items())
+
+    return _wait_for_activity("Waiting for Script step icon states", probe, done)
+
+
+def _reset_project_from_script_tab(page) -> None:
+    page.locator('.nav-link[data-tab="script"]').click()
+    _wait_for_script_tab_ready(page)
+
+    with page.expect_response(
+        lambda response: (
+            response.url.endswith("/api/reset_project")
+            and response.request.method == "POST"
+        ),
+        timeout=10000,
+    ) as response_info:
+        page.locator("#btn-reset-project-script-v2").click()
+        confirmed = _confirm_modal_if_present(page, timeout_ms=5000)
+        assert confirmed, "Reset Project confirmation modal did not appear."
+
+    response = response_info.value
+    if int(response.status) != 200:
+        response_text = ""
+        try:
+            response_text = response.text()
+        except Exception:
+            response_text = ""
+        raise AssertionError(
+            f"Reset Project request failed with status {response.status}.\n"
+            f"Response body:\n{response_text[:2000]}"
+        )
+
+    page.wait_for_load_state("domcontentloaded", timeout=10000)
+    _wait_for_bootstrap_ready(page)
+    _wait_for_script_tab_ready(page)
+
+
+def _iter_runtime_files(root_dir: str) -> list[str]:
+    if not os.path.isdir(root_dir):
+        return []
+    rel_paths: list[str] = []
+    for current_root, _, filenames in os.walk(root_dir):
+        for filename in filenames:
+            full_path = os.path.join(current_root, filename)
+            rel_paths.append(os.path.relpath(full_path, root_dir))
+    return sorted(rel_paths)
+
+
+def _assert_runtime_audio_artifacts_removed(layout: RuntimeLayout) -> None:
+    missing_targets = [
+        layout.audiobook_path,
+        layout.optimized_export_path,
+        layout.audacity_export_path,
+        layout.m4b_path,
+        layout.m4b_cover_path,
+    ]
+    lingering_targets = [path for path in missing_targets if os.path.exists(path)]
+    if lingering_targets:
+        raise AssertionError(
+            "Reset Project left generated export artifacts behind.\n"
+            f"Lingering targets: {json.dumps(lingering_targets, ensure_ascii=False, indent=2)}"
+        )
+
+    exports_files = _iter_runtime_files(layout.exports_dir)
+    voicelines_files = _iter_runtime_files(layout.voicelines_dir)
+    uploads_files = _iter_runtime_files(layout.uploads_dir)
+    if exports_files or voicelines_files or uploads_files:
+        raise AssertionError(
+            "Reset Project left generated runtime files behind.\n"
+            f"exports/: {json.dumps(exports_files, ensure_ascii=False, indent=2)}\n"
+            f"voicelines/: {json.dumps(voicelines_files, ensure_ascii=False, indent=2)}\n"
+            f"uploads/: {json.dumps(uploads_files, ensure_ascii=False, indent=2)}"
+        )
 
 
 def _switch_llm_via_setup_ui(

@@ -12,6 +12,7 @@ from pathlib import Path
 from fastapi import HTTPException
 from fastapi import BackgroundTasks
 from project import ProjectManager
+from runtime_layout import RuntimeLayout
 
 APP_DIR = Path(__file__).resolve().parents[2]
 MODULE_PATH = APP_DIR / "app.py"
@@ -279,6 +280,24 @@ class WorkflowEntrypointAccessibilityTests(unittest.TestCase):
             finally:
                 app_module.ROOT_DIR = original_root
                 app_module.VOICELINES_DIR = original_voicelines
+
+    def test_assert_test_safe_runtime_target_allows_default_runtime_for_temp_clone_layout(self):
+        with tempfile.TemporaryDirectory(prefix="threadspeak_temp_clone_layout_") as temp_repo_root:
+            app_dir = os.path.join(temp_repo_root, "app")
+            os.makedirs(app_dir, exist_ok=True)
+            temp_layout = RuntimeLayout.from_app_dir(app_dir)
+
+            original_layout = app_module.LAYOUT
+            try:
+                app_module.LAYOUT = temp_layout
+                app_module._assert_test_safe_runtime_target(
+                    "reset_project",
+                    ROOT_DIR=temp_layout.project_dir,
+                    VOICELINES_DIR=temp_layout.voicelines_dir,
+                    UPLOADS_DIR=temp_layout.uploads_dir,
+                )
+            finally:
+                app_module.LAYOUT = original_layout
 
     def test_reset_project_clears_db_runtime_artifacts_and_reinitializes_store(self):
         with tempfile.TemporaryDirectory() as temp_root:

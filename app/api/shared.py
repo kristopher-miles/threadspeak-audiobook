@@ -197,9 +197,22 @@ def _running_under_test_process():
     return "pytest" in argv0
 
 
+def _layout_repo_is_ephemeral_temp_clone() -> bool:
+    repo_root = os.path.realpath(os.path.abspath(str(getattr(LAYOUT, "repo_root", "") or "")))
+    if not repo_root:
+        return False
+    temp_root = os.path.realpath(os.path.abspath(tempfile.gettempdir()))
+    try:
+        return os.path.commonpath([repo_root, temp_root]) == temp_root
+    except ValueError:
+        return False
+
+
 def _assert_test_safe_runtime_target(operation: str, **paths):
     """Refuse destructive test operations that still point at the live runtime project."""
     if not _running_under_test_process():
+        return
+    if _layout_repo_is_ephemeral_temp_clone():
         return
 
     protected = {
