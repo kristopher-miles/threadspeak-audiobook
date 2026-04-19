@@ -30,6 +30,14 @@ WIN_ENV_PY = APP_DIR / "env" / "Scripts" / "python.exe"
 POSIX_ENV_PY = APP_DIR / "env" / "bin" / "python"
 EXTRA_ARGS_ENV = "THREADSPEAK_TEST_PYTEST_ARGS"
 SPLIT_STAGE_ENV = "THREADSPEAK_E2E_RUN_SPLIT_STAGE_UI"
+TMP_ROOT_ENV = "THREADSPEAK_TEST_TMPDIR"
+
+
+def _runtime_tmp_root() -> Path:
+    raw = str(os.environ.get(TMP_ROOT_ENV, "")).strip()
+    root = Path(raw) if raw else (REPO_ROOT / "cache" / "t")
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def _resolve_env_python() -> Path:
@@ -101,12 +109,24 @@ def main() -> int:
         return 2
 
     env = os.environ.copy()
+    runtime_tmp = _runtime_tmp_root()
+    env[TMP_ROOT_ENV] = str(runtime_tmp)
+    env["TMPDIR"] = str(runtime_tmp)
+    env["TEMP"] = str(runtime_tmp)
+    env["TMP"] = str(runtime_tmp)
+    cache_dir = (runtime_tmp / "pytest_cache").as_posix()
+    env["PYTEST_ADDOPTS"] = (
+        f"{env.get('PYTEST_ADDOPTS', '').strip()} -o cache_dir={cache_dir}"
+    ).strip()
     if args.split_stage_ui:
         env[SPLIT_STAGE_ENV] = "1"
     else:
         env.pop(SPLIT_STAGE_ENV, None)
 
-    primary_cmd = [str(python_bin), "-m", "pytest", "-q", *_split_args(args.pytest_args)]
+    primary_cmd = [str(python_bin), "-m", "pytest", "-q"]
+    if args.fresh_clone_e2e:
+        primary_cmd.append("--run-fresh-clone-e2e")
+    primary_cmd.extend(_split_args(args.pytest_args))
     rc = _run(primary_cmd, cwd=APP_DIR, env=env)
     if rc != 0:
         return rc

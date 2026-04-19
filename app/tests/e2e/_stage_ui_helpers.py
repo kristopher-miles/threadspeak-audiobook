@@ -7,8 +7,8 @@ import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import time
+import uuid
 from contextlib import contextmanager
 from typing import Any, Dict
 
@@ -34,6 +34,7 @@ SCRIPT_LEAK_CHECK_SECONDS = 5.0
 WATCHDOG_POLL_SECONDS = 0.35
 WATCHDOG_MAX_SECONDS = 120.0
 FRESH_CLONE_BOOTSTRAP_TIMEOUT_SECONDS = 1800.0
+_ACTIVE_E2E_PAGE = None
 MODEL_DOWNLOAD_DISABLE_ENV = "THREADSPEAK_DISABLE_MODEL_DOWNLOADS"
 MODEL_DOWNLOAD_FORBIDDEN_PATTERNS = (
     "model not cached locally, downloading",
@@ -49,15 +50,40 @@ def _env_true(name: str) -> bool:
     return str(os.environ.get(name, "")).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _e2e_temp_root() -> str:
+    override = str(os.environ.get("THREADSPEAK_TEST_TMPDIR", "")).strip()
+    if override:
+        root = override
+    else:
+        root = os.path.join(SOURCE_REPO_DIR, "cache", "t")
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _make_runtime_dir(prefix: str) -> str:
+    root = _e2e_temp_root()
+    for _ in range(100):
+        candidate = os.path.join(root, f"{prefix}{uuid.uuid4().hex}")
+        try:
+            os.makedirs(candidate, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            continue
+    raise AssertionError(f"Could not allocate runtime directory under {root}")
+
+
 @contextmanager
 def _report_directory(prefix: str):
     if _env_true("THREADSPEAK_E2E_KEEP_REPORTS"):
-        report_root = tempfile.mkdtemp(prefix=prefix)
+        report_root = _make_runtime_dir(prefix)
         print(f"[e2e-debug] keeping report directory: {report_root}", flush=True)
         yield report_root
         return
-    with tempfile.TemporaryDirectory(prefix=prefix) as report_root:
+    report_root = _make_runtime_dir(prefix)
+    try:
         yield report_root
+    finally:
+        shutil.rmtree(report_root, ignore_errors=True)
 
 
 def _find_free_port() -> int:
@@ -107,17 +133,34 @@ def _resolve_clone_source_commit(source_repo_dir: str, source_ref: str = "HEAD")
     return str(completed.stdout or "").strip()
 
 
-def _clone_repo_git_ref(source_repo_dir: str, clone_root: str, *, source_ref: str = "HEAD") -> str:
+def _copy_repo_git_metadata_and_tracked_files(source_repo_dir: str, clone_root: str) -> None:
     source_repo_dir = os.path.abspath(source_repo_dir)
     clone_root = os.path.abspath(clone_root)
     os.makedirs(clone_root, exist_ok=True)
-    expected_commit = _resolve_clone_source_commit(source_repo_dir, source_ref)
+    git_source = os.path.join(source_repo_dir, ".git")
+    git_target = os.path.join(clone_root, ".git")
+    shutil.copytree(git_source, git_target)
+
+    tracked = _run_command(
+        ["git", "-C", source_repo_dir, "ls-files", "-z"],
+        cwd=source_repo_dir,
+    ).stdout or ""
+    for rel_path in [item for item in tracked.split("\0") if item]:
+        source_path = os.path.join(source_repo_dir, rel_path)
+        target_path = os.path.join(clone_root, rel_path)
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        shutil.copy2(source_path, target_path)
+
+
+def _reset_repo_copy_to_ref(clone_root: str, *, source_ref: str = "HEAD") -> str:
+    clone_root = os.path.abspath(clone_root)
+    expected_commit = _resolve_clone_source_commit(clone_root, source_ref)
     _run_command(
-        ["git", "clone", "--local", "--shared", "--no-checkout", source_repo_dir, clone_root],
-        cwd=os.path.dirname(clone_root),
+        ["git", "-C", clone_root, "reset", "--hard", expected_commit],
+        cwd=clone_root,
     )
     _run_command(
-        ["git", "-C", clone_root, "checkout", "--detach", expected_commit],
+        ["git", "-C", clone_root, "clean", "-fdx"],
         cwd=clone_root,
     )
     actual_commit = str(
@@ -318,7 +361,7 @@ class _IsolatedServer:
         self._env_overrides = dict(env_overrides or {})
 
     def __enter__(self):
-        self._temp_root = tempfile.mkdtemp(prefix="threadspeak_e2e_stage1_ui_")
+        self._temp_root = _make_runtime_dir("s1_")
         self.app_dir = os.path.join(self._temp_root, "app")
         shutil.copytree(
             SOURCE_APP_DIR,
@@ -433,6 +476,8 @@ class _FreshCloneServer:
         bootstrap_config_values: dict | None = None,
         bootstrap_timeout_seconds: float = FRESH_CLONE_BOOTSTRAP_TIMEOUT_SECONDS,
         source_ref: str | None = None,
+        include_worktree_changes: bool | None = None,
+        reuse_source_env: bool = False,
     ):
         self._temp_root = ""
         self._proc: subprocess.Popen[str] | None = None
@@ -451,15 +496,19 @@ class _FreshCloneServer:
             or os.environ.get("THREADSPEAK_E2E_FRESH_CLONE_REF")
             or "HEAD"
         ).strip()
-        self._include_worktree_changes = str(
-            os.environ.get("THREADSPEAK_E2E_FRESH_CLONE_INCLUDE_WORKTREE", "1")
-        ).strip().lower() in {"1", "true", "yes", "on"}
+        if include_worktree_changes is None:
+            self._include_worktree_changes = str(
+                os.environ.get("THREADSPEAK_E2E_FRESH_CLONE_INCLUDE_WORKTREE", "1")
+            ).strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            self._include_worktree_changes = bool(include_worktree_changes)
+        self._reuse_source_env = bool(reuse_source_env)
 
     def __enter__(self):
-        self._temp_root = tempfile.mkdtemp(prefix="threadspeak_e2e_fresh_clone_")
-        self.repo_root = os.path.join(self._temp_root, "repo")
-        self.checked_out_commit = _clone_repo_git_ref(
-            SOURCE_REPO_DIR,
+        self._temp_root = _make_runtime_dir("fc_")
+        self.repo_root = self._temp_root
+        _copy_repo_git_metadata_and_tracked_files(SOURCE_REPO_DIR, self.repo_root)
+        self.checked_out_commit = _reset_repo_copy_to_ref(
             self.repo_root,
             source_ref=self._source_ref,
         )
@@ -467,10 +516,16 @@ class _FreshCloneServer:
             _overlay_worktree_changes(SOURCE_REPO_DIR, self.repo_root)
         self.app_dir = os.path.join(self.repo_root, "app")
         _seed_clone_config_values(self.app_dir, self._bootstrap_config_values)
-        self.python_path = _bootstrap_clone_app_env(
-            self.repo_root,
-            timeout_seconds=self._bootstrap_timeout_seconds,
-        )
+        if self._reuse_source_env:
+            if os.name == "nt":
+                self.python_path = os.path.join(SOURCE_APP_DIR, "env", "Scripts", "python.exe")
+            else:
+                self.python_path = os.path.join(SOURCE_APP_DIR, "env", "bin", "python")
+        else:
+            self.python_path = _bootstrap_clone_app_env(
+                self.repo_root,
+                timeout_seconds=self._bootstrap_timeout_seconds,
+            )
         self.log_path = os.path.join(self.repo_root, "fresh-clone-server.log")
 
         port = _find_free_port()
@@ -605,10 +660,12 @@ def _wait_for_activity(
     poll_seconds: float = WATCHDOG_POLL_SECONDS,
     max_total_seconds: float = WATCHDOG_MAX_SECONDS,
 ):
+    _fail_on_error_toasts(context=description)
     last_snapshot = None
     start_at = time.time()
     last_progress_at = time.time()
     while True:
+        _fail_on_error_toasts(context=description)
         snapshot = probe_fn()
         snapshot_key = json.dumps(snapshot, sort_keys=True, ensure_ascii=False, default=str)
         if snapshot_key != last_snapshot:
@@ -631,6 +688,118 @@ def _wait_for_activity(
                 f"Last observed state:\n{json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True)}"
             )
         time.sleep(poll_seconds)
+
+
+def _install_error_toast_guard(page) -> None:
+    global _ACTIVE_E2E_PAGE
+    _ACTIVE_E2E_PAGE = page
+    page.add_init_script(
+        """() => {
+            if (window.__THREADSPEAK_E2E_TOAST_GUARD_INSTALLED__) return;
+            window.__THREADSPEAK_E2E_TOAST_GUARD_INSTALLED__ = true;
+            window.__THREADSPEAK_E2E_ERROR_TOASTS__ = window.__THREADSPEAK_E2E_ERROR_TOASTS__ || [];
+
+            window.__THREADSPEAK_E2E_CAPTURE_TOAST__ = (message, level) => {
+                const normalized = String(level || '').trim().toLowerCase();
+                if (normalized !== 'error') return;
+                window.__THREADSPEAK_E2E_ERROR_TOASTS__.push({
+                    message: String(message ?? ''),
+                    level: normalized,
+                    href: String(location?.href || ''),
+                    ts: Date.now(),
+                    stack: String((new Error('E2E error toast')).stack || '')
+                });
+            };
+
+            const wrap = (fn) => {
+                if (typeof fn !== 'function') return fn;
+                if (fn.__threadspeakE2EWrapped__) return fn;
+                const wrapped = function(message, level, ...rest) {
+                    try { window.__THREADSPEAK_E2E_CAPTURE_TOAST__(message, level); } catch (_) {}
+                    return fn.call(this, message, level, ...rest);
+                };
+                wrapped.__threadspeakE2EWrapped__ = true;
+                return wrapped;
+            };
+
+            let currentShowToast = wrap(window.showToast);
+            Object.defineProperty(window, 'showToast', {
+                configurable: true,
+                enumerable: true,
+                get() { return currentShowToast; },
+                set(value) { currentShowToast = wrap(value); }
+            });
+        }"""
+    )
+
+
+def _pop_error_toasts(page) -> list[dict]:
+    try:
+        payload = page.evaluate(
+            """() => {
+                const bag = window.__THREADSPEAK_E2E_ERROR_TOASTS__;
+                if (!Array.isArray(bag) || !bag.length) return [];
+                const copy = bag.slice();
+                bag.length = 0;
+                return copy;
+            }"""
+        )
+    except Exception:
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def _collect_dom_error_toasts(page) -> list[dict]:
+    try:
+        payload = page.evaluate(
+            """() => {
+                const rows = Array.from(document.querySelectorAll('#toast-container .toast'));
+                return rows.map((toast) => {
+                    const body = toast.querySelector('.toast-body');
+                    const className = String(toast.className || '');
+                    const isError = /(^|\\s)bg-danger(\\s|$)/.test(className);
+                    return {
+                        message: String(body?.innerText || '').trim(),
+                        level: isError ? 'error' : '',
+                        href: String(location?.href || ''),
+                        ts: Date.now(),
+                        source: 'dom',
+                        class_name: className,
+                    };
+                }).filter((item) => item.level === 'error' && item.message);
+            }"""
+        )
+    except Exception:
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def _fail_on_error_toasts(*, context: str) -> None:
+    page = _ACTIVE_E2E_PAGE
+    if page is None:
+        return
+    toasts = _pop_error_toasts(page)
+    dom_toasts = _collect_dom_error_toasts(page)
+    if dom_toasts:
+        toasts.extend(dom_toasts)
+    if not toasts:
+        return
+    raise AssertionError(
+        f"Error toast detected during {context}.\n"
+        f"Toasts:\n{json.dumps(toasts, ensure_ascii=False, indent=2)}"
+    )
+
+
+def _assert_no_error_toasts_for(page, *, seconds: float, context: str, poll_ms: int = 100) -> None:
+    deadline = time.time() + max(seconds, 0.0)
+    while time.time() < deadline:
+        _fail_on_error_toasts(context=context)
+        page.wait_for_timeout(max(1, int(poll_ms)))
+    _fail_on_error_toasts(context=context)
 
 
 def _fetch_task_status(base_url: str, task_name: str) -> dict:
@@ -2099,7 +2268,7 @@ def _read_lock_owner_pid(lock_path: str) -> int | None:
 
 @contextmanager
 def _exclusive_run_lock(lock_name: str):
-    lock_dir = os.path.join(tempfile.gettempdir(), "threadspeak-e2e-locks")
+    lock_dir = os.path.join(_e2e_temp_root(), "threadspeak-e2e-locks")
     os.makedirs(lock_dir, exist_ok=True)
     lock_path = os.path.join(lock_dir, f"{lock_name}.lock")
     pid = os.getpid()
@@ -2151,6 +2320,7 @@ def _run_stage1_to_voices_tab(
     tts_mode: str | None = None,
     tts_parallel_workers: int | None = None,
 ) -> None:
+    _install_error_toast_guard(page)
     page.goto(app_base_url, wait_until="domcontentloaded", timeout=10000)
     _wait_for_bootstrap_ready(page)
     _wait_for_script_tab_ready(page)
