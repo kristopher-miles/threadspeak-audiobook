@@ -933,8 +933,21 @@ def _reset_project_from_script_tab(page) -> None:
 
 
 def _save_project_from_projects_tab(page, layout: RuntimeLayout, *, expected_name: str) -> None:
-    _confirm_modal_if_present(page, timeout_ms=750)
+    _dismiss_confirm_modal_if_present(page, timeout_ms=1500)
     page.locator('.nav-link[data-tab="saved-scripts"]').click()
+
+    def _refresh_projects_list() -> None:
+        try:
+            page.evaluate(
+                """() => {
+                    if (typeof window.loadSavedScripts === 'function') {
+                        return window.loadSavedScripts();
+                    }
+                    return null;
+                }"""
+            )
+        except Exception:
+            pass
 
     def _projects_probe() -> dict:
         payload = page.evaluate(
@@ -1022,6 +1035,29 @@ def _save_project_from_projects_tab(page, layout: RuntimeLayout, *, expected_nam
         for row in (save_result.get("rows") or [])
         if str(row.get("name") or "") == expected_name
     ]
+    if matching_rows and not any(str(row.get("badge") or "") != "Legacy" for row in matching_rows):
+        # Disk write can complete before the tab list re-renders from /api/scripts.
+        _refresh_projects_list()
+        save_result = _wait_for_activity(
+            "Waiting for saved project badge upgrade",
+            _projects_probe,
+            lambda snapshot: bool(
+                any(
+                    str(row.get("name") or "") == expected_name
+                    and str(row.get("badge") or "") != "Legacy"
+                    for row in (snapshot.get("rows") or [])
+                )
+                and bool(snapshot.get("archive_exists"))
+            ),
+            poll_seconds=0.3,
+            max_total_seconds=15.0,
+        )
+        matching_rows = [
+            row
+            for row in (save_result.get("rows") or [])
+            if str(row.get("name") or "") == expected_name
+        ]
+
     assert matching_rows, (
         f"Saved project list did not show derived project name {expected_name!r}.\n"
         f"rows={json.dumps(save_result.get('rows') or [], ensure_ascii=False, indent=2)}"
@@ -1253,6 +1289,7 @@ def _assert_saved_project_present_in_projects_tab(
     *,
     expected_name: str,
 ) -> dict:
+    _dismiss_confirm_modal_if_present(page, timeout_ms=1500)
     page.locator('.nav-link[data-tab="saved-scripts"]').click()
     snapshot = _wait_for_activity(
         "Waiting for saved project row in Projects tab",
@@ -1289,6 +1326,7 @@ def _assert_saved_project_present_in_projects_tab(
 
 
 def _load_saved_project_from_projects_tab(page, *, expected_name: str) -> dict:
+    _dismiss_confirm_modal_if_present(page, timeout_ms=1500)
     page.locator('.nav-link[data-tab="saved-scripts"]').click()
     projects_snapshot = _wait_for_activity(
         "Waiting for Projects tab before load",
@@ -1964,13 +2002,37 @@ def _wait_for_audio_merge_completion(base_url: str) -> dict:
 
 
 def _confirm_modal_if_present(page, *, timeout_ms: int = 3000) -> bool:
+    return _dismiss_confirm_modal_if_present(page, timeout_ms=timeout_ms)
+
+
+def _dismiss_confirm_modal_if_present(page, *, timeout_ms: int = 3000) -> bool:
     confirm_ok = page.locator("#confirmModalOk")
-    try:
-        confirm_ok.wait_for(state="visible", timeout=timeout_ms)
-    except PlaywrightTimeoutError:
-        return False
-    confirm_ok.click()
-    return True
+    modal = page.locator("#confirmModal")
+    deadline = time.time() + (max(timeout_ms, 1) / 1000.0)
+    dismissed = False
+
+    while time.time() < deadline:
+        try:
+            if confirm_ok.is_visible():
+                confirm_ok.click()
+                dismissed = True
+                # Ensure the modal/backdrop fully clears before the next click.
+                modal.wait_for(state="hidden", timeout=2000)
+                # One extra short settle helps with Bootstrap fade transitions.
+                page.wait_for_timeout(120)
+            else:
+                if dismissed:
+                    return True
+                page.wait_for_timeout(50)
+        except PlaywrightTimeoutError:
+            page.wait_for_timeout(50)
+        except Exception:
+            # If modal is gone mid-loop, treat that as dismissed when we clicked.
+            if dismissed:
+                return True
+            page.wait_for_timeout(50)
+
+    return dismissed
 
 
 def _looks_like_mp3(path: str) -> bool:

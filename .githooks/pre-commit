@@ -1,0 +1,25 @@
+#!/usr/bin/env sh
+
+set -u
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cd "$ROOT" || exit 0
+
+PYTHON_BIN=""
+if [ -x "$ROOT/app/env/Scripts/python.exe" ]; then
+  PYTHON_BIN="$ROOT/app/env/Scripts/python.exe"
+elif [ -x "$ROOT/app/env/bin/python" ]; then
+  PYTHON_BIN="$ROOT/app/env/bin/python"
+elif command -v python >/dev/null 2>&1; then
+  PYTHON_BIN="python"
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON_BIN="python3"
+fi
+
+if [ -z "$PYTHON_BIN" ]; then
+  echo "[xplat-sanity] Skip: no python interpreter found."
+  exit 0
+fi
+
+"$PYTHON_BIN" app/scripts/cross_platform_sanity_check.py --staged || true
+exit 0

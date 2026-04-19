@@ -81,6 +81,13 @@ module.exports = {
       }
     }
   }, {
+    method: "shell.run",
+    params: {
+      venv: "env",
+      path: "app",
+      message: "python scripts/install_git_hooks.py"
+    }
+  }, {
     method: "notify",
     params: {
       html: "Installation Complete! Click 'Start' to launch the application."

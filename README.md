@@ -84,6 +84,10 @@ Transform a source script into a production-ready audiobook with an end-to-end p
 4. Click **Start** to launch the web interface
 
 Pinokio installs both runtime and test dependencies into `app/env`. Use the Pinokio `Run Tests` action, or run `app/env/bin/python -m pytest -q` from the repo root to execute the test suite against the app-managed environment.
+
+The test harness now runs a final warn-only cross-platform sanity pass (`python scripts/cross_platform_sanity_check.py`) after pytest completes. This checker does not fail builds by default.
+
+`install.js` also wires a local pre-commit hook (`.githooks/pre-commit`) that scans staged files with the same checker and prints warnings only.
 For deterministic model-free end-to-end runs, see [E2E Simulators](wiki/E2E-Simulators.md).
 
 ## First Launch

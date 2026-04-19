@@ -1,0 +1,21 @@
+{
+  "exclude_globs": [
+    ".git/*",
+    "node_modules/*",
+    "logs/*",
+    "cache/*",
+    "runtime/*",
+    "wiki/*",
+    "app/test_fixtures/*",
+    "app/resources/*",
+    "app/output_audio/*",
+    "app/output_audio_cloned/*",
+    "test-results/*"
+  ],
+  "suppressions": [
+    {
+      "path": "app/tests/e2e/test_fresh_clone_support.py",
+      "rule": "posix_shell_token"
+    }
+  ]
+}
