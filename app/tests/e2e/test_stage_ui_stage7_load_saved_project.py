@@ -1,14 +1,14 @@
-"""Non-legacy UI E2E reset coverage after export."""
+"""Non-legacy UI E2E saved-project reload coverage after reset."""
 
 from ._stage_ui_helpers import *  # noqa: F401,F403
 
 
-def test_e2e_stage6_reset_project_after_export_nonlegacy_ui_only():
+def test_e2e_stage7_load_saved_project_after_reset_nonlegacy_ui_only():
     """
     Top-level rule:
     once browser interactions begin, this flow uses UI navigation/actions only.
     """
-    with _exclusive_run_lock("stage6_reset_project_after_export_nonlegacy_ui_only"):
+    with _exclusive_run_lock("stage7_load_saved_project_after_reset_nonlegacy_ui_only"):
         fixtures_dir = os.path.join(SOURCE_APP_DIR, "test_fixtures", "e2e_sim")
         script_fixture_path = os.path.join(fixtures_dir, "lmstudio_generate_script_test_book.json")
         voice_fixture_path = os.path.join(fixtures_dir, "lmstudio_voice_profiles_test_book.json")
@@ -68,7 +68,7 @@ def test_e2e_stage6_reset_project_after_export_nonlegacy_ui_only():
         }
         assert expected_speakers, "Voice fixture metadata.speakers must include at least one speaker."
 
-        with _report_directory("threadspeak_stage6_reset_report_") as report_root:
+        with _report_directory("threadspeak_stage7_load_saved_project_report_") as report_root:
             script_lm_trace = os.path.join(report_root, "lm-script-trace.jsonl")
             voice_lm_trace = os.path.join(report_root, "lm-voice-trace.jsonl")
             qwen_report = os.path.join(report_root, "qwen-report.json")
@@ -90,12 +90,12 @@ def test_e2e_stage6_reset_project_after_export_nonlegacy_ui_only():
             with LMStudioSimServer(
                 script_fixture_path,
                 trace_path=script_lm_trace,
-                trace_label="stage6-script-lm",
+                trace_label="stage7-script-lm",
             ) as script_server:
                 with LMStudioSimServer(
                     voice_fixture_path,
                     trace_path=voice_lm_trace,
-                    trace_label="stage6-voice-lm",
+                    trace_label="stage7-voice-lm",
                 ) as voice_server:
                     config_patch["llm"]["base_url"] = f"{script_server.base_url}/v1"
                     with _IsolatedServer(config_patch=config_patch, env_overrides=env_overrides) as app_server:
@@ -142,70 +142,12 @@ def test_e2e_stage6_reset_project_after_export_nonlegacy_ui_only():
                                     expected_speakers=expected_speakers,
                                 )
 
-                                _wait_for_nav_unlocked(page, '.nav-link[data-tab="audio"]', "Export tab")
-                                page.locator('.nav-link[data-tab="audio"]').click()
-                                _wait_for_activity(
-                                    "Waiting for Export tab",
-                                    lambda: page.evaluate(
-                                        """() => ({
-                                            visible: !!document.querySelector('#audio-tab') && getComputedStyle(document.querySelector('#audio-tab')).display !== 'none',
-                                            has_merge_btn: !!document.querySelector('#btn-merge'),
-                                            has_logs: !!document.querySelector('#audio-logs'),
-                                            has_chapter_select: !!document.querySelector('#export-chapter-select')
-                                        })"""
-                                    ),
-                                    lambda snapshot: bool(
-                                        snapshot.get("visible")
-                                        and snapshot.get("has_merge_btn")
-                                        and snapshot.get("has_logs")
-                                        and snapshot.get("has_chapter_select")
-                                    ),
-                                )
-
-                                page.locator("#export-chapter-select").select_option("")
-                                _wait_for_activity(
-                                    "Waiting for full-project export scope selection",
-                                    lambda: {
-                                        "chapter_value": page.evaluate(
-                                            "() => String(document.querySelector('#export-chapter-select')?.value || '')"
-                                        )
-                                    },
-                                    lambda snapshot: str(snapshot.get("chapter_value") or "") == "",
-                                )
-
-                                with page.expect_response(
-                                    lambda response: (
-                                        response.url.endswith("/api/merge")
-                                        and response.request.method == "POST"
-                                        and response.status == 200
-                                    ),
-                                    timeout=10000,
-                                ):
-                                    page.locator("#btn-merge").click()
-                                    _confirm_modal_if_present(page, timeout_ms=4000)
-
-                                _wait_for_audio_merge_completion(app_server.base_url)
-
-                                _wait_for_activity(
-                                    "Waiting for merged export UI readiness",
-                                    lambda: page.evaluate(
-                                        """() => ({
-                                            player_visible: !!document.querySelector('#audio-player-container')
-                                                && getComputedStyle(document.querySelector('#audio-player-container')).display !== 'none',
-                                            audio_src: String(document.querySelector('#main-audio')?.getAttribute('src') || ''),
-                                            download_href: String(document.querySelector('#download-link')?.getAttribute('href') || ''),
-                                        })"""
-                                    ),
-                                    lambda snapshot: bool(
-                                        snapshot.get("player_visible")
-                                        and ("/api/audiobook" in str(snapshot.get("audio_src") or "") or "/api/audiobook" in str(snapshot.get("download_href") or ""))
-                                    ),
-                                )
-
                                 assert app_server.layout is not None, "Missing isolated runtime layout."
-                                isolated_mp3 = app_server.layout.audiobook_path
-                                assert os.path.exists(isolated_mp3), f"Merged output not found: {isolated_mp3}"
-                                assert _looks_like_mp3(isolated_mp3), f"Merged output is not recognized as MP3: {isolated_mp3}"
+                                initial_export = _export_merged_audiobook_via_ui(
+                                    page,
+                                    app_base_url=app_server.base_url,
+                                    layout=app_server.layout,
+                                )
 
                                 _save_project_from_projects_tab(
                                     page,
@@ -213,66 +155,40 @@ def test_e2e_stage6_reset_project_after_export_nonlegacy_ui_only():
                                     expected_name="test_book",
                                 )
 
-                                page.locator('.nav-link[data-tab="script"]').click()
-                                _wait_for_script_tab_ready(page)
-                                complete_states = _wait_for_script_step_states(
+                                _assert_script_loaded_with_completed_steps(
                                     page,
-                                    {
-                                        "process_paragraphs": "complete",
-                                        "assign_dialogue": "complete",
-                                        "extract_temperament": "complete",
-                                        "create_script": "complete",
-                                    },
+                                    expected_loaded_name="test_book.epub",
                                 )
-                                assert all(value == "complete" for value in complete_states.values()), (
-                                    f"Expected complete script step states before reset, got: {complete_states}"
-                                )
-
                                 _reset_project_from_script_tab(page)
+                                _assert_reset_project_ui_and_artifacts(page, app_server.layout)
 
-                                reset_snapshot = _wait_for_activity(
-                                    "Waiting for Script tab reset state",
-                                    lambda: page.evaluate(
-                                        """() => {
-                                            const statusEl = document.querySelector('#upload-status');
-                                            const text = String(statusEl?.innerText || '').trim();
-                                            const hasSuccess = !!statusEl?.querySelector('.text-success');
-                                            const uploadSection = document.querySelector('#file-upload-section');
-                                            const uploadVisible = !!uploadSection && getComputedStyle(uploadSection).display !== 'none';
-                                            return {
-                                                upload_text: text,
-                                                has_success: hasSuccess,
-                                                upload_visible: uploadVisible,
-                                            };
-                                        }"""
-                                    ),
-                                    lambda snapshot: (
-                                        "Loaded:" not in str(snapshot.get("upload_text") or "")
-                                        and not bool(snapshot.get("has_success"))
-                                        and bool(snapshot.get("upload_visible"))
-                                    ),
-                                )
-                                assert "Loaded:" not in str(reset_snapshot.get("upload_text") or "")
-
-                                _wait_for_nav_locked(page, '.nav-link[data-tab="voices"]', "Voices tab")
-                                _wait_for_nav_locked(page, '.nav-link[data-tab="editor"]', "Editor tab")
-                                _wait_for_nav_locked(page, '.nav-link[data-tab="proofread"]', "Proofread tab")
-                                _wait_for_nav_locked(page, '.nav-link[data-tab="audio"]', "Export tab")
-
-                                post_reset_states = _wait_for_script_step_states(
+                                _assert_saved_project_present_in_projects_tab(
                                     page,
-                                    {
-                                        "process_paragraphs": "not_started",
-                                        "assign_dialogue": "not_started",
-                                        "extract_temperament": "not_started",
-                                        "create_script": "not_started",
-                                    },
+                                    app_server.layout,
+                                    expected_name="test_book",
                                 )
-                                assert all(value != "complete" for value in post_reset_states.values()), (
-                                    f"Expected reset script step states to drop completion, got: {post_reset_states}"
+                                _load_saved_project_from_projects_tab(
+                                    page,
+                                    expected_name="test_book",
                                 )
+                                _assert_pipeline_tabs_unlocked(page)
+                                _assert_script_loaded_with_completed_steps(
+                                    page,
+                                    expected_loaded_name="test_book.epub",
+                                )
+                                _assert_restored_voice_cards(page, expected_speakers=expected_speakers)
+                                _assert_editor_whole_project_audio_restored(page)
+                                _assert_proofread_whole_project_restored(page)
 
-                                _assert_runtime_audio_artifacts_removed(app_server.layout)
+                                restored_export = _export_merged_audiobook_via_ui(
+                                    page,
+                                    app_base_url=app_server.base_url,
+                                    layout=app_server.layout,
+                                )
+                                _assert_duration_matches_baseline(
+                                    actual_seconds=float(restored_export["duration_seconds"]),
+                                    expected_seconds=float(initial_export["duration_seconds"]),
+                                )
 
                                 assert not console_errors, _report_console(console_errors, page_errors, warnings)
                                 assert not page_errors, _report_console(console_errors, page_errors, warnings)
@@ -301,7 +217,7 @@ def test_e2e_stage6_reset_project_after_export_nonlegacy_ui_only():
                                 if app_server.layout is not None and os.path.isdir(app_server.layout.project_archives_dir):
                                     archive_listing = sorted(os.listdir(app_server.layout.project_archives_dir))
                                 raise AssertionError(
-                                    f"Stage-6 reset UI flow failed: {exc}\n"
+                                    f"Stage-7 saved-project reload UI flow failed: {exc}\n"
                                     f"Script logs tail:\n{script_logs[-2000:]}\n"
                                     f"Proofread logs tail:\n{proofread_logs[-2000:]}\n"
                                     f"Audio logs tail:\n{audio_logs[-2000:]}\n"

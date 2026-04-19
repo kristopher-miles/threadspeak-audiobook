@@ -349,10 +349,6 @@
         async function saveScript() {
             const nameInput = document.getElementById('save-script-name');
             const name = nameInput.value.trim();
-            if (!name) {
-                showToast('Please enter a name for the project.', 'warning');
-                return;
-            }
             try {
                 const res = await fetch('/api/scripts/save', {
                     method: 'POST',

@@ -857,6 +857,601 @@ def _reset_project_from_script_tab(page) -> None:
     _wait_for_script_tab_ready(page)
 
 
+def _save_project_from_projects_tab(page, layout: RuntimeLayout, *, expected_name: str) -> None:
+    page.locator('.nav-link[data-tab="saved-scripts"]').click()
+
+    def _projects_probe() -> dict:
+        payload = page.evaluate(
+            """() => {
+                const tab = document.querySelector('#saved-scripts-tab');
+                const saveInput = document.querySelector('#save-script-name');
+                const saveBtn = document.querySelector('#saved-scripts-tab button.btn-outline-primary');
+                const list = document.querySelector('#saved-scripts-list');
+                const visible = (el) => {
+                    if (!el) return false;
+                    const style = getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                };
+                const rows = Array.from(list?.querySelectorAll('.d-flex.align-items-center.py-2.border-bottom') || []).map((row) => ({
+                    name: String(row.querySelector('strong')?.innerText || '').trim(),
+                    badge: String(row.querySelector('.badge')?.innerText || '').trim(),
+                    text: String(row.innerText || '').trim(),
+                }));
+                const toasts = Array.from(document.querySelectorAll('#toast-container .toast .toast-body'))
+                    .map((el) => String(el.innerText || '').trim())
+                    .filter(Boolean);
+                return {
+                    tab_visible: visible(tab),
+                    has_save_input: !!saveInput,
+                    has_save_btn: !!saveBtn,
+                    has_list: !!list,
+                    list_text: String(list?.innerText || '').trim(),
+                    rows,
+                    toast_messages: toasts,
+                };
+            }"""
+        )
+        result = dict(payload or {})
+        archive_path = os.path.join(layout.project_archives_dir, f"{expected_name}.zip")
+        result["archive_path"] = archive_path
+        result["archive_exists"] = os.path.exists(archive_path)
+        result["archive_listing"] = sorted(os.listdir(layout.project_archives_dir)) if os.path.isdir(layout.project_archives_dir) else []
+        return result
+
+    projects_snapshot = _wait_for_activity(
+        "Waiting for Projects tab",
+        _projects_probe,
+        lambda snapshot: bool(
+            snapshot.get("tab_visible")
+            and snapshot.get("has_save_input")
+            and snapshot.get("has_save_btn")
+            and snapshot.get("has_list")
+        ),
+    )
+
+    assert not bool(projects_snapshot.get("archive_exists")), (
+        f"Expected no pre-existing project archive before save, but found: {projects_snapshot.get('archive_path')}\n"
+        f"archive_listing={projects_snapshot.get('archive_listing')}"
+    )
+
+    save_name_input = page.locator("#save-script-name")
+    save_name_input.fill("")
+    page.locator('#saved-scripts-tab button.btn-outline-primary').click()
+
+    save_result = _wait_for_activity(
+        "Waiting for blank-name project save result",
+        _projects_probe,
+        lambda snapshot: (
+            "Please enter a name for the project." in (snapshot.get("toast_messages") or [])
+            or any(
+                str(row.get("name") or "") == expected_name
+                and str(row.get("badge") or "") != "Legacy"
+                for row in (snapshot.get("rows") or [])
+            )
+            or bool(snapshot.get("archive_exists"))
+        ),
+        poll_seconds=0.2,
+        max_total_seconds=5.0,
+    )
+
+    assert "Please enter a name for the project." not in (save_result.get("toast_messages") or []), (
+        "Projects save incorrectly prompted for a name instead of auto-deriving one.\n"
+        f"toast_messages={save_result.get('toast_messages')}\n"
+        f"rows={json.dumps(save_result.get('rows') or [], ensure_ascii=False, indent=2)}"
+    )
+
+    matching_rows = [
+        row
+        for row in (save_result.get("rows") or [])
+        if str(row.get("name") or "") == expected_name
+    ]
+    assert matching_rows, (
+        f"Saved project list did not show derived project name {expected_name!r}.\n"
+        f"rows={json.dumps(save_result.get('rows') or [], ensure_ascii=False, indent=2)}"
+    )
+    assert any(str(row.get("badge") or "") != "Legacy" for row in matching_rows), (
+        f"Saved project name {expected_name!r} did not upgrade from legacy snapshot to saved project.\n"
+        f"rows={json.dumps(matching_rows, ensure_ascii=False, indent=2)}"
+    )
+    assert bool(save_result.get("archive_exists")), (
+        f"Expected saved project archive not found on disk: {save_result.get('archive_path')}\n"
+        f"archive_listing={save_result.get('archive_listing')}"
+    )
+
+
+def _projects_tab_snapshot(page, layout: RuntimeLayout | None = None, *, expected_name: str | None = None) -> dict:
+    payload = page.evaluate(
+        """() => {
+            const tab = document.querySelector('#saved-scripts-tab');
+            const saveInput = document.querySelector('#save-script-name');
+            const saveBtn = document.querySelector('#saved-scripts-tab button.btn-outline-primary');
+            const list = document.querySelector('#saved-scripts-list');
+            const visible = (el) => {
+                if (!el) return false;
+                const style = getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+            };
+            const rows = Array.from(list?.querySelectorAll('.d-flex.align-items-center.py-2.border-bottom') || []).map((row, index) => ({
+                index,
+                name: String(row.querySelector('strong')?.innerText || '').trim(),
+                badge: String(row.querySelector('.badge')?.innerText || '').trim(),
+                text: String(row.innerText || '').trim(),
+            }));
+            const toasts = Array.from(document.querySelectorAll('#toast-container .toast .toast-body'))
+                .map((el) => String(el.innerText || '').trim())
+                .filter(Boolean);
+            return {
+                tab_visible: visible(tab),
+                has_save_input: !!saveInput,
+                has_save_btn: !!saveBtn,
+                has_list: !!list,
+                list_text: String(list?.innerText || '').trim(),
+                rows,
+                toast_messages: toasts,
+            };
+        }"""
+    )
+    result = dict(payload or {})
+    if layout is not None and expected_name:
+        archive_path = os.path.join(layout.project_archives_dir, f"{expected_name}.zip")
+        result["archive_path"] = archive_path
+        result["archive_exists"] = os.path.exists(archive_path)
+        result["archive_listing"] = sorted(os.listdir(layout.project_archives_dir)) if os.path.isdir(layout.project_archives_dir) else []
+    return result
+
+
+def _export_merged_audiobook_via_ui(page, *, app_base_url: str, layout: RuntimeLayout) -> dict[str, Any]:
+    _wait_for_nav_unlocked(page, '.nav-link[data-tab="audio"]', "Export tab")
+    page.locator('.nav-link[data-tab="audio"]').click()
+    _wait_for_activity(
+        "Waiting for Export tab",
+        lambda: page.evaluate(
+            """() => ({
+                visible: !!document.querySelector('#audio-tab') && getComputedStyle(document.querySelector('#audio-tab')).display !== 'none',
+                has_merge_btn: !!document.querySelector('#btn-merge'),
+                has_logs: !!document.querySelector('#audio-logs'),
+                has_chapter_select: !!document.querySelector('#export-chapter-select')
+            })"""
+        ),
+        lambda snapshot: bool(
+            snapshot.get("visible")
+            and snapshot.get("has_merge_btn")
+            and snapshot.get("has_logs")
+            and snapshot.get("has_chapter_select")
+        ),
+    )
+
+    page.locator("#export-chapter-select").select_option("")
+    _wait_for_activity(
+        "Waiting for full-project export scope selection",
+        lambda: {
+            "chapter_value": page.evaluate(
+                "() => String(document.querySelector('#export-chapter-select')?.value || '')"
+            )
+        },
+        lambda snapshot: str(snapshot.get("chapter_value") or "") == "",
+    )
+
+    with page.expect_response(
+        lambda response: (
+            response.url.endswith("/api/merge")
+            and response.request.method == "POST"
+            and response.status == 200
+        ),
+        timeout=10000,
+    ):
+        page.locator("#btn-merge").click()
+        _confirm_modal_if_present(page, timeout_ms=4000)
+
+    _wait_for_audio_merge_completion(app_base_url)
+
+    _wait_for_activity(
+        "Waiting for merged export UI readiness",
+        lambda: page.evaluate(
+            """() => ({
+                player_visible: !!document.querySelector('#audio-player-container')
+                    && getComputedStyle(document.querySelector('#audio-player-container')).display !== 'none',
+                audio_src: String(document.querySelector('#main-audio')?.getAttribute('src') || ''),
+                download_href: String(document.querySelector('#download-link')?.getAttribute('href') || ''),
+            })"""
+        ),
+        lambda snapshot: bool(
+            snapshot.get("player_visible")
+            and ("/api/audiobook" in str(snapshot.get("audio_src") or "") or "/api/audiobook" in str(snapshot.get("download_href") or ""))
+        ),
+    )
+
+    mp3_response = requests.get(f"{app_base_url}/api/audiobook", timeout=30)
+    _assert_status(mp3_response, 200, "download merged audiobook")
+    content_type = str(mp3_response.headers.get("content-type") or "").lower()
+    assert "audio/mpeg" in content_type, f"Expected audio/mpeg content-type, got: {content_type}"
+    assert len(mp3_response.content) > 1024, "Merged audiobook download is unexpectedly small."
+
+    isolated_mp3 = layout.audiobook_path
+    assert os.path.exists(isolated_mp3), f"Merged output not found: {isolated_mp3}"
+    isolated_size = os.path.getsize(isolated_mp3)
+    assert isolated_size > 1024, f"Merged output is too small: {isolated_size} bytes"
+    assert _looks_like_mp3(isolated_mp3), f"Merged output is not recognized as MP3: {isolated_mp3}"
+    duration_seconds = _audio_duration_seconds(isolated_mp3)
+    assert duration_seconds > 240.0, (
+        f"Merged audiobook duration must be > 4 minutes, got {duration_seconds:.2f}s"
+    )
+    return {
+        "path": isolated_mp3,
+        "size_bytes": isolated_size,
+        "duration_seconds": duration_seconds,
+    }
+
+
+def _assert_script_loaded_with_completed_steps(page, *, expected_loaded_name: str) -> dict[str, str]:
+    page.locator('.nav-link[data-tab="script"]').click()
+    _wait_for_script_tab_ready(page)
+    loaded_snapshot = _wait_for_activity(
+        "Waiting for Script tab loaded-file state",
+        lambda: page.evaluate(
+            """() => {
+                const statusEl = document.querySelector('#upload-status');
+                return {
+                    text: String(statusEl?.innerText || '').trim(),
+                    has_success: !!statusEl?.querySelector('.text-success'),
+                };
+            }"""
+        ),
+        lambda snapshot: (
+            "Loaded:" in str(snapshot.get("text") or "")
+            and str(expected_loaded_name) in str(snapshot.get("text") or "")
+            and bool(snapshot.get("has_success"))
+        ),
+    )
+    assert str(expected_loaded_name) in str(loaded_snapshot.get("text") or ""), (
+        f"Expected Script tab to show loaded file {expected_loaded_name!r}, got: {loaded_snapshot}"
+    )
+
+    complete_states = _wait_for_script_step_states(
+        page,
+        {
+            "process_paragraphs": "complete",
+            "assign_dialogue": "complete",
+            "extract_temperament": "complete",
+            "create_script": "complete",
+        },
+    )
+    assert all(value == "complete" for value in complete_states.values()), (
+        f"Expected complete script step states, got: {complete_states}"
+    )
+    return complete_states
+
+
+def _assert_reset_project_ui_and_artifacts(page, layout: RuntimeLayout) -> dict:
+    reset_snapshot = _wait_for_activity(
+        "Waiting for Script tab reset state",
+        lambda: page.evaluate(
+            """() => {
+                const statusEl = document.querySelector('#upload-status');
+                const text = String(statusEl?.innerText || '').trim();
+                const hasSuccess = !!statusEl?.querySelector('.text-success');
+                const uploadSection = document.querySelector('#file-upload-section');
+                const uploadVisible = !!uploadSection && getComputedStyle(uploadSection).display !== 'none';
+                return {
+                    upload_text: text,
+                    has_success: hasSuccess,
+                    upload_visible: uploadVisible,
+                };
+            }"""
+        ),
+        lambda snapshot: (
+            "Loaded:" not in str(snapshot.get("upload_text") or "")
+            and not bool(snapshot.get("has_success"))
+            and bool(snapshot.get("upload_visible"))
+        ),
+    )
+    assert "Loaded:" not in str(reset_snapshot.get("upload_text") or "")
+
+    _wait_for_nav_locked(page, '.nav-link[data-tab="voices"]', "Voices tab")
+    _wait_for_nav_locked(page, '.nav-link[data-tab="editor"]', "Editor tab")
+    _wait_for_nav_locked(page, '.nav-link[data-tab="proofread"]', "Proofread tab")
+    _wait_for_nav_locked(page, '.nav-link[data-tab="audio"]', "Export tab")
+
+    post_reset_states = _wait_for_script_step_states(
+        page,
+        {
+            "process_paragraphs": "not_started",
+            "assign_dialogue": "not_started",
+            "extract_temperament": "not_started",
+            "create_script": "not_started",
+        },
+    )
+    assert all(value != "complete" for value in post_reset_states.values()), (
+        f"Expected reset script step states to drop completion, got: {post_reset_states}"
+    )
+
+    _assert_runtime_audio_artifacts_removed(layout)
+    return reset_snapshot
+
+
+def _assert_saved_project_present_in_projects_tab(
+    page,
+    layout: RuntimeLayout,
+    *,
+    expected_name: str,
+) -> dict:
+    page.locator('.nav-link[data-tab="saved-scripts"]').click()
+    snapshot = _wait_for_activity(
+        "Waiting for saved project row in Projects tab",
+        lambda: _projects_tab_snapshot(page, layout, expected_name=expected_name),
+        lambda payload: bool(
+            payload.get("tab_visible")
+            and payload.get("has_list")
+            and any(
+                str(row.get("name") or "") == expected_name
+                and str(row.get("badge") or "") != "Legacy"
+                for row in (payload.get("rows") or [])
+            )
+            and bool(payload.get("archive_exists"))
+        ),
+    )
+    matching_rows = [
+        row
+        for row in (snapshot.get("rows") or [])
+        if str(row.get("name") or "") == expected_name
+    ]
+    assert matching_rows, (
+        f"Expected saved project row {expected_name!r} to be present.\n"
+        f"rows={json.dumps(snapshot.get('rows') or [], ensure_ascii=False, indent=2)}"
+    )
+    assert any(str(row.get("badge") or "") != "Legacy" for row in matching_rows), (
+        f"Expected saved project row {expected_name!r} to be archive-backed, not legacy.\n"
+        f"rows={json.dumps(matching_rows, ensure_ascii=False, indent=2)}"
+    )
+    assert bool(snapshot.get("archive_exists")), (
+        f"Expected saved project archive not found on disk: {snapshot.get('archive_path')}\n"
+        f"archive_listing={snapshot.get('archive_listing')}"
+    )
+    return snapshot
+
+
+def _load_saved_project_from_projects_tab(page, *, expected_name: str) -> dict:
+    page.locator('.nav-link[data-tab="saved-scripts"]').click()
+    projects_snapshot = _wait_for_activity(
+        "Waiting for Projects tab before load",
+        lambda: _projects_tab_snapshot(page),
+        lambda payload: bool(
+            payload.get("tab_visible")
+            and payload.get("has_list")
+            and any(
+                str(row.get("name") or "") == expected_name
+                and str(row.get("badge") or "") != "Legacy"
+                for row in (payload.get("rows") or [])
+            )
+        ),
+    )
+    matching_row = next(
+        (
+            row
+            for row in (projects_snapshot.get("rows") or [])
+            if str(row.get("name") or "") == expected_name and str(row.get("badge") or "") != "Legacy"
+        ),
+        None,
+    )
+    assert matching_row is not None, (
+        f"Could not find loadable saved project row for {expected_name!r}.\n"
+        f"rows={json.dumps(projects_snapshot.get('rows') or [], ensure_ascii=False, indent=2)}"
+    )
+    row_index = int(matching_row.get("index") or 0)
+
+    with page.expect_response(
+        lambda response: (
+            response.url.endswith("/api/scripts/load")
+            and response.request.method == "POST"
+        ),
+        timeout=10000,
+    ) as response_info:
+        page.locator("#saved-scripts-list .btn-outline-success").nth(row_index).click()
+        confirmed = _confirm_modal_if_present(page, timeout_ms=5000)
+        assert confirmed, "Load Project confirmation modal did not appear."
+
+    response = response_info.value
+    if int(response.status) != 200:
+        response_text = ""
+        try:
+            response_text = response.text()
+        except Exception:
+            response_text = ""
+        raise AssertionError(
+            f"Load Project request failed with status {response.status}.\n"
+            f"Response body:\n{response_text[:2000]}"
+        )
+
+    page.wait_for_load_state("domcontentloaded", timeout=10000)
+    _wait_for_bootstrap_ready(page)
+    return _wait_for_activity(
+        "Waiting for loaded project UI state",
+        lambda: page.evaluate(
+            """() => {
+                const statusEl = document.querySelector('#upload-status');
+                const locked = (tab) => {
+                    const nav = document.querySelector(`.nav-link[data-tab="${tab}"]`);
+                    return !!nav && nav.classList.contains('nav-locked');
+                };
+                return {
+                    upload_text: String(statusEl?.innerText || '').trim(),
+                    has_success: !!statusEl?.querySelector('.text-success'),
+                    voices_locked: locked('voices'),
+                    editor_locked: locked('editor'),
+                    proofread_locked: locked('proofread'),
+                    audio_locked: locked('audio'),
+                };
+            }"""
+        ),
+        lambda snapshot: (
+            "Loaded:" in str(snapshot.get("upload_text") or "")
+            and bool(snapshot.get("has_success"))
+            and not bool(snapshot.get("voices_locked"))
+            and not bool(snapshot.get("editor_locked"))
+            and not bool(snapshot.get("proofread_locked"))
+            and not bool(snapshot.get("audio_locked"))
+        ),
+    )
+
+
+def _assert_pipeline_tabs_unlocked(page) -> None:
+    _wait_for_nav_unlocked(page, '.nav-link[data-tab="voices"]', "Voices tab")
+    _wait_for_nav_unlocked(page, '.nav-link[data-tab="editor"]', "Editor tab")
+    _wait_for_nav_unlocked(page, '.nav-link[data-tab="proofread"]', "Proofread tab")
+    _wait_for_nav_unlocked(page, '.nav-link[data-tab="audio"]', "Export tab")
+
+
+def _assert_restored_voice_cards(page, *, expected_speakers: set[str]) -> dict[str, Dict[str, Any]]:
+    _wait_for_nav_unlocked(page, '.nav-link[data-tab="voices"]', "Voices tab")
+    page.locator('.nav-link[data-tab="voices"]').click()
+    _wait_for_activity(
+        "Waiting for Voices tab after load",
+        lambda: {"visible": bool(page.locator("#voices-tab").is_visible())},
+        lambda snapshot: bool(snapshot.get("visible")),
+    )
+    voice_states = _wait_for_activity(
+        "Waiting for restored voice cards",
+        lambda: {"states": _read_voice_card_states(page)},
+        lambda snapshot: set((snapshot.get("states") or {}).keys()) == expected_speakers,
+    )
+    states = dict(voice_states.get("states") or {})
+    assert set(states.keys()) == expected_speakers, f"Unexpected speaker rows after load: {set(states.keys())}"
+    return states
+
+
+def _assert_editor_whole_project_audio_restored(page) -> dict:
+    _wait_for_nav_unlocked(page, '.nav-link[data-tab="editor"]', "Editor tab")
+    page.locator('.nav-link[data-tab="editor"]').click()
+    _wait_for_activity(
+        "Waiting for Editor tab after load",
+        lambda: {"visible": bool(page.locator("#editor-tab").is_visible())},
+        lambda snapshot: bool(snapshot.get("visible")),
+    )
+
+    page.locator("#editor-chapter-select").select_option("__whole_project__")
+    editor_snapshot = _wait_for_activity(
+        "Waiting for Whole Project rows after load",
+        lambda: page.evaluate(
+            """() => {
+                const rows = Array.from(document.querySelectorAll('#chunks-table-body tr'));
+                const details = [];
+                let textRows = 0;
+                for (const row of rows) {
+                    const text = String(row.querySelector('textarea.chunk-text')?.value || '').trim();
+                    if (!text) continue;
+                    textRows += 1;
+                    const audio = row.querySelector('audio.chunk-audio');
+                    const audioPath = String(audio?.getAttribute('data-audio-path') || '').trim();
+                    const done = row.classList.contains('status-done');
+                    if (!audioPath || !done) {
+                        details.push({
+                            id: String(row.getAttribute('data-id') || ''),
+                            has_audio: Boolean(audioPath),
+                            status_done: done,
+                        });
+                    }
+                }
+                return {
+                    row_count: rows.length,
+                    text_rows: textRows,
+                    missing: details,
+                };
+            }"""
+        ),
+        lambda snapshot: int(snapshot.get("text_rows") or 0) > 0,
+    )
+    assert int(editor_snapshot.get("text_rows") or 0) > 0, "Expected at least one text clip row in Whole Project view."
+    assert not editor_snapshot.get("missing"), f"Rows missing audio or done status after load: {editor_snapshot.get('missing')}"
+
+    play_button = page.locator("#chunks-table-body .chunk-audio-toggle").first
+    play_button.click()
+    playback_snapshot = _wait_for_activity(
+        "Waiting for restored editor clip playback",
+        lambda: page.evaluate(
+            """() => {
+                const button = document.querySelector('#chunks-table-body .chunk-audio-toggle');
+                const preview = window._editorPreviewAudio;
+                return {
+                    button_active: !!button && button.classList.contains('active'),
+                    preview_src: String(preview?.src || '').trim(),
+                    paused: preview ? !!preview.paused : true,
+                    current_time: Number(preview?.currentTime || 0),
+                };
+            }"""
+        ),
+        lambda snapshot: bool(
+            snapshot.get("preview_src")
+            and (bool(snapshot.get("button_active")) or not bool(snapshot.get("paused")) or float(snapshot.get("current_time") or 0.0) > 0.0)
+        ),
+    )
+    page.evaluate(
+        """() => {
+            const preview = window._editorPreviewAudio;
+            if (preview) preview.pause();
+        }"""
+    )
+    return {"rows": editor_snapshot, "playback": playback_snapshot}
+
+
+def _assert_proofread_whole_project_restored(page) -> dict:
+    _wait_for_nav_unlocked(page, '.nav-link[data-tab="proofread"]', "Proofread tab")
+    page.locator('.nav-link[data-tab="proofread"]').click()
+    _wait_for_activity(
+        "Waiting for Proofread tab after load",
+        lambda: page.evaluate(
+            """() => ({
+                visible: !!document.querySelector('#proofread-tab') && getComputedStyle(document.querySelector('#proofread-tab')).display !== 'none',
+                has_table: !!document.querySelector('#proofread-table-body'),
+                has_select: !!document.querySelector('#proofread-chapter-select')
+            })"""
+        ),
+        lambda snapshot: bool(
+            snapshot.get("visible")
+            and snapshot.get("has_table")
+            and snapshot.get("has_select")
+        ),
+    )
+
+    page.locator("#proofread-chapter-select").select_option("__whole_project__")
+    summary = _wait_for_activity(
+        "Waiting for restored proofread summary",
+        lambda: page.evaluate(
+            """() => {
+                const parseIntFrom = (id) => {
+                    const raw = String(document.querySelector(id)?.innerText || '').trim();
+                    const digits = raw.replace(/[^0-9]/g, '');
+                    return digits ? Number.parseInt(digits, 10) : 0;
+                };
+                return {
+                    row_count: document.querySelectorAll('#proofread-table-body tr[data-proofread-id]').length,
+                    chapter_value: String(document.querySelector('#proofread-chapter-select')?.value || ''),
+                    passed: parseIntFrom('#proofread-passed'),
+                    failed: parseIntFrom('#proofread-failed'),
+                    auto_failed: parseIntFrom('#proofread-auto-failed'),
+                };
+            }"""
+        ),
+        lambda snapshot: (
+            int(snapshot.get("row_count") or 0) > 0
+            and str(snapshot.get("chapter_value") or "") == "__whole_project__"
+            and int(snapshot.get("failed") or 0) == 0
+            and int(snapshot.get("auto_failed") or 0) == 0
+            and int(snapshot.get("passed") or 0) == int(snapshot.get("row_count") or 0)
+        ),
+    )
+    return summary
+
+
+def _assert_duration_matches_baseline(*, actual_seconds: float, expected_seconds: float, tolerance_seconds: float = 1.0) -> None:
+    delta = abs(float(actual_seconds) - float(expected_seconds))
+    assert delta <= float(tolerance_seconds), (
+        f"Reloaded export duration drifted beyond tolerance.\n"
+        f"expected={expected_seconds:.2f}s actual={actual_seconds:.2f}s delta={delta:.2f}s tolerance={tolerance_seconds:.2f}s"
+    )
+
+
 def _iter_runtime_files(root_dir: str) -> list[str]:
     if not os.path.isdir(root_dir):
         return []
