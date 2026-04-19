@@ -367,7 +367,6 @@ class _FreshCloneServer:
         env_overrides: dict | None = None,
         bootstrap_config_values: dict | None = None,
         bootstrap_timeout_seconds: float = FRESH_CLONE_BOOTSTRAP_TIMEOUT_SECONDS,
-        source_ref: str = "refs/remotes/origin/main",
     ):
         self._temp_root = ""
         self._proc: subprocess.Popen[str] | None = None
@@ -381,7 +380,6 @@ class _FreshCloneServer:
         self._env_overrides = dict(env_overrides or {})
         self._bootstrap_config_values = dict(bootstrap_config_values or {})
         self._bootstrap_timeout_seconds = float(bootstrap_timeout_seconds)
-        self._source_ref = str(source_ref or "HEAD")
 
     def __enter__(self):
         self._temp_root = tempfile.mkdtemp(prefix="threadspeak_e2e_fresh_clone_")
@@ -389,7 +387,7 @@ class _FreshCloneServer:
         self.checked_out_commit = _clone_repo_git_ref(
             SOURCE_REPO_DIR,
             self.repo_root,
-            source_ref=self._source_ref,
+            source_ref="refs/remotes/origin/main",
         )
         self.app_dir = os.path.join(self.repo_root, "app")
         _seed_clone_config_values(self.app_dir, self._bootstrap_config_values)

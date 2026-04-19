@@ -4,7 +4,7 @@ from ._stage_ui_helpers import *  # noqa: F401,F403
 
 
 @pytest.mark.fresh_clone_e2e
-def test_fresh_clone_full_ui_flow_to_merged_audiobook(fresh_clone_source_ref):
+def test_fresh_clone_full_ui_flow_to_merged_audiobook():
     """
     Top-level rule:
     once browser interactions begin, this flow uses UI navigation/actions only.
@@ -78,7 +78,6 @@ def test_fresh_clone_full_ui_flow_to_merged_audiobook(fresh_clone_source_ref):
                                 "local_backend": "qwen",
                             }
                         },
-                        source_ref=fresh_clone_source_ref,
                     ) as app_server:
                         with sync_playwright() as playwright:
                             browser = playwright.chromium.launch(headless=True)
