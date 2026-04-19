@@ -4,7 +4,7 @@ from ._stage_ui_helpers import *  # noqa: F401,F403
 
 
 @pytest.mark.fresh_clone_e2e
-def test_fresh_clone_full_ui_flow_to_merged_audiobook():
+def test_fresh_clone_full_ui_flow_to_merged_audiobook_and_reset_project():
     """
     Top-level rule:
     once browser interactions begin, this flow uses UI navigation/actions only.
@@ -202,6 +202,67 @@ def test_fresh_clone_full_ui_flow_to_merged_audiobook():
                                 assert duration_seconds > 240.0, (
                                     f"Merged audiobook duration must be > 4 minutes, got {duration_seconds:.2f}s"
                                 )
+
+                                page.locator('.nav-link[data-tab="script"]').click()
+                                _wait_for_script_tab_ready(page)
+                                complete_states = _wait_for_script_step_states(
+                                    page,
+                                    {
+                                        "process_paragraphs": "complete",
+                                        "assign_dialogue": "complete",
+                                        "extract_temperament": "complete",
+                                        "create_script": "complete",
+                                    },
+                                )
+                                assert all(value == "complete" for value in complete_states.values()), (
+                                    f"Expected complete script step states before reset, got: {complete_states}"
+                                )
+
+                                _reset_project_from_script_tab(page)
+
+                                reset_snapshot = _wait_for_activity(
+                                    "Waiting for Script tab reset state",
+                                    lambda: page.evaluate(
+                                        """() => {
+                                            const statusEl = document.querySelector('#upload-status');
+                                            const text = String(statusEl?.innerText || '').trim();
+                                            const hasSuccess = !!statusEl?.querySelector('.text-success');
+                                            const uploadSection = document.querySelector('#file-upload-section');
+                                            const uploadVisible = !!uploadSection && getComputedStyle(uploadSection).display !== 'none';
+                                            return {
+                                                upload_text: text,
+                                                has_success: hasSuccess,
+                                                upload_visible: uploadVisible,
+                                            };
+                                        }"""
+                                    ),
+                                    lambda snapshot: (
+                                        "Loaded:" not in str(snapshot.get("upload_text") or "")
+                                        and not bool(snapshot.get("has_success"))
+                                        and bool(snapshot.get("upload_visible"))
+                                    ),
+                                )
+                                assert "Loaded:" not in str(reset_snapshot.get("upload_text") or "")
+
+                                _wait_for_nav_locked(page, '.nav-link[data-tab="voices"]', "Voices tab")
+                                _wait_for_nav_locked(page, '.nav-link[data-tab="editor"]', "Editor tab")
+                                _wait_for_nav_locked(page, '.nav-link[data-tab="proofread"]', "Proofread tab")
+                                _wait_for_nav_locked(page, '.nav-link[data-tab="audio"]', "Export tab")
+
+                                post_reset_states = _wait_for_script_step_states(
+                                    page,
+                                    {
+                                        "process_paragraphs": "not_started",
+                                        "assign_dialogue": "not_started",
+                                        "extract_temperament": "not_started",
+                                        "create_script": "not_started",
+                                    },
+                                )
+                                assert all(value != "complete" for value in post_reset_states.values()), (
+                                    f"Expected reset script step states to drop completion, got: {post_reset_states}"
+                                )
+
+                                _assert_runtime_audio_artifacts_removed(app_server.layout)
 
                                 assert not console_errors, _report_console(console_errors, page_errors, warnings)
                                 assert not page_errors, _report_console(console_errors, page_errors, warnings)
