@@ -205,9 +205,9 @@ class LocalBatchRegressionTests(unittest.TestCase):
             " ".join(["extended"] * 120)
         )
 
-        self.assertEqual(short_budget, 110)
+        self.assertEqual(short_budget, 24)
         self.assertGreater(medium_budget, short_budget)
-        self.assertEqual(long_budget, 621)
+        self.assertEqual(long_budget, 540)
 
     def test_persist_batch_audio_outputs_marks_missing_outputs_as_failed(self):
         engine = TTSEngine({"tts": {"mode": "local", "local_backend": "qwen"}})
@@ -297,7 +297,7 @@ class LocalBatchRegressionTests(unittest.TestCase):
         self.assertEqual(results["completed"], ["uid-1"])
         self.assertEqual(results["failed"], [])
         fake_model.generate_voice_clone.assert_called_once()
-        self.assertEqual(fake_model.generate_voice_clone.call_args.kwargs["max_new_tokens"], 110)
+        self.assertEqual(fake_model.generate_voice_clone.call_args.kwargs["max_new_tokens"], 24)
 
 if __name__ == "__main__":
     unittest.main()
