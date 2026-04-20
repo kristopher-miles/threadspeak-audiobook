@@ -29,6 +29,7 @@ import sqlite3
 from llm import LLMClientFactory, LLMRuntimeConfig
 from chunk_events import chunk_event_broker
 from audio_perf import record_audio_perf
+from config_bootstrap import ensure_runtime_config_exists
 
 # Import ProjectManager
 from project import ProjectManager
@@ -64,6 +65,8 @@ BASE_DIR = LAYOUT.app_dir
 REPO_DIR = REPO_ROOT
 ROOT_DIR = LAYOUT.project_dir
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+CONFIG_DEFAULT_PATH = os.path.join(BASE_DIR, "config.default.json")
+ensure_runtime_config_exists(CONFIG_PATH, CONFIG_DEFAULT_PATH)
 AUDIOBOOK_PATH = LAYOUT.audiobook_path
 M4B_PATH = LAYOUT.m4b_path
 OPTIMIZED_EXPORT_PATH = LAYOUT.optimized_export_path

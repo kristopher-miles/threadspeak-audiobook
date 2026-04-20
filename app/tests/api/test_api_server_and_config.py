@@ -66,6 +66,33 @@ def test_get_config_backfills_missing_defaults_with_expected_values():
         with open(config_path, "w", encoding="utf-8") as f:
             f.write(original_config_raw)
 
+def test_get_config_bootstraps_local_config_from_default_template():
+    config_path = os.path.join(common.ACTIVE_APP_DIR, "config.json")
+    default_config_path = os.path.join(common.ACTIVE_APP_DIR, "config.default.json")
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        original_config_raw = f.read()
+    with open(default_config_path, "r", encoding="utf-8") as f:
+        default_config = json.load(f)
+
+    os.remove(config_path)
+
+    try:
+        r = get("/api/config")
+        assert_status(r, 200)
+        data = r.json()
+        if not os.path.exists(config_path):
+            raise TestFailure("GET /api/config did not recreate missing local config from default template")
+        with open(config_path, "r", encoding="utf-8") as f:
+            recreated = json.load(f)
+        if recreated.get("llm", {}).get("api_key") != default_config.get("llm", {}).get("api_key"):
+            raise TestFailure("Recreated local config did not come from the tracked default template")
+        if data.get("tts", {}).get("script_max_length") != default_config.get("tts", {}).get("script_max_length"):
+            raise TestFailure("Bootstrapped config did not preserve default template values")
+    finally:
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write(original_config_raw)
+
 def test_get_config_clears_stale_current_file_when_runtime_has_no_input():
     config_path = os.path.join(common.ACTIVE_APP_DIR, "config.json")
     state_path = os.path.join(common.ACTIVE_APP_DIR, "state.json")

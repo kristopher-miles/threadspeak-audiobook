@@ -266,6 +266,7 @@ async def read_favicon():
 
 @router.get("/api/config")
 async def get_config():
+    ensure_runtime_config_exists(CONFIG_PATH, CONFIG_DEFAULT_PATH)
     config_changed = False
     default_config = {
         "llm": {

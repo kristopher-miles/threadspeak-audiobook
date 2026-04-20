@@ -30,6 +30,13 @@ module.exports = {
       message: "python -m venv env"
     }
   }, {
+    method: "shell.run",
+    params: {
+      venv: "env",
+      path: "app",
+      message: "python scripts/bootstrap_runtime_config.py"
+    }
+  }, {
     when: "{{platform === 'darwin' && arch === 'arm64' && exists('models')}}",
     method: "fs.rm",
     params: {

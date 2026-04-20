@@ -36,6 +36,7 @@ from script_store import (
 )
 from source_document import load_source_document, iter_document_paragraphs
 from script_provider import create_script_store
+from config_bootstrap import ensure_runtime_config_exists
 
 from project_core.constants import (
     MAX_CHUNK_CHARS,
@@ -112,7 +113,10 @@ class ProjectManager(
             if using_default_layout else os.path.join(self.voicelines_dir, ".finalize_spool")
         )
         default_config_path = os.path.join(root_dir, "app", "config.json")
+        default_config_template_path = os.path.join(root_dir, "app", "config.default.json")
         self.config_path = config_path or (os.path.join(LAYOUT.app_dir, "config.json") if using_default_layout else default_config_path)
+        self.default_config_path = os.path.join(LAYOUT.app_dir, "config.default.json") if using_default_layout else default_config_template_path
+        ensure_runtime_config_exists(self.config_path, self.default_config_path)
 
         # Ensure voicelines dir exists
         os.makedirs(self.voicelines_dir, exist_ok=True)
