@@ -312,6 +312,14 @@
                 .find(card => normalizeVoiceName(card.dataset.voice) === normalizeVoiceName(name));
         }
 
+        function getVoiceLineCount(card) {
+            return Number(card?.dataset?.lineCount || 0);
+        }
+
+        function isZeroLineVoiceCard(card) {
+            return getVoiceLineCount(card) <= 0;
+        }
+
         function createVoiceCard(voice, index) {
             const config = voice.config || {};
             const voiceType = config.type || 'design';
@@ -322,11 +330,12 @@
             const designLoaded = Boolean((config.ref_audio || '').trim()) && !!voice.design_clone_loaded;
             const lineCount = Number(voice.line_count || 0);
             const lineLabel = `${lineCount} ${lineCount === 1 ? 'line' : 'lines'}`;
+            const userCreated = config.user_created === true;
             const isNarratorCard = normalizeVoiceName(voice.name) === normalizeVoiceName('NARRATOR');
             const narratesChecked = isNarratorCard ? config.narrates !== false : config.narrates === true;
 
             return `
-                <div class="card voice-card mb-3" data-voice="${safeName}" data-line-count="${lineCount}" data-paragraph-count="${Number(voice.paragraph_count || 0)}" data-suggested-sample="${escapeHtml(voice.suggested_sample_text || '')}" data-auto-alias-target="${safeAutoAliasTarget}">
+                <div class="card voice-card mb-3" data-voice="${safeName}" data-line-count="${lineCount}" data-paragraph-count="${Number(voice.paragraph_count || 0)}" data-suggested-sample="${escapeHtml(voice.suggested_sample_text || '')}" data-auto-alias-target="${safeAutoAliasTarget}" data-user-created="${userCreated ? 'true' : 'false'}">
                     <div class="card-body">
                         <div class="row">
                             <div class="col-md-3">
@@ -508,6 +517,89 @@
             debouncedSaveVoices();
         };
 
+        window.addVoiceCharacter = async () => {
+            const rawName = typeof window.prompt === 'function'
+                ? window.prompt('Character name:')
+                : '';
+            if (rawName === null) {
+                return;
+            }
+            const speaker = String(rawName || '').trim().replace(/\s+/g, ' ');
+            if (!speaker) {
+                showToast('Character name is required.', 'warning');
+                return;
+            }
+            if (getVoiceCardByName(speaker)) {
+                showToast(`Character "${speaker}" already exists.`, 'warning');
+                return;
+            }
+
+            const container = document.getElementById('voices-list');
+            if (container && typeof container.insertAdjacentHTML === 'function') {
+                const existingCards = Array.from(document.querySelectorAll('.voice-card'));
+                if (existingCards.length === 0) {
+                    container.innerHTML = '';
+                }
+                container.insertAdjacentHTML(
+                    'beforeend',
+                    createVoiceCard(
+                        {
+                            name: speaker,
+                            config: {
+                                type: 'design',
+                                description: '',
+                                ref_text: '',
+                                ref_audio: '',
+                                generated_ref_text: '',
+                                alias: '',
+                                narrates: false,
+                                user_created: true,
+                            },
+                            suggested_sample_text: '',
+                            design_clone_loaded: false,
+                            line_count: 0,
+                            paragraph_count: 0,
+                            auto_narrator_alias: false,
+                            auto_alias_target: '',
+                        },
+                        existingCards.length,
+                    ),
+                );
+                _voicesRenderSignature = '';
+                updateVoiceAliasStates();
+                layoutVoicesListContainer();
+            }
+
+            try {
+                const config = collectVoiceConfig();
+                const existing = config[speaker] || {};
+                config[speaker] = {
+                    type: existing.type || 'design',
+                    description: existing.description || '',
+                    ref_text: existing.ref_text || '',
+                    ref_audio: existing.ref_audio || '',
+                    generated_ref_text: existing.generated_ref_text || '',
+                    alias: existing.alias || '',
+                    narrates: existing.narrates === true,
+                    seed: existing.seed || '-1',
+                    user_created: true,
+                };
+                await API.post('/api/voices/batch', {
+                    config,
+                    confirm_invalidation: false,
+                });
+                showToast(`Added ${speaker}.`, 'success');
+            } catch (e) {
+                showToast(`Failed to add character: ${e.message}`, 'error');
+            } finally {
+                try {
+                    await loadVoices();
+                } catch (_e) {
+                    // Ignore refresh errors; save failure already surfaced above.
+                }
+            }
+        };
+
         async function loadVoices() {
             if (_loadVoicesInFlight) {
                 return _loadVoicesInFlight;
@@ -601,6 +693,7 @@
                 const alias = (card.querySelector('.voice-alias-input')?.value || '').trim();
                 const narratesEl = card.querySelector('.voice-narrates');
                 const narrates = narratesEl ? narratesEl.checked : false;
+                const userCreated = card.dataset.userCreated === 'true';
 
                 if (type === 'custom') {
                     config[name] = {
@@ -656,6 +749,9 @@
                         narrates,
                         seed: "-1"
                     };
+                }
+                if (config[name] && userCreated) {
+                    config[name].user_created = true;
                 }
             });
             return config;
@@ -1067,6 +1163,10 @@
             if (!speaker || !descriptionInput) {
                 return '';
             }
+            if (isZeroLineVoiceCard(voiceCard)) {
+                showToast(`Skipping ${speaker}: 0 lines.`, 'info');
+                return '';
+            }
 
             btn.disabled = true;
             const originalText = btn.textContent;
@@ -1166,6 +1266,7 @@
             // Convert any "Custom Voice" cards to "Voice Design" so they get voices generated
             Array.from(document.querySelectorAll('.voice-card'))
                 .filter(card => !card.classList.contains('alias-active') && !card.classList.contains('narrator-threshold-active'))
+                .filter(card => !isZeroLineVoiceCard(card))
                 .filter(card => card.querySelector('.voice-type:checked')?.value === 'custom')
                 .forEach(card => {
                     const designRadio = card.querySelector('.voice-type[value="design"]');
@@ -1177,6 +1278,7 @@
 
             const eligibleSpeakers = Array.from(document.querySelectorAll('.voice-card'))
                 .filter(card => !card.classList.contains('alias-active') && !card.classList.contains('narrator-threshold-active'))
+                .filter(card => !isZeroLineVoiceCard(card))
                 .filter(card => card.querySelector('.voice-type:checked')?.value === 'design')
                 .map(card => card.dataset.voice)
                 .filter(Boolean);
@@ -1201,6 +1303,9 @@
                     const speaker = eligibleSpeakers[i];
                     const voiceCard = getVoiceCardByName(speaker);
                     if (!voiceCard || voiceCard.classList.contains('alias-active') || voiceCard.classList.contains('narrator-threshold-active')) {
+                        continue;
+                    }
+                    if (isZeroLineVoiceCard(voiceCard)) {
                         continue;
                     }
 

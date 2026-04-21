@@ -896,6 +896,62 @@ class SavedVoiceReuseTests(unittest.TestCase):
                 app_module.project_manager = original_pm
                 _shutdown_manager(manager)
 
+    def test_run_voice_processing_task_skips_zero_line_speakers(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            calls = []
+            logs = []
+
+            original_root = app_module.ROOT_DIR
+            original_get_voices = app_module.awaitable_get_voices_sync
+            original_task_current = app_module._task_is_current
+            original_append_log = app_module._append_task_log
+            original_finish = app_module._finish_task_run
+            original_pm = app_module.project_manager
+            manager = None
+            try:
+                manager = _seed_project_manager(
+                    temp_root,
+                    entries=[{"speaker": "DOG", "text": "woof"}],
+                    voice_config={
+                        "DOG": {"type": "design", "description": "dog desc", "ref_text": "dog sample"},
+                        "Manual": {"type": "design", "description": "manual desc", "ref_text": "manual sample", "user_created": True},
+                    },
+                )
+                manager._current_script_title = lambda: "Project"
+                manager.load_chunks = lambda: []
+                manager.suggest_design_sample_text = lambda speaker, chunks: f"{speaker.lower()} sample"
+
+                def _materialize_design_voice(speaker, description, sample_text, force, voice_config):
+                    calls.append(speaker)
+                    updated = json.loads(json.dumps(voice_config))
+                    updated.setdefault(speaker, {})["ref_audio"] = f"clone_voices/{speaker.lower()}.wav"
+                    return {"voice_config": updated}
+
+                manager.materialize_design_voice = _materialize_design_voice
+                manager.unload_tts_engine = lambda: False
+                app_module.ROOT_DIR = temp_root
+                app_module.awaitable_get_voices_sync = lambda: [
+                    {"name": "Manual", "config": {"type": "design"}, "suggested_sample_text": "manual sample", "line_count": 0, "paragraph_count": 0},
+                    {"name": "DOG", "config": {"type": "design"}, "suggested_sample_text": "dog sample", "line_count": 7, "paragraph_count": 0},
+                ]
+                app_module._task_is_current = lambda task_name, run_id: True
+                app_module._append_task_log = lambda task_name, run_id, message: logs.append(message)
+                app_module._finish_task_run = lambda task_name, run_id: None
+                app_module.project_manager = manager
+
+                success = app_module.run_voice_processing_task("run-1")
+                self.assertTrue(success)
+                self.assertEqual(calls, ["DOG"])
+                self.assertTrue(any("Skipping Manual: no lines detected." in message for message in logs))
+            finally:
+                app_module.ROOT_DIR = original_root
+                app_module.awaitable_get_voices_sync = original_get_voices
+                app_module._task_is_current = original_task_current
+                app_module._append_task_log = original_append_log
+                app_module._finish_task_run = original_finish
+                app_module.project_manager = original_pm
+                _shutdown_manager(manager)
+
     def test_bulk_voice_description_suggestions_respect_llm_workers(self):
         with tempfile.TemporaryDirectory() as temp_root:
             config_path = os.path.join(temp_root, "config.json")

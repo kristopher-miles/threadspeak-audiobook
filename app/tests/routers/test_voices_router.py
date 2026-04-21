@@ -68,7 +68,7 @@ class VoicesRouterTests(unittest.TestCase):
         names = {row.get("name") for row in result}
         self.assertIn("Edited", names)
 
-    def test_get_voices_hides_zero_line_profiles_from_store_rows(self):
+    def test_get_voices_hides_zero_line_profiles_but_keeps_user_created_rows(self):
         with tempfile.TemporaryDirectory() as temp_root:
             original_project_manager = voices_router.project_manager
             original_root_dir = voices_router.ROOT_DIR
@@ -95,7 +95,13 @@ class VoicesRouterTests(unittest.TestCase):
                     ],
                 )
                 voices_router.ROOT_DIR = temp_root
-                voices_router._load_runtime_voice_config = lambda: {}
+                voices_router._load_runtime_voice_config = lambda: {
+                    "Manual Zero": {
+                        "type": "design",
+                        "description": "manual",
+                        "user_created": True,
+                    }
+                }
 
                 result = asyncio.run(voices_router.get_voices())
             finally:
@@ -105,6 +111,7 @@ class VoicesRouterTests(unittest.TestCase):
 
         names = {row.get("name") for row in result}
         self.assertIn("Live", names)
+        self.assertIn("Manual Zero", names)
         self.assertNotIn("Dead", names)
 
 

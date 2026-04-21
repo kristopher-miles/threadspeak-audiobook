@@ -1032,6 +1032,7 @@ class VoiceConfigItem(BaseModel):
     adapter_path: Optional[str] = None
     description: Optional[str] = ""  # voice description (for design type)
     narrates: Optional[bool] = None  # True = this voice acts as a narrator
+    user_created: Optional[bool] = None
 
 class ChunkUpdate(BaseModel):
     text: Optional[str] = None
@@ -1192,6 +1193,7 @@ class ProcessingWorkflowRequest(BaseModel):
 class NewModeWorkflowRequest(BaseModel):
     process_voices: bool = True
     generate_audio: bool = False
+    full_cast: bool = True
 
 
 class ScriptGenerationRequest(BaseModel):
@@ -1274,7 +1276,7 @@ process_state = {
         "pause_requested": False,
         "current_stage": None,
         "completed_stages": [],
-        "options": {"process_voices": True},
+        "options": {"process_voices": True, "generate_audio": False, "full_cast": True},
         "logs": [],
         "last_error": None,
         "started_at": None,
@@ -5115,9 +5117,24 @@ def run_lost_audio_repair_task(run_id: str, use_asr: bool):
     return success
 
 
-def _run_assign_dialogue_task(run_id: str, config_path: str):
+def _build_assign_dialogue_command(config_path: str, *, full_cast: bool = True) -> list[str]:
+    command = [
+        sys.executable,
+        "-u",
+        "-m",
+        "scripts.assign_dialogue",
+        "--project-root",
+        ROOT_DIR,
+        config_path,
+    ]
+    if not full_cast:
+        command.append("--narrated")
+    return command
+
+
+def _run_assign_dialogue_task(run_id: str, config_path: str, full_cast: bool = True):
     run_process(
-        [sys.executable, "-u", "-m", "scripts.assign_dialogue", "--project-root", ROOT_DIR, config_path],
+        _build_assign_dialogue_command(config_path, full_cast=full_cast),
         "assign_dialogue",
         run_id,
     )
@@ -5547,7 +5564,7 @@ def _new_mode_workflow_initial_state():
         "pause_requested": False,
         "current_stage": None,
         "completed_stages": [],
-        "options": {"process_voices": True, "generate_audio": False},
+        "options": {"process_voices": True, "generate_audio": False, "full_cast": True},
         "logs": [],
         "last_error": None,
         "started_at": None,
@@ -5778,8 +5795,9 @@ def _run_new_mode_workflow_stage(stage_name: str):
                 stage_name, run_id, relay_fn=relay,
             )
         elif stage_name == "assign_dialogue":
+            full_cast = bool((process_state["new_mode_workflow"].get("options") or {}).get("full_cast", True))
             success = run_process(
-                [sys.executable, "-u", "-m", "scripts.assign_dialogue", "--project-root", ROOT_DIR, config_path],
+                _build_assign_dialogue_command(config_path, full_cast=full_cast),
                 stage_name, run_id, relay_fn=relay,
             )
         elif stage_name == "extract_temperament":
@@ -5915,7 +5933,7 @@ def _restore_new_mode_workflow_state():
             markers.setdefault(stage, {"completed_at": now})
         _save_new_mode_stage_markers(markers)
 
-        restored["options"] = {"process_voices": False, "generate_audio": False}
+        restored["options"] = {"process_voices": False, "generate_audio": False, "full_cast": True}
         restored["completed_stages"] = script_complete_stages
         restored["running"] = False
         restored["paused"] = False

@@ -212,10 +212,13 @@ def _infer_name_aliases_from_voice_payloads(
 
 
 def _merge_voice_config_patch(config_items: Dict[str, VoiceConfigItem] | None) -> Dict[str, dict]:
-    incoming_config = _canonicalize_voice_config_keys({
-        _canonical_speaker_name(voice_name): config_item.model_dump()
-        for voice_name, config_item in (config_items or {}).items()
-    })
+    incoming_payload: Dict[str, dict] = {}
+    for voice_name, config_item in (config_items or {}).items():
+        payload = config_item.model_dump()
+        if payload.get("user_created") is not True:
+            payload.pop("user_created", None)
+        incoming_payload[_canonical_speaker_name(voice_name)] = payload
+    incoming_config = _canonicalize_voice_config_keys(incoming_payload)
     existing_config = _canonicalize_voice_config_keys(_load_runtime_voice_config())
     new_config = copy.deepcopy(existing_config)
     for voice_name, config_item in incoming_config.items():
@@ -290,6 +293,44 @@ async def get_voices():
         except (json.JSONDecodeError, ValueError):
             voice_rows = []
 
+    # Persisted user-created voices should remain visible even at zero lines.
+    voice_rows = list(voice_rows or [])
+    voice_row_index_by_norm: Dict[str, int] = {}
+    for idx, voice in enumerate(voice_rows):
+        voice_name = str((voice or {}).get("name") or "").strip()
+        normalized = _normalized_speaker(voice_name)
+        if normalized:
+            voice_row_index_by_norm[normalized] = idx
+
+    for voice_name, config in runtime_voice_config.items():
+        if not bool((config or {}).get("user_created")):
+            continue
+        canonical_name = _canonical_speaker_name(voice_name)
+        normalized = _normalized_speaker(canonical_name)
+        if not normalized:
+            continue
+        existing_index = voice_row_index_by_norm.get(normalized)
+        if existing_index is None:
+            voice_rows.append({
+                "name": canonical_name,
+                "config": dict(config or {}),
+                "line_count": 0,
+                "auto_narrator_alias": False,
+                "auto_alias_target": "",
+            })
+            voice_row_index_by_norm[normalized] = len(voice_rows) - 1
+            continue
+
+        existing_row = dict(voice_rows[existing_index] or {})
+        merged_config = dict(existing_row.get("config") or {})
+        if merged_config.get("user_created") is not True:
+            merged_config["user_created"] = True
+        for field, value in dict(config or {}).items():
+            if merged_config.get(field) in (None, "", []):
+                merged_config[field] = value
+        existing_row["config"] = merged_config
+        voice_rows[existing_index] = existing_row
+
     if not voice_rows:
         return []
 
@@ -312,7 +353,8 @@ async def get_voices():
         config = dict((voice or {}).get("config") or {})
         sample_suggestion = project_manager.suggest_design_sample_text(voice_name, chunks)
         line_count = int((voice or {}).get("line_count") or 0)
-        if line_count <= 0:
+        is_user_created = bool((config or {}).get("user_created"))
+        if line_count <= 0 and not is_user_created:
             continue
         auto_alias_target = str((voice or {}).get("auto_alias_target") or "")
         auto_narrator_alias = bool((voice or {}).get("auto_narrator_alias"))
@@ -631,6 +673,15 @@ def run_voice_processing_task(run_id: str, stop_check=None, relay_fn=None):
         eligible = []
         for voice in voices:
             speaker = voice["name"]
+            line_count_raw = (voice or {}).get("line_count")
+            if line_count_raw is not None:
+                try:
+                    line_count = int(line_count_raw)
+                except (TypeError, ValueError):
+                    line_count = 0
+                if line_count <= 0:
+                    log(f"Skipping {speaker}: no lines detected.")
+                    continue
             entry = updated_config.get(speaker, {})
             alias = (entry.get("alias") or "").strip()
             alias_target = _resolve_voice_alias_target(speaker, alias, known_names)

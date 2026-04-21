@@ -130,7 +130,7 @@ class WorkflowEntrypointAccessibilityTests(unittest.TestCase):
         with app_module.new_mode_workflow_lock:
             app_module.process_state["new_mode_workflow"] = app_module._new_mode_workflow_initial_state() | {
                 "running": True,
-                "options": {"process_voices": True, "generate_audio": True},
+                "options": {"process_voices": True, "generate_audio": True, "full_cast": True},
             }
 
         with app_module.audio_queue_lock:
@@ -181,6 +181,56 @@ class WorkflowEntrypointAccessibilityTests(unittest.TestCase):
             captured["cmd"][captured["cmd"].index("--max-length") + 1],
             "250",
         )
+
+    def test_new_mode_assign_dialogue_stage_uses_narrated_flag_when_full_cast_disabled(self):
+        captured = {}
+
+        def fake_run_process(cmd, stage_name, run_id, relay_fn=None):
+            captured["cmd"] = cmd
+            captured["stage_name"] = stage_name
+            captured["run_id"] = run_id
+            return True
+
+        self._patch("_start_task_run", lambda _task_name: "run-1")
+        self._patch("run_process", fake_run_process)
+        self._patch("_new_mode_workflow_is_pause_requested", lambda: False)
+
+        with app_module.new_mode_workflow_lock:
+            app_module.process_state["new_mode_workflow"] = app_module._new_mode_workflow_initial_state() | {
+                "running": True,
+                "options": {"process_voices": True, "generate_audio": False, "full_cast": False},
+            }
+
+        app_module._run_new_mode_workflow_stage("assign_dialogue")
+
+        self.assertEqual(captured["stage_name"], "assign_dialogue")
+        self.assertEqual(captured["run_id"], "run-1")
+        self.assertIn("--narrated", captured["cmd"])
+
+    def test_new_mode_assign_dialogue_stage_omits_narrated_flag_when_full_cast_enabled(self):
+        captured = {}
+
+        def fake_run_process(cmd, stage_name, run_id, relay_fn=None):
+            captured["cmd"] = cmd
+            captured["stage_name"] = stage_name
+            captured["run_id"] = run_id
+            return True
+
+        self._patch("_start_task_run", lambda _task_name: "run-1")
+        self._patch("run_process", fake_run_process)
+        self._patch("_new_mode_workflow_is_pause_requested", lambda: False)
+
+        with app_module.new_mode_workflow_lock:
+            app_module.process_state["new_mode_workflow"] = app_module._new_mode_workflow_initial_state() | {
+                "running": True,
+                "options": {"process_voices": True, "generate_audio": False, "full_cast": True},
+            }
+
+        app_module._run_new_mode_workflow_stage("assign_dialogue")
+
+        self.assertEqual(captured["stage_name"], "assign_dialogue")
+        self.assertEqual(captured["run_id"], "run-1")
+        self.assertNotIn("--narrated", captured["cmd"])
 
     def test_manual_stage_start_is_blocked_while_new_mode_workflow_active(self):
         with app_module.new_mode_workflow_lock:
@@ -592,7 +642,7 @@ class WorkflowEntrypointAccessibilityTests(unittest.TestCase):
                     state["completed_stages"],
                     ["process_paragraphs", "assign_dialogue", "extract_temperament", "create_script"],
                 )
-                self.assertEqual(state["options"], {"process_voices": False, "generate_audio": False})
+                self.assertEqual(state["options"], {"process_voices": False, "generate_audio": False, "full_cast": True})
                 self.assertTrue(
                     any(
                         "Project script complete, Reset Project if you wish to begin generation from the beginning."

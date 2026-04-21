@@ -223,8 +223,8 @@ class VoicesTabSaveQueueTests(unittest.TestCase):
                     dataset: {{
                         voice: name,
                         suggestedSample: options.suggestedSample || '',
-                        lineCount: String(options.lineCount || 10),
-                        paragraphCount: String(options.paragraphCount || 10),
+                        lineCount: String(options.lineCount ?? 10),
+                        paragraphCount: String(options.paragraphCount ?? 10),
                         autoAliasTarget: options.autoAliasTarget || '',
                     }},
                     classList: createClassList(state.classes),
@@ -1004,6 +1004,140 @@ class VoicesTabSaveQueueTests(unittest.TestCase):
                 assert.strictEqual(context.__voicesList.scrollTop, 444);
                 assert.strictEqual(context.window.scrollY, 123);
                 assert.ok(context.__voicesList.innerHTML.includes('Blake'));
+            })().catch((error) => {
+                console.error(error);
+                process.exit(1);
+            });
+            """
+        )
+
+    def test_add_voice_character_creates_user_created_entry_and_saves_batch(self):
+        self._run_node_test(
+            """
+            (async () => {
+                const savePayloads = [];
+                const voicesResponse = [
+                    { name: 'New Hero', config: { type: 'design', user_created: true }, line_count: 0, paragraph_count: 0, suggested_sample_text: '' },
+                ];
+                const context = createContext([], async (url, payload) => {
+                    if (url === '/api/voices/batch') {
+                        savePayloads.push(JSON.parse(JSON.stringify(payload)));
+                        return { status: 'saved' };
+                    }
+                    throw new Error(`Unexpected API POST ${url}`);
+                });
+                context.prompt = () => '  New Hero  ';
+                context.API.get = async (url) => {
+                    if (url === '/api/voices/settings') return { narrator_threshold: 10 };
+                    if (url === '/api/voice_design/list') return [];
+                    if (url === '/api/clone_voices/list') return [];
+                    if (url === '/api/lora/models') return [];
+                    if (url === '/api/voices') return voicesResponse;
+                    throw new Error(`Unexpected GET ${url}`);
+                };
+
+                vm.createContext(context);
+                vm.runInContext(source, context);
+
+                await context.window.addVoiceCharacter();
+
+                assert.strictEqual(savePayloads.length, 1, 'expected one /api/voices/batch save');
+                assert.strictEqual(savePayloads[0].config['New Hero'].type, 'design');
+                assert.strictEqual(savePayloads[0].config['New Hero'].user_created, true);
+            })().catch((error) => {
+                console.error(error);
+                process.exit(1);
+            });
+            """
+        )
+
+    def test_suggest_voice_description_skips_zero_line_cards(self):
+        self._run_node_test(
+            """
+            (async () => {
+                const voice = createVoiceCard('Manual', {
+                    type: 'design',
+                    description: '',
+                    sampleText: '',
+                    lineCount: 0,
+                });
+                let suggestCalls = 0;
+                const context = createContext([voice], async (url, _payload) => {
+                    if (url === '/api/voices/suggest_description') {
+                        suggestCalls += 1;
+                    }
+                    throw new Error(`Unexpected API call: ${url}`);
+                });
+
+                vm.createContext(context);
+                vm.runInContext(source, context);
+
+                const result = await context.window.suggestVoiceDescription(voice.controls.suggestButton);
+
+                assert.strictEqual(result, '');
+                assert.strictEqual(suggestCalls, 0, 'zero-line voices must not call suggest endpoint');
+                assert.ok(
+                    context.__toasts.some((entry) => entry.message.includes('Skipping Manual: 0 lines.')),
+                    'expected explicit zero-line skip toast'
+                );
+            })().catch((error) => {
+                console.error(error);
+                process.exit(1);
+            });
+            """
+        )
+
+    def test_generate_outstanding_voices_ignores_zero_line_cards(self):
+        self._run_node_test(
+            """
+            (async () => {
+                const cards = [
+                    createVoiceCard('Manual', {
+                        type: 'design',
+                        description: 'ignored',
+                        sampleText: '',
+                        lineCount: 0,
+                    }),
+                    createVoiceCard('Blake', {
+                        type: 'design',
+                        description: 'usable',
+                        sampleText: 'sample',
+                        lineCount: 4,
+                    }),
+                ];
+                const generatedSpeakers = [];
+                const context = createContext(cards, async (url, payload) => {
+                    if (url === '/api/voices/batch') {
+                        return { status: 'saved' };
+                    }
+                    if (url === '/api/voices/lmstudio_preflight_unload') {
+                        return { status: 'ok' };
+                    }
+                    if (url === '/api/voices/unload_bulk_generation') {
+                        return { status: 'unloaded', unloaded: true };
+                    }
+                    if (url === '/api/voices/suggest_descriptions_bulk') {
+                        throw new Error(`Did not expect suggestion call: ${JSON.stringify(payload || {})}`);
+                    }
+                    throw new Error(`Unexpected API call: ${url}`);
+                });
+
+                vm.createContext(context);
+                vm.runInContext(source, context);
+
+                context.window.generateVoiceDesignClone = async (btn) => {
+                    const card = btn.closest('.card-body');
+                    generatedSpeakers.push(card.closest('.voice-card').dataset.voice);
+                    card.querySelector('.design-ref-audio').value = 'clone_voices/generated.wav';
+                };
+
+                await context.window.generateOutstandingVoices();
+
+                assert.deepStrictEqual(generatedSpeakers, ['Blake']);
+                assert.ok(
+                    context.__toasts.every((entry) => !entry.message.includes('Manual')),
+                    'zero-line speaker should be silently ignored during bulk generation'
+                );
             })().catch((error) => {
                 console.error(error);
                 process.exit(1);

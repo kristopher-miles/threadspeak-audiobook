@@ -142,6 +142,27 @@ def extract_dialogue_lines(text: str) -> list[str]:
     return QUOTE_RE.findall(text)
 
 
+def apply_narrated_dialogue_assignments(paragraphs_doc: dict) -> tuple[int, int]:
+    """Assign every detected quote in dialogue paragraphs to NARRATOR."""
+    paragraphs = paragraphs_doc.get("paragraphs") or []
+    dialogue_para_count = 0
+    quote_count = 0
+
+    for para in paragraphs:
+        if not para.get("has_dialogue"):
+            continue
+        dialogue_para_count += 1
+        quotes = extract_dialogue_lines(str(para.get("text") or ""))
+        para["speakers"] = ["NARRATOR"] * len(quotes)
+        para["quote_errors"] = [False] * len(quotes)
+        para["dialogue_error"] = False
+        quote_count += len(quotes)
+
+    paragraphs_doc["dialogue_assignment_complete"] = True
+    paragraphs_doc["dialogue_errors"] = []
+    return dialogue_para_count, quote_count
+
+
 def _extract_speaker_from_text(text: str) -> str:
     raw = str(text or "").strip()
     if not raw:
@@ -196,6 +217,7 @@ def main():
     parser.add_argument("config_path")
     parser.add_argument("--project-root", dest="project_root")
     parser.add_argument("--retry-errors", dest="retry_errors", type=int, default=0)
+    parser.add_argument("--narrated", action="store_true")
     args = parser.parse_args()
 
     paragraphs_path = args.paragraphs_path
@@ -236,6 +258,15 @@ def main():
     if not paragraphs:
         _log("ERROR: persisted paragraph state contains no paragraphs. Run 'Process Paragraphs' first.")
         sys.exit(1)
+
+    if args.narrated:
+        dialogue_para_count, quote_count = apply_narrated_dialogue_assignments(paragraphs_doc)
+        _persist_paragraphs_doc(paragraphs_path, project_root, paragraphs_doc)
+        _log(
+            "Narrated mode enabled. "
+            f"Assigned NARRATOR to {quote_count} quote(s) across {dialogue_para_count} dialogue paragraph(s)."
+        )
+        return
 
     # ── Load config ────────────────────────────────────────────────────────────
     config: dict = {}

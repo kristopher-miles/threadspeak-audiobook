@@ -7,6 +7,28 @@
             create_script:       'icon-create-script',
         };
 
+        function setFullCastToggleLabel(isFullCast) {
+            const label = document.getElementById('full-cast-toggle-label-v2');
+            if (!label) return;
+            label.textContent = isFullCast ? 'Full Cast' : 'Narrated';
+        }
+
+        function getFullCastEnabled() {
+            return document.getElementById('full-cast-toggle-v2')?.checked !== false;
+        }
+
+        function syncFullCastToggleFromOptions(options) {
+            if (!options || !Object.prototype.hasOwnProperty.call(options, 'full_cast')) {
+                setFullCastToggleLabel(getFullCastEnabled());
+                return;
+            }
+            const toggle = document.getElementById('full-cast-toggle-v2');
+            if (toggle) {
+                toggle.checked = options.full_cast !== false;
+            }
+            setFullCastToggleLabel(options.full_cast !== false);
+        }
+
         function setStepIcon(iconId, state) {
             const el = document.getElementById(iconId);
             if (!el || el.dataset.stepState === state) return;
@@ -63,7 +85,7 @@
         document.getElementById('btn-assign-dialogue-v2').addEventListener('click', async () => {
             try {
                 setStepIcon('icon-assign-dialogue', 'in_progress');
-                await API.post('/api/assign_dialogue', {});
+                await API.post('/api/assign_dialogue', { full_cast: getFullCastEnabled() });
                 pollLogs('assign_dialogue', 'script-logs');
                 showToast('Dialogue assignment started.', 'success');
             } catch (e) {
@@ -144,6 +166,7 @@
             } else {
                 window.resetVoiceAliasWorkflowPrime?.();
             }
+            syncFullCastToggleFromOptions(status?.options);
             if (!startBtn || !pauseBtn) return;
             const running = !!status?.running;
             const paused = !!status?.paused;
@@ -176,8 +199,9 @@
                     await window.flushSetupConfig();
                 }
                 const processVoices = document.getElementById('process-voices-toggle-v2')?.checked !== false;
+                const fullCast = getFullCastEnabled();
                 const generateAudio = document.getElementById('generate-audio-toggle-v2')?.checked === true;
-                await API.post('/api/new_mode_workflow/start', { process_voices: processVoices, generate_audio: generateAudio });
+                await API.post('/api/new_mode_workflow/start', { process_voices: processVoices, generate_audio: generateAudio, full_cast: fullCast });
                 pollLogs('new_mode_workflow', 'script-logs');
                 updateNewModeWorkflowButtons({ running: true, paused: false });
             } catch (e) {
@@ -194,9 +218,13 @@
                 showToast(e.message || 'Failed to request pause.', 'error', 7000);
             }
         });
+        document.getElementById('full-cast-toggle-v2')?.addEventListener('change', (event) => {
+            setFullCastToggleLabel(event?.target?.checked !== false);
+        });
 
         // Restore workflow button state and step icons on page load
         (async () => {
+            setFullCastToggleLabel(getFullCastEnabled());
             try {
                 const status = await API.get('/api/status/new_mode_workflow');
                 updateNewModeWorkflowButtons(status);

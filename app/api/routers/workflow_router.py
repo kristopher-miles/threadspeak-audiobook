@@ -12,6 +12,11 @@ class NavTaskRequest(BaseModel):
 class ResetNewModeRequest(BaseModel):
     preserve_voices: bool = False
 
+
+class AssignDialogueRequest(BaseModel):
+    full_cast: bool = True
+
+
 def _ensure_new_mode_workflow_inactive(conflict_message: str = "Cannot run this step while Process Script is active. Pause or wait for new-mode workflow first."):
     state = process_state.get("new_mode_workflow") or {}
     if bool(state.get("running")) or bool(state.get("paused")):
@@ -188,7 +193,7 @@ async def reset_project():
     return {"status": "reset", "removed": sorted(set(removed))}
 
 @router.post("/api/assign_dialogue")
-async def start_assign_dialogue(background_tasks: BackgroundTasks):
+async def start_assign_dialogue(background_tasks: BackgroundTasks, request: AssignDialogueRequest = AssignDialogueRequest()):
     _ensure_new_mode_workflow_inactive()
     _ensure_task_not_running("assign_dialogue", "Dialogue assignment is already running.")
 
@@ -201,7 +206,7 @@ async def start_assign_dialogue(background_tasks: BackgroundTasks):
 
     config_path = os.path.join(BASE_DIR, "config.json")
     run_id = _start_task_run("assign_dialogue")
-    background_tasks.add_task(_run_assign_dialogue_task, run_id, config_path)
+    background_tasks.add_task(_run_assign_dialogue_task, run_id, config_path, bool(request.full_cast))
     return {"status": "started", "run_id": run_id}
 
 
@@ -613,7 +618,11 @@ async def pause_processing_workflow():
 
 @router.post("/api/new_mode_workflow/start")
 async def start_new_mode_workflow(request: NewModeWorkflowRequest):
-    options = {"process_voices": bool(request.process_voices), "generate_audio": bool(request.generate_audio)}
+    options = {
+        "process_voices": bool(request.process_voices),
+        "generate_audio": bool(request.generate_audio),
+        "full_cast": bool(request.full_cast),
+    }
     _initialize_new_mode_stage_markers(options=options)
     with new_mode_workflow_lock:
         state = process_state["new_mode_workflow"]
