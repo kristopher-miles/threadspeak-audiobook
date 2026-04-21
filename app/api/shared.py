@@ -26,7 +26,12 @@ import uuid
 import urllib.request
 import urllib.error
 import sqlite3
-from llm import LLMClientFactory, LLMRuntimeConfig
+from llm import (
+    LLMClientFactory,
+    LLMRuntimeConfig,
+    LMStudioModelLoadService,
+    ToolCapabilityService,
+)
 from chunk_events import chunk_event_broker
 from audio_perf import record_audio_perf
 from config_bootstrap import ensure_runtime_config_exists
@@ -57,6 +62,7 @@ from runtime_layout import LAYOUT, REPO_ROOT
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ThreadspeakUI")
 _LLM_CLIENT_FACTORY = LLMClientFactory()
+_LMSTUDIO_UNLOAD_TIMEOUT_SECONDS = 15
 
 app = FastAPI(title="Threadspeak Audiobook")
 
@@ -3456,6 +3462,51 @@ def _append_audio_log(message):
 def _append_audio_log_locked(message):
     process_state["audio"]["logs"].append(message)
     _trim_logs(process_state["audio"]["logs"])
+
+
+def _read_runtime_llm_settings() -> Dict[str, object]:
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+    llm_payload = payload.get("llm") if isinstance(payload, dict) else None
+    return llm_payload if isinstance(llm_payload, dict) else {}
+
+
+def _attempt_lmstudio_unload_all_models(action_label: str) -> Dict[str, object]:
+    action = str(action_label or "runtime").strip() or "runtime"
+    llm_settings = _read_runtime_llm_settings()
+    base_url = str(llm_settings.get("base_url") or "").strip()
+    api_key = str(llm_settings.get("api_key") or "")
+
+    if not base_url:
+        message = f"LM Studio unload-all skipped before {action}: no LLM base URL is configured."
+        logger.info(message)
+        return {"status": "skipped", "reason": "missing_base_url", "message": message}
+
+    if ToolCapabilityService.is_openrouter_url(base_url):
+        message = f"LM Studio unload-all skipped before {action}: OpenRouter endpoint configured."
+        logger.info(message)
+        return {"status": "skipped", "reason": "openrouter", "message": message}
+
+    try:
+        result = LMStudioModelLoadService(
+            timeout_seconds=_LMSTUDIO_UNLOAD_TIMEOUT_SECONDS
+        ).unload_all_models(base_url=base_url, api_key=api_key)
+        unloaded = int(result.get("total_loaded_instances") or 0) if isinstance(result, dict) else 0
+        message = f"LM Studio unload-all succeeded before {action}: unloaded {unloaded} instance(s)."
+        logger.info(message)
+        return {
+            "status": "ok",
+            "reason": "unloaded",
+            "message": message,
+            "details": result if isinstance(result, dict) else {},
+        }
+    except Exception as exc:
+        message = f"LM Studio unload-all skipped before {action}: {exc}"
+        logger.info(message)
+        return {"status": "skipped", "reason": "unreachable", "message": message}
 
 
 def _load_export_config() -> ExportConfig:

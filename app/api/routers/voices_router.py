@@ -823,6 +823,11 @@ async def unload_bulk_voice_generation():
     }
 
 
+@router.post("/api/voices/lmstudio_preflight_unload")
+async def preflight_unload_lmstudio_models_for_voice_generation():
+    return _attempt_lmstudio_unload_all_models("voices_bulk_generation")
+
+
 @router.post("/api/voices/clear_uploaded")
 async def clear_uploaded_voices_for_current_script():
     running_task = _any_project_task_running()

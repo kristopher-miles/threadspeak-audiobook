@@ -581,6 +581,9 @@ class VoicesTabSaveQueueTests(unittest.TestCase):
                             failures: [],
                         };
                     }
+                    if (url === '/api/voices/lmstudio_preflight_unload') {
+                        return { status: 'ok', reason: 'unloaded' };
+                    }
                     if (url === '/api/voices/unload_bulk_generation') {
                         return { status: 'unloaded', unloaded: true };
                     }
@@ -652,6 +655,9 @@ class VoicesTabSaveQueueTests(unittest.TestCase):
                             results: [{ speaker: 'Aerial', voice: 'Wind-bright mezzo with steady resolve' }],
                             failures: [],
                         };
+                    }
+                    if (url === '/api/voices/lmstudio_preflight_unload') {
+                        return { status: 'ok', reason: 'unloaded' };
                     }
                     if (url === '/api/voices/unload_bulk_generation') {
                         return { status: 'unloaded', unloaded: true };

@@ -1237,6 +1237,12 @@
                     }
                 }
 
+                try {
+                    await API.post('/api/voices/lmstudio_preflight_unload', {});
+                } catch (e) {
+                    console.warn('LM Studio preflight unload failed before voice generation', e);
+                }
+
                 for (let i = 0; i < generationQueue.length; i += 1) {
                     const { speaker } = generationQueue[i];
                     try {

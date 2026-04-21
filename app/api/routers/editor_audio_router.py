@@ -357,6 +357,8 @@ async def start_proofread(request: ProofreadRequest, background_tasks: Backgroun
             detail=f"Cannot proofread while {running_task} work is running",
         )
 
+    _attempt_lmstudio_unload_all_models("proofread")
+
     run_id = _start_task_run("proofread")
     chapter_arg = (request.chapter or "").strip() or "__ALL__"
     threshold = max(0.0, min(float(request.threshold or 0.0), 1.0))
@@ -1159,6 +1161,8 @@ async def delete_m4b_cover():
 @router.post("/api/generate_batch")
 async def generate_batch_endpoint(request: BatchGenerateRequest, background_tasks: BackgroundTasks):
     """Generate multiple chunks in parallel using configured worker count."""
+    _attempt_lmstudio_unload_all_models("render_pending")
+
     target_rows = _resolve_batch_target_rows(request)
     _raise_if_generation_voice_issue(target_rows)
     target_uids = [chunk.get("uid") for chunk in target_rows if chunk.get("uid")]
@@ -1184,6 +1188,8 @@ async def generate_batch_endpoint(request: BatchGenerateRequest, background_task
 async def generate_batch_fast_endpoint(request: BatchGenerateRequest, background_tasks: BackgroundTasks):
     """Generate multiple chunks using batch TTS API with single seed. Faster but less flexible.
     Requires custom Qwen3-TTS with /generate_batch endpoint."""
+    _attempt_lmstudio_unload_all_models("render_pending")
+
     target_rows = _resolve_batch_target_rows(request)
     _raise_if_generation_voice_issue(target_rows)
     target_uids = [chunk.get("uid") for chunk in target_rows if chunk.get("uid")]
