@@ -424,6 +424,32 @@ def test_get_config_persists_missing_temperament_words_default():
         with open(config_path, "w", encoding="utf-8") as f:
             f.write(original_raw)
 
+def test_get_config_persists_missing_script_error_retry_attempts_default():
+    config_path = os.path.join(common.ACTIVE_APP_DIR, "config.json")
+    with open(config_path, "r", encoding="utf-8") as f:
+        original_raw = f.read()
+
+    modified = json.loads(original_raw)
+    generation = modified.setdefault("generation", {})
+    generation.pop("script_error_retry_attempts", None)
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(modified, f, indent=2, ensure_ascii=False)
+
+    try:
+        r = get("/api/config")
+        assert_status(r, 200)
+        data = r.json()
+        if data.get("generation", {}).get("script_error_retry_attempts") != 3:
+            raise TestFailure("GET /api/config did not return generation.script_error_retry_attempts=3")
+
+        with open(config_path, "r", encoding="utf-8") as f:
+            persisted = json.load(f)
+        if persisted.get("generation", {}).get("script_error_retry_attempts") != 3:
+            raise TestFailure("GET /api/config did not persist backfilled generation.script_error_retry_attempts")
+    finally:
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write(original_raw)
+
 def test_get_config_persists_missing_llm_and_tts_defaults():
     config_path = os.path.join(common.ACTIVE_APP_DIR, "config.json")
     with open(config_path, "r", encoding="utf-8") as f:
@@ -528,6 +554,28 @@ def test_save_setup_config_roundtrip_temperament_words():
         readback = r.json()
         if readback.get("generation", {}).get("temperament_words") != 222:
             raise TestFailure("POST /api/config/setup did not persist generation.temperament_words")
+    finally:
+        post("/api/config", json=original)
+
+def test_save_setup_config_roundtrip_script_error_retry_attempts():
+    r = get("/api/config")
+    assert_status(r, 200)
+    original = r.json()
+
+    payload = {
+        "generation": {
+            "script_error_retry_attempts": 7,
+        }
+    }
+    r = post("/api/config/setup", json=payload)
+    assert_status(r, 200)
+
+    try:
+        r = get("/api/config")
+        assert_status(r, 200)
+        readback = r.json()
+        if readback.get("generation", {}).get("script_error_retry_attempts") != 7:
+            raise TestFailure("POST /api/config/setup did not persist generation.script_error_retry_attempts")
     finally:
         post("/api/config", json=original)
 

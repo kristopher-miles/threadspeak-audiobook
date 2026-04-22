@@ -17,6 +17,10 @@ class AssignDialogueRequest(BaseModel):
     full_cast: bool = True
 
 
+class NewModeWorkflowOptionsRequest(BaseModel):
+    full_cast: bool = True
+
+
 def _ensure_new_mode_workflow_inactive(conflict_message: str = "Cannot run this step while Process Script is active. Pause or wait for new-mode workflow first."):
     state = process_state.get("new_mode_workflow") or {}
     if bool(state.get("running")) or bool(state.get("paused")):
@@ -656,6 +660,18 @@ async def start_new_mode_workflow(request: NewModeWorkflowRequest):
 
         _start_new_mode_workflow_thread_locked()
     return dict(process_state["new_mode_workflow"])
+
+
+@router.post("/api/new_mode_workflow/options")
+async def set_new_mode_workflow_options(request: NewModeWorkflowOptionsRequest):
+    with new_mode_workflow_lock:
+        state = process_state["new_mode_workflow"]
+        options = dict(state.get("options") or {})
+        options["full_cast"] = bool(request.full_cast)
+        state["options"] = options
+        state["updated_at"] = time.time()
+        _persist_new_mode_workflow_state_locked()
+        return dict(state)
 
 
 @router.post("/api/new_mode_workflow/pause")

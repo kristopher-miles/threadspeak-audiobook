@@ -954,6 +954,7 @@ class TTSConfig(BaseModel):
 class GenerationConfig(BaseModel):
     chunk_size: int = 3000
     temperament_words: int = 150
+    script_error_retry_attempts: int = 3
     max_tokens: int = 4096
     temperature: float = 0.6
     top_p: float = 0.8
@@ -5117,7 +5118,12 @@ def run_lost_audio_repair_task(run_id: str, use_asr: bool):
     return success
 
 
-def _build_assign_dialogue_command(config_path: str, *, full_cast: bool = True) -> list[str]:
+def _build_assign_dialogue_command(
+    config_path: str,
+    *,
+    full_cast: bool = True,
+    retry_errors: Optional[int] = None,
+) -> list[str]:
     command = [
         sys.executable,
         "-u",
@@ -5129,6 +5135,8 @@ def _build_assign_dialogue_command(config_path: str, *, full_cast: bool = True) 
     ]
     if not full_cast:
         command.append("--narrated")
+    if retry_errors is not None:
+        command.extend(["--retry-errors", str(max(0, int(retry_errors)))])
     return command
 
 
@@ -5140,9 +5148,24 @@ def _run_assign_dialogue_task(run_id: str, config_path: str, full_cast: bool = T
     )
 
 
+def _build_extract_temperament_command(config_path: str, *, retry_errors: Optional[int] = None) -> list[str]:
+    command = [
+        sys.executable,
+        "-u",
+        "-m",
+        "scripts.extract_temperament",
+        "--project-root",
+        ROOT_DIR,
+        config_path,
+    ]
+    if retry_errors is not None:
+        command.extend(["--retry-errors", str(max(0, int(retry_errors)))])
+    return command
+
+
 def _run_extract_temperament_task(run_id: str, config_path: str):
     run_process(
-        [sys.executable, "-u", "-m", "scripts.extract_temperament", "--project-root", ROOT_DIR, config_path],
+        _build_extract_temperament_command(config_path),
         "extract_temperament",
         run_id,
     )
@@ -5204,6 +5227,94 @@ def _load_script_max_length() -> int:
         return int(tts.get("script_max_length", 250))
     except Exception:
         return 250
+
+
+def _load_script_error_retry_attempts(config_path: Optional[str] = None) -> int:
+    effective_config_path = str(config_path or CONFIG_PATH).strip() or CONFIG_PATH
+    try:
+        with open(effective_config_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        generation = cfg.get("generation", {}) if isinstance(cfg, dict) else {}
+        return max(0, int((generation or {}).get("script_error_retry_attempts", 3) or 0))
+    except Exception:
+        return 3
+
+
+def _load_stage_residual_error_ids(stage_name: str) -> list[str]:
+    try:
+        pdata = _load_project_paragraphs_document()
+    except Exception:
+        return []
+    if not isinstance(pdata, dict):
+        return []
+    if stage_name == "assign_dialogue":
+        ids = [str(item).strip() for item in (pdata.get("dialogue_errors") or []) if str(item).strip()]
+        if not ids:
+            ids = [
+                str(item.get("id") or "").strip()
+                for item in (pdata.get("paragraphs") or [])
+                if isinstance(item, dict) and item.get("dialogue_error") and str(item.get("id") or "").strip()
+            ]
+        return ids
+    if stage_name == "extract_temperament":
+        ids = []
+        for key in ("temperament_errors", "dialogue_mood_errors"):
+            ids.extend(str(item).strip() for item in (pdata.get(key) or []) if str(item).strip())
+        if not ids:
+            for item in (pdata.get("paragraphs") or []):
+                if not isinstance(item, dict):
+                    continue
+                item_id = str(item.get("id") or "").strip()
+                if item_id and (item.get("temperament_error") or item.get("dialogue_mood_error")):
+                    ids.append(item_id)
+        return sorted(set(ids))
+    return []
+
+
+def _maybe_run_new_mode_stage_error_heal(
+    stage_name: str,
+    *,
+    config_path: str,
+    run_id: str,
+    relay,
+) -> None:
+    if stage_name not in {"assign_dialogue", "extract_temperament"}:
+        return
+
+    retry_attempts = _load_script_error_retry_attempts(config_path)
+    if retry_attempts <= 0:
+        return
+
+    initial_error_ids = _load_stage_residual_error_ids(stage_name)
+    if not initial_error_ids:
+        return
+
+    relay(
+        f"Auto-heal: retrying {len(initial_error_ids)} residual {NEW_MODE_STAGE_LABELS.get(stage_name, stage_name)} error(s) "
+        f"with up to {retry_attempts} attempt(s) each."
+    )
+
+    if stage_name == "assign_dialogue":
+        full_cast = bool((process_state["new_mode_workflow"].get("options") or {}).get("full_cast", True))
+        command = _build_assign_dialogue_command(
+            config_path,
+            full_cast=full_cast,
+            retry_errors=retry_attempts,
+        )
+    else:
+        command = _build_extract_temperament_command(config_path, retry_errors=retry_attempts)
+
+    success = run_process(command, stage_name, run_id, relay_fn=relay)
+    if not success:
+        raise RuntimeError(
+            f"{NEW_MODE_STAGE_LABELS.get(stage_name, stage_name)} automatic error-heal retry failed."
+        )
+
+    remaining_error_ids = _load_stage_residual_error_ids(stage_name)
+    relay(
+        f"Auto-heal complete for {NEW_MODE_STAGE_LABELS.get(stage_name, stage_name)}. "
+        f"Remaining residual errors: {len(remaining_error_ids)}."
+    )
 
 
 def _run_process_paragraphs_task(run_id: str, input_file: str):
@@ -5824,6 +5935,14 @@ def _run_new_mode_workflow_stage(stage_name: str):
             )
         else:
             raise RuntimeError(f"Unknown new-mode stage: {stage_name}")
+
+        if success:
+            _maybe_run_new_mode_stage_error_heal(
+                stage_name,
+                config_path=config_path,
+                run_id=run_id,
+                relay=relay,
+            )
 
     if _new_mode_workflow_is_pause_requested():
         raise WorkflowPauseRequested()

@@ -2739,6 +2739,7 @@ def _run_stage1_to_voices_tab(
     script_workflow_inactivity_seconds: float = WATCHDOG_IDLE_SECONDS,
     script_workflow_max_total_seconds: float = WATCHDOG_MAX_SECONDS,
     fail_on_script_logged_errors: bool = True,
+    full_cast: bool = True,
 ) -> None:
     _install_error_toast_guard(page)
     page.goto(app_base_url, wait_until="domcontentloaded", timeout=10000)
@@ -2788,6 +2789,20 @@ def _run_stage1_to_voices_tab(
     assert not setup_snapshot.get("legacy_checked"), "Expected non-legacy mode to be enabled."
 
     _wait_for_script_tab_ready(page)
+    full_cast_toggle = page.locator("#full-cast-toggle-v2")
+    _wait_for_activity(
+        "Waiting for full-cast toggle",
+        lambda: {"has_full_cast_toggle": bool(full_cast_toggle.count())},
+        lambda snapshot: bool(snapshot.get("has_full_cast_toggle")),
+    )
+    desired_full_cast = bool(full_cast)
+    if full_cast_toggle.is_checked() != desired_full_cast:
+        full_cast_toggle.click()
+    assert full_cast_toggle.is_checked() == desired_full_cast, (
+        "Full Cast toggle mismatch before script processing. "
+        f"expected={desired_full_cast} actual={full_cast_toggle.is_checked()}"
+    )
+
     process_voices_toggle = page.locator("#process-voices-toggle-v2")
     if process_voices_toggle.is_checked():
         process_voices_toggle.click()

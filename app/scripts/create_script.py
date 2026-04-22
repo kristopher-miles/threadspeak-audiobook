@@ -24,6 +24,7 @@ import uuid
 from stdio_utils import configure_utf8_stdio
 from scripts.legacy_cli_project import infer_project_root, import_project_document_from_path
 from script_provider import open_project_script_store
+from source_document import is_structural_silence_text
 
 configure_utf8_stdio()
 
@@ -45,6 +46,7 @@ HAS_LETTER = re.compile(r'[A-Za-z]')
 _QUOTE_CHARS = '"\u201c\u201d'
 
 _READ_RE = re.compile(r'\bread\b', re.IGNORECASE)
+_DEFAULT_END_OF_CHAPTER_GAP_MS = 3000
 
 
 def _fix_instruct(instruct: str) -> str:
@@ -58,6 +60,34 @@ def _fix_instruct(instruct: str) -> str:
 def _strip_quotes(text: str) -> str:
     """Remove leading/trailing quotation marks from a dialogue fragment."""
     return text.strip(_QUOTE_CHARS)
+
+
+def is_structural_silence_paragraph(para: dict) -> bool:
+    if not isinstance(para, dict):
+        return False
+    if para.get("is_structural_silence") is True:
+        return True
+    return is_structural_silence_text(para.get("text") or "")
+
+
+def _load_end_of_chapter_gap_seconds(project_root: str) -> float:
+    config_candidates = [
+        os.path.join(project_root, "app", "config.json"),
+        os.path.join(project_root, "config.json"),
+    ]
+    for path in config_candidates:
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception:
+            continue
+        export_cfg = payload.get("export") or {}
+        try:
+            duration_ms = int(export_cfg.get("silence_end_of_chapter_ms") or _DEFAULT_END_OF_CHAPTER_GAP_MS)
+        except (TypeError, ValueError):
+            duration_ms = _DEFAULT_END_OF_CHAPTER_GAP_MS
+        return max(0, duration_ms) / 1000.0
+    return _DEFAULT_END_OF_CHAPTER_GAP_MS / 1000.0
 
 
 def _build_para_blocks(text: str, speakers_list: list, narration_speaker: str = "NARRATOR") -> list[dict]:
@@ -286,6 +316,21 @@ def _make_chunk(idx: int, speaker: str, text: str, instruct: str, chapter: str, 
     return chunk
 
 
+def _make_silence_entry(chapter: str, paragraph_id: str, duration_s: float) -> dict:
+    entry = {
+        "speaker": "NARRATOR",
+        "text": "",
+        "instruct": "",
+        "type": "silence",
+        "silence_duration_s": float(duration_s),
+    }
+    if chapter:
+        entry["chapter"] = chapter
+    if paragraph_id:
+        entry["paragraph_id"] = paragraph_id
+    return entry
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -341,6 +386,8 @@ def main():
         _log("ERROR: persisted paragraph state contains no paragraphs.")
         sys.exit(1)
 
+    end_of_chapter_gap_s = _load_end_of_chapter_gap_seconds(project_root)
+
     # ── Collect all speakers and ensure NARRATOR is included ───────────────────
     raw_speakers: set[str] = set()
     for p in paragraphs:
@@ -379,6 +426,10 @@ def main():
             moods_list    = [_fix_instruct((m or "").strip()) for m in (para.get("dialogue_moods") or [])]
 
             para_id = para.get("id")
+            if is_structural_silence_paragraph(para):
+                entries.append(_make_silence_entry(chapter_name, para_id, end_of_chapter_gap_s))
+                chapter_line_count += 1
+                continue
             if not para.get("has_dialogue"):
                 # Pure narration — split according to max_length
                 for s in para_split_fn(para["text"]):
@@ -422,6 +473,19 @@ def main():
 
     # ── Build chunks list (1:1 with entries, no merging) ──────────────────────
     for i, entry in enumerate(entries):
+        if entry.get("type") == "silence":
+            chunk = _make_chunk(
+                idx=i,
+                speaker=entry["speaker"],
+                text=entry.get("text", ""),
+                instruct=entry.get("instruct", ""),
+                chapter=entry.get("chapter", ""),
+                paragraph_id=entry.get("paragraph_id"),
+            )
+            chunk["type"] = "silence"
+            chunk["silence_duration_s"] = float(entry.get("silence_duration_s") or 0.0)
+            chunks.append(chunk)
+            continue
         chunks.append(_make_chunk(
             idx=i,
             speaker=entry["speaker"],

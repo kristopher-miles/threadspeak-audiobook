@@ -1,6 +1,10 @@
 """Live Playwright coverage for LM Studio model picker behavior on Setup tab."""
 
+import pytest
+
 from ._stage_ui_helpers import *  # noqa: F401,F403
+
+pytestmark = pytest.mark.lmstudio_live_e2e
 
 
 LMSTUDIO_MODELS_ENDPOINT = f"{LMSTUDIO_DEFAULT_ORIGIN}/api/v1/models"

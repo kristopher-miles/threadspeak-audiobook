@@ -13,9 +13,15 @@
                             <label class="form-label" title="URL for your OpenAI-compatible server (LM Studio, Ollama, etc.)">Base URL</label>
                             <input type="text" class="form-control" id="llm-url" placeholder="http://localhost:1234/v1" title="URL for your OpenAI-compatible server (LM Studio, Ollama, etc.)">
                         </div>
-                        <div class="mb-3">
-                            <label class="form-label">API Key</label>
-                            <input type="password" class="form-control" id="llm-key" value="">
+                        <div class="row mb-3">
+                            <div class="col-md-9">
+                                <label class="form-label">API Key</label>
+                                <input type="password" class="form-control" id="llm-key" value="">
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label" title="Retries residual script-stage paragraph errors between Process Script steps. 0 disables auto-heal retries.">Script Error Retries</label>
+                                <input type="number" class="form-control" id="script-error-retry-attempts" value="3" min="0" step="1" title="Retries residual script-stage paragraph errors between Process Script steps. 0 disables auto-heal retries.">
+                            </div>
                         </div>
                         <div class="row mb-3">
                             <div class="col-md-6">

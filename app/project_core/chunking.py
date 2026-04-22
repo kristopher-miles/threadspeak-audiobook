@@ -53,7 +53,7 @@ def _extract_chapter_name(entry):
     return None
 
 
-def _build_chunk(speaker, text, instruct, chapter=None, paragraph_id=None):
+def _build_chunk(speaker, text, instruct, chapter=None, paragraph_id=None, *, chunk_type=None, silence_duration_s=None):
     chunk = {
         "speaker": speaker,
         "text": text,
@@ -64,6 +64,10 @@ def _build_chunk(speaker, text, instruct, chapter=None, paragraph_id=None):
         chunk["chapter"] = chapter
     if paragraph_id:
         chunk["paragraph_id"] = paragraph_id
+    if chunk_type:
+        chunk["type"] = chunk_type
+    if silence_duration_s is not None:
+        chunk["silence_duration_s"] = float(silence_duration_s)
     return chunk
 
 
@@ -137,6 +141,8 @@ def script_entries_to_chunks(script_entries, max_chars=MAX_CHUNK_CHARS):
                 entry.get("instruct", ""),
                 _extract_chapter_name(entry),
                 entry.get("paragraph_id"),
+                chunk_type=entry.get("type"),
+                silence_duration_s=entry.get("silence_duration_s"),
             )
         )
     return chunks

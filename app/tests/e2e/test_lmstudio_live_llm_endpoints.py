@@ -21,6 +21,8 @@ import requests
 from llm import LMStudioModelLoadService
 from runtime_layout import RuntimeLayout
 
+pytestmark = pytest.mark.lmstudio_live_e2e
+
 try:
     import fcntl
 except ModuleNotFoundError:

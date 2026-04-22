@@ -1,13 +1,18 @@
 import sys
 import unittest
+import inspect
 from types import SimpleNamespace
 
 sys.modules.setdefault("openai", SimpleNamespace(OpenAI=object))
 
+import scripts.assign_dialogue as assign_dialogue_module
 from scripts.assign_dialogue import apply_narrated_dialogue_assignments
 
 
 class NarratedDialogueAssignmentTests(unittest.TestCase):
+    def test_no_llm_telemetry_log_lines_in_assign_dialogue_script(self):
+        self.assertNotIn("LLM telemetry:", inspect.getsource(assign_dialogue_module))
+
     def test_assigns_narrator_to_all_quotes_and_clears_errors(self):
         paragraphs_doc = {
             "paragraphs": [

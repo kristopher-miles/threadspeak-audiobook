@@ -1,13 +1,22 @@
 import unittest
 import sys
+import inspect
+import json
+import os
+import tempfile
 from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.modules.setdefault("openai", SimpleNamespace(OpenAI=object))
 
+import scripts.extract_temperament as extract_temperament_module
 from scripts.extract_temperament import build_temperament_context
 
 
 class BuildTemperamentContextTests(unittest.TestCase):
+    def test_no_llm_telemetry_log_lines_in_extract_temperament_script(self):
+        self.assertNotIn("LLM telemetry:", inspect.getsource(extract_temperament_module))
+
     def test_uses_only_target_paragraph_when_word_threshold_already_met(self):
         paragraphs = [
             {"text": "Earlier paragraph should not be included."},
@@ -56,6 +65,66 @@ class BuildTemperamentContextTests(unittest.TestCase):
 
         self.assertNotIn(paragraphs[2]["text"], context)
         self.assertTrue(context.endswith(paragraphs[1]["text"]))
+
+    def test_retry_errors_mode_only_retries_failed_quote_moods_and_preserves_successes(self):
+        paragraphs_doc = {
+            "paragraphs": [
+                {
+                    "id": "p_0001",
+                    "text": '"Hello." "Goodbye."',
+                    "has_dialogue": True,
+                    "speakers": ["Alice", "Bob"],
+                    "tone": "calm",
+                    "temperament_error": False,
+                    "dialogue_moods": ["warm", ""],
+                    "quote_mood_errors": [False, True],
+                    "dialogue_mood_error": True,
+                }
+            ],
+            "temperament_extraction_complete": True,
+            "temperament_errors": [],
+            "dialogue_mood_errors": ["p_0001"],
+        }
+        persisted = {}
+
+        class FakeStore:
+            def load_project_document(self, name):
+                self.loaded = name
+                return paragraphs_doc
+
+            def stop(self):
+                return None
+
+        def fake_call_sentiment(client, runtime, system_prompt, user_msg, max_tokens):
+            if "DIALOGUE:\nGoodbye." not in user_msg:
+                raise AssertionError(f"unexpected retry target: {user_msg}")
+            return ("sharp", "{}", "tool", True)
+
+        with tempfile.TemporaryDirectory() as temp_root:
+            config_path = os.path.join(temp_root, "config.json")
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump({"llm": {}, "generation": {"temperament_words": 150, "max_tokens": 64}}, f)
+
+            argv = [
+                "extract_temperament.py",
+                "--project-root",
+                temp_root,
+                "--retry-errors",
+                "3",
+                config_path,
+            ]
+
+            with patch.object(sys, "argv", argv):
+                with patch.object(extract_temperament_module, "open_project_script_store", return_value=FakeStore()):
+                    with patch.object(extract_temperament_module, "_persist_paragraphs_doc", lambda path, root, doc: persisted.update(doc)):
+                        with patch.object(extract_temperament_module._LLM_CLIENT_FACTORY, "create_client", return_value=object()):
+                            with patch.object(extract_temperament_module, "call_sentiment", side_effect=fake_call_sentiment):
+                                extract_temperament_module.main()
+
+        self.assertEqual(persisted["paragraphs"][0]["dialogue_moods"], ["warm", "sharp"])
+        self.assertEqual(persisted["paragraphs"][0]["quote_mood_errors"], [False, False])
+        self.assertFalse(persisted["paragraphs"][0]["dialogue_mood_error"])
+        self.assertEqual(persisted["dialogue_mood_errors"], [])
 
 
 if __name__ == "__main__":

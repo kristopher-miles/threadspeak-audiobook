@@ -23,6 +23,7 @@ from llm import DIALOGUE_SPEAKER_CONTRACT, LLMClientFactory, LLMRuntimeConfig, g
 from stdio_utils import configure_utf8_stdio
 from scripts.legacy_cli_project import infer_project_root, import_project_document_from_path
 from script_provider import open_project_script_store
+from source_document import is_structural_silence_text
 
 configure_utf8_stdio()
 
@@ -37,6 +38,14 @@ DEFAULT_SYSTEM_PROMPT = (
     "You are a dialogue attribution specialist helping to build an audiobook script. "
     "Your sole task is to identify who speaks a given piece of dialogue based on the surrounding narrative."
 )
+
+
+def is_structural_silence_paragraph(para: dict) -> bool:
+    if not isinstance(para, dict):
+        return False
+    if para.get("is_structural_silence") is True:
+        return True
+    return is_structural_silence_text(para.get("text") or "")
 
 
 def _normalize_speaker_name(raw_speaker: str) -> str:
@@ -118,19 +127,25 @@ def build_context_window(paragraphs: list, target_idx: int, budget: int) -> str:
     while used < budget:
         added = False
         if left >= 0:
-            t = paragraphs[left]["text"]
-            if used + len(t) <= budget:
-                left_parts.insert(0, t)
-                used += len(t)
+            if is_structural_silence_paragraph(paragraphs[left]):
                 left -= 1
-                added = True
+            else:
+                t = paragraphs[left]["text"]
+                if used + len(t) <= budget:
+                    left_parts.insert(0, t)
+                    used += len(t)
+                    left -= 1
+                    added = True
         if right < len(paragraphs):
-            t = paragraphs[right]["text"]
-            if used + len(t) <= budget:
-                right_parts.append(t)
-                used += len(t)
+            if is_structural_silence_paragraph(paragraphs[right]):
                 right += 1
-                added = True
+            else:
+                t = paragraphs[right]["text"]
+                if used + len(t) <= budget:
+                    right_parts.append(t)
+                    used += len(t)
+                    right += 1
+                    added = True
         if not added:
             break
 
@@ -149,6 +164,8 @@ def apply_narrated_dialogue_assignments(paragraphs_doc: dict) -> tuple[int, int]
     quote_count = 0
 
     for para in paragraphs:
+        if is_structural_silence_paragraph(para):
+            continue
         if not para.get("has_dialogue"):
             continue
         dialogue_para_count += 1
@@ -303,12 +320,14 @@ def main():
     if retry_errors_mode:
         error_ids = set(paragraphs_doc.get("dialogue_errors", []))
         error_paras = [(i, p) for i, p in enumerate(paragraphs)
-                       if p.get("dialogue_error") and p["id"] in error_ids]
+                       if not is_structural_silence_paragraph(p) and p.get("dialogue_error") and p["id"] in error_ids]
         _log(f"=== Error Correction: retrying {len(error_paras)} paragraph(s) with up to {retry_max} attempt(s) each (workers={workers}) ===")
 
         seen_retry: set[str] = set()
         known_speakers: list[str] = []
         for p in paragraphs:
+            if is_structural_silence_paragraph(p):
+                continue
             if not p.get("dialogue_error"):
                 for s in (p.get("speakers") or []):
                     if s and s != "NARRATOR" and s not in seen_retry:
@@ -355,7 +374,6 @@ def main():
                         speaker, raw, llm_mode, llm_tool_call_observed = _call_identify_dialogue(
                             client, runtime, system_prompt, user_msg, max_tokens
                         )
-                        _log(f"LLM telemetry: llm_mode={llm_mode} tool_call_observed={llm_tool_call_observed}")
                         if not speaker:
                             raw_tail = raw[-1024:] if len(raw) > 1024 else raw
                             job = f"{para_id} q{qi}"
@@ -397,7 +415,10 @@ def main():
         return
 
     # ── Filter dialogue paragraphs — skip any already successfully assigned ──────
-    all_dialogue_paras = [(i, p) for i, p in enumerate(paragraphs) if p.get("has_dialogue")]
+    all_dialogue_paras = [
+        (i, p) for i, p in enumerate(paragraphs)
+        if not is_structural_silence_paragraph(p) and p.get("has_dialogue")
+    ]
     dialogue_paras = [
         (i, p) for i, p in all_dialogue_paras
         if not p.get("speakers") or p.get("dialogue_error")
@@ -480,7 +501,6 @@ def main():
                 speaker, raw, llm_mode, llm_tool_call_observed = _call_identify_dialogue(
                     client, runtime, system_prompt, user_msg, max_tokens
                 )
-                _log(f"LLM telemetry: llm_mode={llm_mode} tool_call_observed={llm_tool_call_observed}")
                 if not speaker:
                     raw_tail = raw[-1024:] if len(raw) > 1024 else raw
                     job = f"{para_id} q{qi}"

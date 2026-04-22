@@ -17,6 +17,7 @@ Use `test_<domain>_<behavior>.py` for new files and keep each file focused on on
 - Project domain: `rtk app/env/bin/python -m pytest -q app/tests/project`
 - Editor UI domain: `rtk app/env/bin/python -m pytest -q app/tests/editor_ui`
 - E2E domain: `rtk app/env/bin/python -m pytest -q app/tests/e2e`
+- LM Studio live E2E lane: `rtk app/env/bin/python -m pytest -q app/tests/e2e --run-lmstudio-live-e2e -k lmstudio_live`
 - Fresh-clone E2E lane: `rtk app/env/bin/python -m pytest -q app/tests/e2e --run-fresh-clone-e2e -k fresh_clone`
 - Fresh-clone live real-backend E2E lane: `rtk app/env/bin/python -m pytest -q app/tests/e2e --run-fresh-clone-live-e2e -k fresh_clone_live`
 - Fresh-clone live resumable partial mode: `rtk app/env/bin/python -m pytest -q app/tests/e2e --run-fresh-clone-live-e2e --fresh-clone-live-partial -k fresh_clone_live`
@@ -29,6 +30,8 @@ Use `test_<domain>_<behavior>.py` for new files and keep each file focused on on
 - Keep files scoped; avoid re-growing monoliths.
 - The fresh-clone E2E lane is intentionally off by default because it clones `origin/main`
   and bootstraps a fresh `app/env` before driving the real UI.
+- The LM Studio live E2E lane is intentionally off by default because it hits a real reachable
+  local LM Studio backend and will run whenever that backend is available unless explicitly gated.
 - The fresh-clone live lane is intentionally off by default because it also requires a reachable
   local LM Studio backend with at least one tool-capable model.
 - The `--fresh-clone-live-partial` flag reuses the prior clone root and stage checkpoint after failures

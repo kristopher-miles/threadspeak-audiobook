@@ -374,6 +374,9 @@
                 const config = await API.get('/api/config');
                 document.getElementById('llm-url').value = config.llm.base_url;
                 document.getElementById('llm-key').value = config.llm.api_key ?? '';
+                document.getElementById('script-error-retry-attempts').value = config.generation && config.generation.script_error_retry_attempts != null
+                    ? config.generation.script_error_retry_attempts
+                    : 3;
                 document.getElementById('llm-model').value = config.llm.model_name;
                 document.getElementById('llm-workers').value = config.llm.llm_workers ?? 1;
                 document.getElementById('tts-mode').value = config.tts.mode || 'external';
@@ -479,6 +482,9 @@
                     }
                     if (config.generation.temperament_words != null) {
                         document.getElementById('temperament-words').value = config.generation.temperament_words;
+                    }
+                    if (config.generation.script_error_retry_attempts != null) {
+                        document.getElementById('script-error-retry-attempts').value = config.generation.script_error_retry_attempts;
                     }
                     if (config.generation.max_tokens) {
                         document.getElementById('max-tokens').value = config.generation.max_tokens;
@@ -631,6 +637,7 @@
             document.getElementById('banned-tokens').value = '';
             document.getElementById('merge-narrators').checked = false;
             document.getElementById('orphaned-text-to-narrator-on-repair').checked = true;
+            document.getElementById('script-error-retry-attempts').value = 3;
             document.getElementById('auto-regenerate-bad-clip-attempts').value = 3;
             document.getElementById('proofread-threshold').value = 0.75;
             refreshPromptTextareaHeights();
@@ -702,9 +709,14 @@
         }
 
         function collectGenerationConfig() {
+            const rawScriptErrorRetryAttempts = parseInt(document.getElementById('script-error-retry-attempts').value, 10);
+            const scriptErrorRetryAttempts = Number.isInteger(rawScriptErrorRetryAttempts) && rawScriptErrorRetryAttempts > 0
+                ? rawScriptErrorRetryAttempts
+                : 0;
             return {
                 chunk_size: parseInt(document.getElementById('chunk-size').value) || 3000,
                 temperament_words: parseInt(document.getElementById('temperament-words').value) || 150,
+                script_error_retry_attempts: scriptErrorRetryAttempts,
                 max_tokens: parseInt(document.getElementById('max-tokens').value) || 4096,
                 temperature: parseFloat(document.getElementById('temperature').value),
                 top_p: parseFloat(document.getElementById('top-p').value),
@@ -784,7 +796,7 @@
                 'sub-batch-max-items': 'tts', 'auto-regenerate-bad-clips': 'tts',
                 'auto-regenerate-bad-clip-attempts': 'tts', 'script-max-length': 'tts',
                 // Generation
-                'chunk-size': 'generation', 'max-tokens': 'generation',
+                'script-error-retry-attempts': 'generation', 'chunk-size': 'generation', 'max-tokens': 'generation',
                 'temperature': 'generation', 'top-p': 'generation', 'top-k': 'generation',
                 'min-p': 'generation', 'presence-penalty': 'generation',
                 'banned-tokens': 'generation', 'merge-narrators': 'generation',

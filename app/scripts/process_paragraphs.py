@@ -16,7 +16,7 @@ import time
 from stdio_utils import configure_utf8_stdio
 from scripts.legacy_cli_project import infer_project_root
 from script_provider import open_project_script_store
-from source_document import load_source_document, iter_document_paragraphs
+from source_document import load_source_document, iter_document_paragraphs, is_structural_silence_text
 
 configure_utf8_stdio()
 
@@ -92,6 +92,7 @@ def main():
             "chapter": para.get("chapter") or "",
             "text": text,
             "has_dialogue": has_dlg,
+            "is_structural_silence": is_structural_silence_text(text),
             "tone": "",
         })
         if (i + 1) % 100 == 0 or i + 1 == total:

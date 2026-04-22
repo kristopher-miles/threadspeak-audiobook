@@ -218,8 +218,14 @@
                 showToast(e.message || 'Failed to request pause.', 'error', 7000);
             }
         });
-        document.getElementById('full-cast-toggle-v2')?.addEventListener('change', (event) => {
-            setFullCastToggleLabel(event?.target?.checked !== false);
+        document.getElementById('full-cast-toggle-v2')?.addEventListener('change', async (event) => {
+            const fullCast = event?.target?.checked !== false;
+            setFullCastToggleLabel(fullCast);
+            try {
+                await API.post('/api/new_mode_workflow/options', { full_cast: fullCast });
+            } catch (e) {
+                showToast(e.message || 'Failed to save script mode.', 'error', 7000);
+            }
         });
 
         // Restore workflow button state and step icons on page load

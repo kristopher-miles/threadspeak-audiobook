@@ -232,6 +232,111 @@ class WorkflowEntrypointAccessibilityTests(unittest.TestCase):
         self.assertEqual(captured["run_id"], "run-1")
         self.assertNotIn("--narrated", captured["cmd"])
 
+    def test_new_mode_assign_dialogue_stage_runs_retry_heal_when_errors_remain(self):
+        captured = []
+
+        def fake_run_process(cmd, stage_name, run_id, relay_fn=None):
+            captured.append({"cmd": cmd, "stage_name": stage_name, "run_id": run_id})
+            return True
+
+        self._patch("_start_task_run", lambda _task_name: "run-1")
+        self._patch("run_process", fake_run_process)
+        self._patch("_new_mode_workflow_is_pause_requested", lambda: False)
+        self._patch("_load_script_error_retry_attempts", lambda _config_path=None: 3)
+        self._patch("_load_project_paragraphs_document", lambda: {"dialogue_errors": ["p_0001"]})
+
+        with app_module.new_mode_workflow_lock:
+            app_module.process_state["new_mode_workflow"] = app_module._new_mode_workflow_initial_state() | {
+                "running": True,
+                "options": {"process_voices": True, "generate_audio": False, "full_cast": False},
+            }
+
+        app_module._run_new_mode_workflow_stage("assign_dialogue")
+
+        self.assertEqual(len(captured), 2)
+        self.assertIn("--narrated", captured[0]["cmd"])
+        self.assertIn("--retry-errors", captured[1]["cmd"])
+        self.assertEqual(
+            captured[1]["cmd"][captured[1]["cmd"].index("--retry-errors") + 1],
+            "3",
+        )
+
+    def test_new_mode_extract_temperament_stage_runs_retry_heal_when_errors_remain(self):
+        captured = []
+
+        def fake_run_process(cmd, stage_name, run_id, relay_fn=None):
+            captured.append({"cmd": cmd, "stage_name": stage_name, "run_id": run_id})
+            return True
+
+        self._patch("_start_task_run", lambda _task_name: "run-1")
+        self._patch("run_process", fake_run_process)
+        self._patch("_new_mode_workflow_is_pause_requested", lambda: False)
+        self._patch("_load_script_error_retry_attempts", lambda _config_path=None: 3)
+        self._patch(
+            "_load_project_paragraphs_document",
+            lambda: {"temperament_errors": ["p_0001"], "dialogue_mood_errors": ["p_0002"]},
+        )
+
+        with app_module.new_mode_workflow_lock:
+            app_module.process_state["new_mode_workflow"] = app_module._new_mode_workflow_initial_state() | {
+                "running": True,
+                "options": {"process_voices": True, "generate_audio": False, "full_cast": True},
+            }
+
+        app_module._run_new_mode_workflow_stage("extract_temperament")
+
+        self.assertEqual(len(captured), 2)
+        self.assertNotIn("--retry-errors", captured[0]["cmd"])
+        self.assertIn("--retry-errors", captured[1]["cmd"])
+        self.assertEqual(
+            captured[1]["cmd"][captured[1]["cmd"].index("--retry-errors") + 1],
+            "3",
+        )
+
+    def test_new_mode_assign_dialogue_stage_fails_when_retry_heal_subprocess_fails(self):
+        captured = []
+
+        def fake_run_process(cmd, stage_name, run_id, relay_fn=None):
+            captured.append({"cmd": cmd, "stage_name": stage_name, "run_id": run_id})
+            return len(captured) == 1
+
+        self._patch("_start_task_run", lambda _task_name: "run-1")
+        self._patch("run_process", fake_run_process)
+        self._patch("_new_mode_workflow_is_pause_requested", lambda: False)
+        self._patch("_load_script_error_retry_attempts", lambda _config_path=None: 3)
+        self._patch("_load_project_paragraphs_document", lambda: {"dialogue_errors": ["p_0001"]})
+
+        with app_module.new_mode_workflow_lock:
+            app_module.process_state["new_mode_workflow"] = app_module._new_mode_workflow_initial_state() | {
+                "running": True,
+                "options": {"process_voices": True, "generate_audio": False, "full_cast": True},
+            }
+
+        with self.assertRaises(RuntimeError):
+            app_module._run_new_mode_workflow_stage("assign_dialogue")
+
+    def test_new_mode_options_endpoint_persists_full_cast_selection(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            workflow_state_path = os.path.join(temp_root, "new_mode_workflow_state.json")
+            original_new_mode_path = app_module.NEW_MODE_WORKFLOW_STATE_PATH
+            try:
+                app_module.NEW_MODE_WORKFLOW_STATE_PATH = workflow_state_path
+                with app_module.new_mode_workflow_lock:
+                    app_module.process_state["new_mode_workflow"] = app_module._new_mode_workflow_initial_state()
+
+                result = asyncio.run(
+                    app_module.set_new_mode_workflow_options(
+                        app_module.NewModeWorkflowOptionsRequest(full_cast=False)
+                    )
+                )
+
+                self.assertFalse(result["options"]["full_cast"])
+                with open(workflow_state_path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                self.assertFalse(payload["options"]["full_cast"])
+            finally:
+                app_module.NEW_MODE_WORKFLOW_STATE_PATH = original_new_mode_path
+
     def test_manual_stage_start_is_blocked_while_new_mode_workflow_active(self):
         with app_module.new_mode_workflow_lock:
             app_module.process_state["new_mode_workflow"] = app_module._new_mode_workflow_initial_state() | {

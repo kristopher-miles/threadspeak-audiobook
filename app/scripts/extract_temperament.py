@@ -32,6 +32,7 @@ from llm import LLMClientFactory, LLMRuntimeConfig, SENTIMENT_MOOD_CONTRACT, get
 from stdio_utils import configure_utf8_stdio
 from scripts.legacy_cli_project import infer_project_root, import_project_document_from_path
 from script_provider import open_project_script_store
+from source_document import is_structural_silence_text
 
 configure_utf8_stdio()
 
@@ -48,6 +49,14 @@ DEFAULT_SYSTEM_PROMPT = (
     "Your sole task is to identify the emotional sentiment and delivery style "
     "of a given paragraph of prose."
 )
+
+
+def is_structural_silence_paragraph(para: dict) -> bool:
+    if not isinstance(para, dict):
+        return False
+    if para.get("is_structural_silence") is True:
+        return True
+    return is_structural_silence_text(para.get("text") or "")
 
 
 def _log(msg: str):
@@ -101,6 +110,8 @@ def build_temperament_context(paragraphs: list, target_idx: int, budget: int, mi
         return target_text
 
     for idx in range(target_idx - 1, -1, -1):
+        if is_structural_silence_paragraph(paragraphs[idx]):
+            continue
         previous_text = paragraphs[idx]["text"]
         separator_chars = 2 if parts else 0
         if used_chars + separator_chars + len(previous_text) > budget:
@@ -122,6 +133,19 @@ def strip_dialogue(text: str) -> str:
 def extract_dialogue_only(text: str) -> str:
     """Return only the quoted dialogue portions joined by newlines."""
     return "\n".join(QUOTE_RE.findall(text))
+
+
+def split_paragraphs_for_temperament(paragraphs: list) -> tuple[list[tuple[int, dict]], list[tuple[int, dict]]]:
+    narration = []
+    dialogue = []
+    for idx, para in enumerate(paragraphs or []):
+        if is_structural_silence_paragraph(para):
+            continue
+        if para.get("has_dialogue"):
+            dialogue.append((idx, para))
+        else:
+            narration.append((idx, para))
+    return narration, dialogue
 
 
 def _extract_mood_from_text(text: str) -> str:
@@ -171,16 +195,231 @@ def call_sentiment(client, runtime: LLMRuntimeConfig, system_prompt: str, user_m
     )
 
 
+def retry_failed_temperament_errors(
+    paragraphs_doc: dict,
+    *,
+    paragraphs_path: str | None,
+    project_root: str | None,
+    client,
+    runtime: LLMRuntimeConfig,
+    system_prompt: str,
+    max_tokens: int,
+    context_budget: int,
+    temperament_words: int,
+    retry_max: int,
+) -> None:
+    paragraphs = paragraphs_doc.get("paragraphs", [])
+    all_narration_paras, all_dialogue_paras = split_paragraphs_for_temperament(paragraphs)
+    tone_error_ids = {
+        str(item).strip()
+        for item in (paragraphs_doc.get("temperament_errors") or [])
+        if str(item).strip()
+    }
+    dialogue_mood_error_ids = {
+        str(item).strip()
+        for item in (paragraphs_doc.get("dialogue_mood_errors") or [])
+        if str(item).strip()
+    }
+    if not tone_error_ids:
+        tone_error_ids = {
+            str(para.get("id") or "").strip()
+            for para in paragraphs
+            if isinstance(para, dict) and para.get("temperament_error") and str(para.get("id") or "").strip()
+        }
+    if not dialogue_mood_error_ids:
+        dialogue_mood_error_ids = {
+            str(para.get("id") or "").strip()
+            for para in paragraphs
+            if isinstance(para, dict) and para.get("dialogue_mood_error") and str(para.get("id") or "").strip()
+        }
+
+    retry_narration_paras = [
+        (idx, para) for idx, para in all_narration_paras
+        if para.get("temperament_error") and para.get("id") in tone_error_ids
+    ]
+    retry_dialogue_tone_paras = [
+        (idx, para) for idx, para in all_dialogue_paras
+        if para.get("temperament_error") and para.get("id") in tone_error_ids
+    ]
+    retry_dialogue_mood_paras = [
+        (idx, para) for idx, para in all_dialogue_paras
+        if para.get("dialogue_mood_error") and para.get("id") in dialogue_mood_error_ids
+    ]
+
+    if not retry_narration_paras and not retry_dialogue_tone_paras and not retry_dialogue_mood_paras:
+        _log("Error correction requested, but no temperament errors remain.")
+        _checkpoint_write(paragraphs_path, project_root, paragraphs_doc, complete=True)
+        return
+
+    _log(
+        "=== Error Correction: "
+        f"{len(retry_narration_paras) + len(retry_dialogue_tone_paras)} tone paragraph(s), "
+        f"{len(retry_dialogue_mood_paras)} dialogue-mood paragraph(s), "
+        f"up to {retry_max} attempt(s) each ==="
+    )
+
+    def resolve_tone(context_text: str, target_text: str, *, narrator_only: bool) -> str:
+        if narrator_only:
+            user_msg = (
+                f"PASSAGE CONTEXT:\n{context_text}\n\n"
+                f"TARGET PARAGRAPH:\n{target_text}\n\n"
+                "Identify the spoken emotional sentiment and delivery of the given narration "
+                "portion of the paragraph. Ignore any dialogue when describing the emotional delivery:"
+            )
+        else:
+            user_msg = (
+                f"PASSAGE CONTEXT:\n{context_text}\n\n"
+                f"TARGET PARAGRAPH:\n{target_text}\n\n"
+                "Identify the spoken emotional sentiment and delivery of the given paragraph."
+            )
+        mood = ""
+        for _attempt in range(1, retry_max + 1):
+            try:
+                mood, raw, _llm_mode, _tool_call_observed = call_sentiment(
+                    client, runtime, system_prompt, user_msg, max_tokens
+                )
+                if not mood:
+                    raw_tail = raw[-1024:] if len(raw) > 1024 else raw
+                    _log(
+                        "Begin model did not return a mood during retry\n"
+                        f"{target_text}\n{raw_tail}\n"
+                        "End model did not return a mood during retry"
+                    )
+            except Exception as e:
+                raw_tail = str(e)[-1024:]
+                _log(f"Begin API call failed during retry\n{target_text}\n{raw_tail}\nEnd API call failed during retry")
+            if mood:
+                return mood
+        return ""
+
+    for idx, para in retry_narration_paras:
+        para_id = para["id"]
+        context_text = build_temperament_context(paragraphs, idx, context_budget, temperament_words)
+        mood = resolve_tone(context_text, para["text"], narrator_only=False)
+        if mood:
+            para["tone"] = mood
+            para["temperament_error"] = False
+            _log(f"FIXED {para_id}: narrator tone = {mood}")
+        else:
+            para["tone"] = ""
+            para["temperament_error"] = True
+            _log(f"FAILED {para_id}: narrator tone still missing after {retry_max} attempt(s)")
+        _checkpoint_write(paragraphs_path, project_root, paragraphs_doc, complete=False)
+
+    for idx, para in retry_dialogue_tone_paras:
+        para_id = para["id"]
+        context_text = build_temperament_context(paragraphs, idx, context_budget, temperament_words)
+        narration_text = strip_dialogue(para["text"])
+        mood = resolve_tone(context_text, narration_text, narrator_only=True)
+        if mood:
+            para["tone"] = mood
+            para["temperament_error"] = False
+            _log(f"FIXED {para_id}: narrator tone = {mood}")
+        else:
+            para["tone"] = ""
+            para["temperament_error"] = True
+            _log(f"FAILED {para_id}: narrator tone still missing after {retry_max} attempt(s)")
+        _checkpoint_write(paragraphs_path, project_root, paragraphs_doc, complete=False)
+
+    for idx, para in retry_dialogue_mood_paras:
+        para_id = para["id"]
+        speakers_list = para.get("speakers") or []
+        context_text = build_temperament_context(paragraphs, idx, context_budget, temperament_words)
+        quotes = QUOTE_RE.findall(para["text"])
+        narration_text = strip_dialogue(para["text"])
+
+        if not quotes:
+            para["dialogue_moods"] = []
+            para["quote_mood_errors"] = []
+            para["dialogue_mood_error"] = True
+            _log(f"FAILED {para_id}: no dialogue text found during mood retry")
+            _checkpoint_write(paragraphs_path, project_root, paragraphs_doc, complete=False)
+            continue
+
+        moods = list(para.get("dialogue_moods") or [""] * len(quotes))
+        mood_errors = list(para.get("quote_mood_errors") or [True] * len(quotes))
+        while len(moods) < len(quotes):
+            moods.append("")
+        while len(mood_errors) < len(quotes):
+            mood_errors.append(True)
+
+        for qi, quote_str in enumerate(quotes):
+            if not mood_errors[qi]:
+                continue
+            speaker = (speakers_list[qi] if qi < len(speakers_list) else "").strip() or "Unknown Speaker"
+            inner = quote_str.strip('"\u201c\u201d')
+
+            if speaker == "NARRATOR":
+                user_msg = (
+                    f"PASSAGE CONTEXT:\n{context_text}\n\n"
+                    f"TARGET PARAGRAPH:\n{narration_text}\n\n"
+                    "Identify the spoken emotional sentiment and delivery of the given narration "
+                    "portion of the paragraph. Ignore any dialogue when describing the emotional delivery:"
+                )
+            else:
+                user_msg = (
+                    f"PASSAGE CONTEXT:\n{context_text}\n\n"
+                    f"Identify the correct delivery emotion of the following dialogue as spoken by {speaker}.\n\n"
+                    f"DIALOGUE:\n{inner}"
+                )
+
+            mood = ""
+            for _attempt in range(1, retry_max + 1):
+                try:
+                    mood, raw, _llm_mode, _tool_call_observed = call_sentiment(
+                        client, runtime, system_prompt, user_msg, max_tokens
+                    )
+                    if not mood:
+                        raw_tail = raw[-1024:] if len(raw) > 1024 else raw
+                        _log(
+                            f"Begin model did not return a dialogue mood during retry: {para_id} q{qi}\n"
+                            f"{inner}\n{raw_tail}\n"
+                            f"End model did not return a dialogue mood during retry: {para_id} q{qi}"
+                        )
+                except Exception as e:
+                    raw_tail = str(e)[-1024:]
+                    _log(
+                        f"Begin API call failed during dialogue mood retry: {para_id} q{qi}\n"
+                        f"{inner}\n{raw_tail}\n"
+                        f"End API call failed during dialogue mood retry: {para_id} q{qi}"
+                    )
+                if mood:
+                    break
+
+            if mood:
+                moods[qi] = mood
+                mood_errors[qi] = False
+                _log(f"FIXED {para_id} q{qi}: dialogue mood = {mood}")
+            else:
+                _log(f"FAILED {para_id} q{qi}: dialogue mood still missing after {retry_max} attempt(s)")
+
+        para["dialogue_moods"] = moods
+        para["quote_mood_errors"] = mood_errors
+        para["dialogue_mood_error"] = any(mood_errors)
+        _checkpoint_write(paragraphs_path, project_root, paragraphs_doc, complete=False)
+
+    _checkpoint_write(paragraphs_path, project_root, paragraphs_doc, complete=True)
+    remaining_tone_errors = paragraphs_doc.get("temperament_errors") or []
+    remaining_dialogue_mood_errors = paragraphs_doc.get("dialogue_mood_errors") or []
+    _log(
+        "Error correction complete. "
+        f"Remaining tone errors: {len(remaining_tone_errors)}. "
+        f"Remaining dialogue mood errors: {len(remaining_dialogue_mood_errors)}."
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Extract temperament into persisted paragraphs.")
     parser.add_argument("paragraphs_path", nargs="?")
     parser.add_argument("config_path")
     parser.add_argument("--project-root", dest="project_root")
+    parser.add_argument("--retry-errors", dest="retry_errors", type=int, default=0)
     args = parser.parse_args()
 
     paragraphs_path = args.paragraphs_path
     config_path = args.config_path
     project_root = str(args.project_root or "").strip() or infer_project_root(paragraphs_path)
+    retry_max = max(0, int(args.retry_errors or 0))
     if not project_root and not paragraphs_path:
         _log("Usage: extract_temperament.py <paragraphs_path> <config_path> OR --project-root <root>")
         sys.exit(1)
@@ -249,8 +488,22 @@ def main():
 
     client = _LLM_CLIENT_FACTORY.create_client(runtime)
 
-    all_narration_paras = [(i, p) for i, p in enumerate(paragraphs) if not p.get("has_dialogue")]
-    all_dialogue_paras  = [(i, p) for i, p in enumerate(paragraphs) if p.get("has_dialogue")]
+    if retry_max > 0:
+        retry_failed_temperament_errors(
+            paragraphs_doc,
+            paragraphs_path=paragraphs_path,
+            project_root=project_root,
+            client=client,
+            runtime=runtime,
+            system_prompt=system_prompt,
+            max_tokens=max_tokens,
+            context_budget=context_budget,
+            temperament_words=temperament_words,
+            retry_max=retry_max,
+        )
+        return
+
+    all_narration_paras, all_dialogue_paras = split_paragraphs_for_temperament(paragraphs)
 
     tone_errors: list[str] = []
     dialogue_mood_errors: list[str] = []
@@ -291,7 +544,6 @@ def main():
             mood, raw, llm_mode, llm_tool_call_observed = call_sentiment(
                 client, runtime, system_prompt, user_msg, max_tokens
             )
-            _log(f"LLM telemetry: llm_mode={llm_mode} tool_call_observed={llm_tool_call_observed}")
             if not mood:
                 raw_tail = raw[-1024:] if len(raw) > 1024 else raw
                 _log(f"Begin model did not return a mood: {para_id} : Extract Temperament\n{para['text']}\n{raw_tail}\nEnd model did not return a mood: {para_id} : Extract Temperament")
@@ -360,7 +612,6 @@ def main():
             mood, raw, llm_mode, llm_tool_call_observed = call_sentiment(
                 client, runtime, system_prompt, user_msg, max_tokens
             )
-            _log(f"LLM telemetry: llm_mode={llm_mode} tool_call_observed={llm_tool_call_observed}")
             if not mood:
                 raw_tail = raw[-1024:] if len(raw) > 1024 else raw
                 _log(f"Begin model did not return a narrator mood: {para_id} : Extract Temperament\n{narration_text}\n{raw_tail}\nEnd model did not return a narrator mood: {para_id} : Extract Temperament")
@@ -461,7 +712,6 @@ def main():
                 mood, raw, llm_mode, llm_tool_call_observed = call_sentiment(
                     client, runtime, system_prompt, user_msg, max_tokens
                 )
-                _log(f"LLM telemetry: llm_mode={llm_mode} tool_call_observed={llm_tool_call_observed}")
                 if not mood:
                     raw_tail = raw[-1024:] if len(raw) > 1024 else raw
                     job = f"{para_id} q{qi}"

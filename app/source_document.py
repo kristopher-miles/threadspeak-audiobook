@@ -21,6 +21,13 @@ def _count_words(text):
     return len(re.findall(r"\b\w+\b", text or "", re.UNICODE))
 
 
+def is_structural_silence_text(text):
+    normalized = _normalize_text(text)
+    if not normalized:
+        return False
+    return not any(char.isalnum() for char in normalized)
+
+
 def split_text_into_paragraphs(text):
     paragraphs = []
     for part in _PARAGRAPH_BREAK_RE.split(text or ""):
