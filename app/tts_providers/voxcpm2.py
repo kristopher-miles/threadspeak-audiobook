@@ -14,6 +14,8 @@ from typing import Any
 
 import numpy as np
 
+from model_downloads import ensure_hf_snapshot
+
 
 TRUE_VALUES = {"1", "true", "yes", "on"}
 
@@ -271,7 +273,18 @@ class VoxCPM2AudioProvider:
                 f"and no local cache exists for {model_id}."
             )
         print(f"  VoxCPM2 model not cached locally, downloading {model_id}...")
-        return model_id
+        return ensure_hf_snapshot(
+            model_id,
+            display_name=model_id,
+            local_path_resolver=lambda repo_id, required_files=None: self.engine._resolve_local_model_path(
+                repo_id,
+                required_files=required_files,
+            ),
+            required_files=(
+                "model.safetensors",
+                ("audiovae.safetensors", "audiovae.pth"),
+            ),
+        )
 
     def _resolve_device(self):
         requested = str(getattr(self.engine, "_device", "") or "auto").strip().lower()

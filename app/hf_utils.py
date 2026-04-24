@@ -2,8 +2,9 @@
 import json
 import logging
 import os
-import shutil
 import time
+
+from model_downloads import download_hf_file
 
 logger = logging.getLogger("ThreadspeakUI")
 
@@ -83,8 +84,6 @@ def download_builtin_adapter(adapter_id, builtin_dir, hf_repo=BUILTIN_LORA_HF_RE
             "Model downloads are disabled by THREADSPEAK_DISABLE_MODEL_DOWNLOADS."
         )
 
-    from huggingface_hub import hf_hub_download
-
     # Strip builtin_ prefix to get HF subfolder name
     hf_name = adapter_id.replace("builtin_", "", 1)
     adapter_dir = os.path.join(builtin_dir, adapter_id)
@@ -95,11 +94,13 @@ def download_builtin_adapter(adapter_id, builtin_dir, hf_repo=BUILTIN_LORA_HF_RE
         if os.path.exists(local_path):
             continue
         try:
-            cached = hf_hub_download(
+            download_hf_file(
                 repo_id=hf_repo,
                 filename=f"{hf_name}/{filename}",
+                display_name=f"{adapter_id} LoRA adapter",
+                local_path=local_path,
+                record_failures=filename in REQUIRED_ADAPTER_FILES,
             )
-            shutil.copy2(cached, local_path)
             logger.info(f"Downloaded {hf_name}/{filename} -> {local_path}")
         except Exception as e:
             if filename in REQUIRED_ADAPTER_FILES:

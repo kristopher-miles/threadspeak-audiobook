@@ -756,10 +756,19 @@ class ProjectArchiveHelpersTests(unittest.TestCase):
             original_root = app_module.ROOT_DIR
             original_scripts = app_module.SCRIPTS_DIR
             original_pm = app_module.project_manager
+            original_audio_state = app_module.process_state["audio"].copy()
+            with app_module.audio_queue_lock:
+                original_audio_queue = list(app_module.audio_queue)
+                original_audio_current = app_module.audio_current_job
             try:
                 app_module.ROOT_DIR = temp_root
                 app_module.SCRIPTS_DIR = scripts_dir
                 app_module.project_manager = manager
+                app_module.process_state["audio"]["running"] = False
+                app_module.process_state["audio"]["merge_running"] = False
+                with app_module.audio_queue_lock:
+                    app_module.audio_queue.clear()
+                    app_module.audio_current_job = None
                 with self.assertRaises(RuntimeError) as ctx:
                     asyncio.run(app_module.load_script(app_module.ScriptLoadRequest(name="demo")))
                 self.assertIn("default runtime project", str(ctx.exception))
@@ -767,6 +776,11 @@ class ProjectArchiveHelpersTests(unittest.TestCase):
                 app_module.ROOT_DIR = original_root
                 app_module.SCRIPTS_DIR = original_scripts
                 app_module.project_manager = original_pm
+                app_module.process_state["audio"].clear()
+                app_module.process_state["audio"].update(original_audio_state)
+                with app_module.audio_queue_lock:
+                    app_module.audio_queue[:] = original_audio_queue
+                    app_module.audio_current_job = original_audio_current
                 manager.shutdown_script_store(flush=True)
 
     def test_project_has_generated_audio_requires_existing_chunk_audio(self):

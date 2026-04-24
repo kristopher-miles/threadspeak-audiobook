@@ -195,6 +195,96 @@
             background-color: var(--editor-row-finalizing-bg) !important;
         }
         .nav-link { cursor: pointer; }
+        .model-download-toast {
+            position: fixed;
+            right: 1rem;
+            bottom: 1rem;
+            z-index: 1085;
+            width: min(420px, calc(100vw - 2rem));
+            padding: 0.85rem 0.95rem;
+            border-radius: 8px;
+            background: var(--app-card-bg);
+            color: var(--app-text);
+            border: 1px solid var(--app-card-border);
+            box-shadow: var(--app-shadow);
+            font-size: 0.9rem;
+        }
+        .model-download-toast.is-failed {
+            border-color: rgba(220, 53, 69, 0.45);
+        }
+        .model-download-header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 0.75rem;
+            margin-bottom: 0.65rem;
+        }
+        .model-download-title {
+            font-weight: 700;
+            line-height: 1.2;
+        }
+        .model-download-model {
+            color: var(--app-muted);
+            font-size: 0.82rem;
+            margin-top: 0.15rem;
+            overflow-wrap: anywhere;
+        }
+        .model-download-progress {
+            height: 8px;
+            border-radius: 999px;
+            overflow: hidden;
+            background: var(--app-surface);
+        }
+        .model-download-progress-bar {
+            height: 100%;
+            min-width: 2px;
+            background: #0d6efd;
+            transition: width 0.2s ease;
+        }
+        .model-download-toast.is-failed .model-download-progress-bar {
+            background: #dc3545;
+        }
+        .model-download-stats {
+            display: flex;
+            justify-content: space-between;
+            gap: 0.65rem;
+            color: var(--app-muted);
+            font-size: 0.78rem;
+            margin-top: 0.45rem;
+            white-space: nowrap;
+        }
+        .model-download-error {
+            color: #dc3545;
+            font-size: 0.82rem;
+            margin-top: 0.55rem;
+            overflow-wrap: anywhere;
+        }
+        .model-download-files {
+            margin-top: 0.65rem;
+            display: grid;
+            gap: 0.45rem;
+        }
+        .model-download-file-row {
+            border-top: 1px solid var(--app-divider);
+            padding-top: 0.45rem;
+        }
+        .model-download-file-name {
+            font-size: 0.8rem;
+            overflow-wrap: anywhere;
+        }
+        .model-download-file-meta {
+            display: flex;
+            justify-content: space-between;
+            gap: 0.5rem;
+            color: var(--app-muted);
+            font-size: 0.74rem;
+            margin-top: 0.1rem;
+        }
+        .model-download-retry {
+            flex: 0 0 auto;
+            color: var(--app-text);
+            border-color: var(--app-input-border);
+        }
         .log-window {
             background-color: #1e1e1e;
             color: #00ff00;

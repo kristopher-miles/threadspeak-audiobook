@@ -88,6 +88,16 @@ class NormalizeExternalUrlTests(unittest.TestCase):
         self.assertIn("THREADSPEAK_DISABLE_MODEL_DOWNLOADS", str(raised.exception))
         fake_model_cls.from_pretrained.assert_not_called()
 
+    @mock.patch("tts.ensure_hf_snapshot", return_value="/cache/qwen-example")
+    def test_load_model_uses_download_provider_before_from_pretrained(self, mock_download):
+        fake_model_cls = mock.Mock()
+
+        with mock.patch.object(TTSEngine, "_resolve_local_model_path", return_value=None):
+            TTSEngine._load_model(fake_model_cls, "Qwen/example", {"dtype": "float32"})
+
+        mock_download.assert_called_once_with("Qwen/example", display_name="Qwen/example")
+        fake_model_cls.from_pretrained.assert_called_once_with("/cache/qwen-example", dtype="float32")
+
     def test_resolve_local_model_path_skips_incomplete_required_snapshot(self):
         with tempfile.TemporaryDirectory() as temp_root:
             cache_root = os.path.join(temp_root, "hub")
@@ -364,6 +374,29 @@ class VoxCPM2ProviderTests(unittest.TestCase):
         self.assertIn("THREADSPEAK_DISABLE_MODEL_DOWNLOADS", str(raised.exception))
         fake_module.VoxCPM.from_pretrained.assert_not_called()
 
+    @mock.patch("tts_providers.voxcpm2.ensure_hf_snapshot", return_value="/cache/openbmb/VoxCPM2")
+    def test_voxcpm2_model_loading_uses_download_provider_before_from_pretrained(self, mock_download):
+        fake_model = mock.Mock()
+        fake_model.tts_model.sample_rate = 48000
+        fake_voxcpm_cls = mock.Mock()
+        fake_voxcpm_cls.from_pretrained.return_value = fake_model
+        fake_module = types.ModuleType("voxcpm")
+        fake_module.VoxCPM = fake_voxcpm_cls
+        engine = TTSEngine({"tts": {"mode": "local", "provider": "voxcpm2"}})
+        provider = engine._provider
+
+        with mock.patch.dict(sys.modules, {"voxcpm": fake_module}), \
+             mock.patch.object(engine, "_resolve_local_model_path", return_value=None), \
+             mock.patch.object(provider, "_resolve_device", return_value="mps"):
+            provider._init_model()
+
+        mock_download.assert_called_once()
+        fake_voxcpm_cls.from_pretrained.assert_called_once_with(
+            "/cache/openbmb/VoxCPM2",
+            load_denoiser=False,
+            optimize=False,
+        )
+
     @mock.patch.object(TTSEngine, "_host_platform", return_value=("windows", "amd64"))
     def test_voxcpm2_windows_device_auto_prefers_cuda_when_available(self, _mock_platform):
         engine = TTSEngine({"tts": {"mode": "local", "provider": "voxcpm2"}})
@@ -532,12 +565,13 @@ class MlxInstructionRoutingTests(unittest.TestCase):
                 "mlx_audio.tts": fake_tts,
                 "mlx_audio.tts.utils": fake_utils,
             },
-        ), mock.patch.object(TTSEngine, "_resolve_local_model_path", return_value=None):
+        ), mock.patch.object(TTSEngine, "_resolve_local_model_path", return_value=None), \
+             mock.patch("tts.ensure_hf_snapshot", return_value="/cache/mlx-custom"):
             engine._init_local_mlx_model("custom_voice")
 
         self.assertEqual(
             load_calls,
-            ["mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit"],
+            ["/cache/mlx-custom"],
         )
 
 

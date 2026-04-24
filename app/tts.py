@@ -18,6 +18,7 @@ from pydub import AudioSegment
 import httpx
 from runtime_layout import LAYOUT
 from audio_validation import estimate_expected_duration_seconds
+from model_downloads import ensure_hf_snapshot
 
 DEFAULT_PAUSE_MS = 500  # Pause between different speakers
 SAME_SPEAKER_PAUSE_MS = 250  # Shorter pause for same speaker continuing
@@ -880,7 +881,8 @@ class TTSEngine:
                     f"and no local cache exists for {model_id}."
                 )
             print(f"  Model not cached locally, downloading {model_id}...")
-            return model_cls.from_pretrained(model_id, **load_kwargs)
+            downloaded_path = ensure_hf_snapshot(model_id, display_name=model_id)
+            return model_cls.from_pretrained(downloaded_path, **load_kwargs)
 
     @staticmethod
     def _import_qwen_tts_model(device):
@@ -1100,7 +1102,15 @@ class TTSEngine:
                 ) from e
 
             local_path = TTSEngine._resolve_local_model_path(model_id)
-            load_target = local_path if local_path else model_id
+            if local_path:
+                load_target = local_path
+            else:
+                if TTSEngine._env_flag("THREADSPEAK_DISABLE_MODEL_DOWNLOADS", default=False):
+                    raise RuntimeError(
+                        "Model downloads are disabled by THREADSPEAK_DISABLE_MODEL_DOWNLOADS "
+                        f"and no local cache exists for {model_id}."
+                    )
+                load_target = ensure_hf_snapshot(model_id, display_name=model_id)
             print(f"Loading MLX TTS model ({model_type}) from {load_target} ...")
             with self._suppress_known_transformers_qwen3_warnings():
                 model = load_model(load_target)

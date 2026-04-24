@@ -9,6 +9,7 @@ from .routers.clone_voices_router import router as clone_voices_router
 from .routers.lora_router import router as lora_router
 from .routers.dataset_builder_router import router as dataset_builder_router
 from .routers.emotions_router import router as emotions_router
+from .routers.model_downloads_router import router as model_downloads_router
 
 app.include_router(config_router)
 app.include_router(workflow_router)
@@ -20,3 +21,4 @@ app.include_router(clone_voices_router)
 app.include_router(lora_router)
 app.include_router(dataset_builder_router)
 app.include_router(emotions_router)
+app.include_router(model_downloads_router)

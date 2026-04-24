@@ -17,6 +17,7 @@ import api.routers.clone_voices_router as _clone_voices_router
 import api.routers.lora_router as _lora_router
 import api.routers.dataset_builder_router as _dataset_builder_router
 import api.routers.emotions_router as _emotions_router
+import api.routers.model_downloads_router as _model_downloads_router
 from api.main import app
 
 _MODULES = (
@@ -31,6 +32,7 @@ _MODULES = (
     _lora_router,
     _dataset_builder_router,
     _emotions_router,
+    _model_downloads_router,
 )
 
 _EXPORT_OWNERS = {}

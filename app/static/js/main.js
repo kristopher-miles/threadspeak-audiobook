@@ -17,6 +17,7 @@ const TAB_FRAGMENTS = [
 
 const LEGACY_SCRIPTS = [
   '/static/js/legacy/00_utils.js',
+  '/static/js/legacy/01_model_download_toast.js',
   '/static/js/legacy/01_navigation.js',
   '/static/js/legacy/02_api_helpers.js',
   '/static/js/legacy/03_setup_tab.js',
