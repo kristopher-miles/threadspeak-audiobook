@@ -443,7 +443,7 @@
                                             </select>
                                         </div>
                                         <div class="col-auto">
-                                            <button class="btn btn-sm btn-outline-primary" onclick="uploadCloneVoice(this)" title="Upload audio file"><i class="fas fa-upload"></i> Upload</button>
+                                            <button class="btn btn-sm btn-outline-primary clone-action-btn" onclick="onCloneAction(this)" title="Upload audio file"><i class="fas fa-upload"></i> Upload</button>
                                             <input type="file" class="clone-voice-file-input" accept=".wav,.mp3,.flac,.ogg" style="display:none" onchange="handleCloneVoiceUpload(this)">
                                         </div>
                                     </div>
@@ -666,6 +666,13 @@
                     const sampleInput = card?.querySelector('.design-sample-text');
                     if (sampleInput && voice.suggested_sample_text) {
                         sampleInput.value = voice.suggested_sample_text;
+                    }
+                });
+
+                document.querySelectorAll('.voice-card').forEach((card) => {
+                    const cardType = card.querySelector('.voice-type:checked')?.value || '';
+                    if (cardType === 'clone' && typeof window.updateCloneActionButtonForCard === 'function') {
+                        window.updateCloneActionButtonForCard(card);
                     }
                 });
 
@@ -1340,12 +1347,6 @@
                             failedSpeakers.set(speaker, `${speaker} (${e.message || 'suggestion failed'})`);
                         });
                     }
-                }
-
-                try {
-                    await API.post('/api/voices/lmstudio_preflight_unload', {});
-                } catch (e) {
-                    console.warn('LM Studio preflight unload failed before voice generation', e);
                 }
 
                 for (let i = 0; i < generationQueue.length; i += 1) {

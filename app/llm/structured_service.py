@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from .chat_service import ChatCompletionService
 from .errors import LLMResponseParseError
+from .lmstudio_runtime_coordinator import LMStudioRuntimeCoordinator
 from .models import (
     ChatCompletionParams,
     LLMRuntimeConfig,
@@ -31,10 +32,12 @@ class StructuredLLMService:
         chat_service: Optional[ChatCompletionService] = None,
         tool_streaming_service: Optional[ToolStreamingService] = None,
         capability_service: Optional[ToolCapabilityService] = None,
+        runtime_coordinator: Optional[LMStudioRuntimeCoordinator] = None,
     ):
         self._chat_service = chat_service or ChatCompletionService()
         self._tool_streaming_service = tool_streaming_service or ToolStreamingService()
         self._capability_service = capability_service or ToolCapabilityService()
+        self._runtime_coordinator = runtime_coordinator or LMStudioRuntimeCoordinator()
         self._strategy_cache: Dict[str, str] = {}
         self._cache_lock = threading.Lock()
 
@@ -58,6 +61,7 @@ class StructuredLLMService:
         reasoning_parameter_name: Optional[str] = None,
     ) -> StructuredLLMResult:
         sanitized_messages = self._sanitize_messages(messages)
+        self._runtime_coordinator.ensure_ready(runtime)
         key = self._strategy_cache_key(runtime)
         strategy = self._cached_strategy(key)
 

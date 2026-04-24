@@ -95,6 +95,89 @@
             });
         };
 
+        window._safeCloneActionFilename = (value) => {
+            return String(value || '')
+                .trim()
+                .replace(/[^\w\-.]+/g, '_')
+                .replace(/_+/g, '_')
+                .replace(/^_+|_+$/g, '')
+                .slice(0, 100) || 'clone_voice';
+        };
+
+        window.updateCloneActionButtonForCard = (card) => {
+            if (!card) return;
+            const btn = card.querySelector('.clone-action-btn');
+            const select = card.querySelector('.designed-voice-select');
+            const val = select ? select.value : '';
+            if (!btn) return;
+            if (val && val.startsWith('clone:')) {
+                btn.dataset.cloneAction = 'download';
+                btn.classList.remove('btn-outline-primary');
+                btn.classList.add('btn-outline-secondary');
+                btn.title = 'Download selected clone voice';
+                btn.innerHTML = '<i class="fas fa-download"></i> Download';
+                return;
+            }
+            btn.dataset.cloneAction = 'upload';
+            btn.classList.remove('btn-outline-secondary');
+            btn.classList.add('btn-outline-primary');
+            btn.title = 'Upload audio file';
+            btn.innerHTML = '<i class="fas fa-upload"></i> Upload';
+        };
+
+        window.onCloneAction = async (btn) => {
+            const card = btn?.closest('.card-body');
+            if (!card) return;
+
+            if ((btn.dataset.cloneAction || 'upload') !== 'download') {
+                uploadCloneVoice(btn);
+                return;
+            }
+
+            const select = card.querySelector('.designed-voice-select');
+            const val = select ? select.value : '';
+            if (!val || !val.startsWith('clone:')) {
+                uploadCloneVoice(btn);
+                return;
+            }
+
+            const voiceId = val.substring(6);
+            const speaker = card.closest('.voice-card')?.dataset?.voice || '';
+            const refText = card.querySelector('.ref-text')?.value || '';
+            const optionText = select.options?.[select.selectedIndex]?.text || 'clone_voice';
+
+            const query = new URLSearchParams();
+            if (speaker) {
+                query.set('speaker', speaker);
+            }
+            if (refText) {
+                query.set('ref_text', refText);
+            }
+
+            const endpoint = `/api/clone_voices/${encodeURIComponent(voiceId)}/download${query.toString() ? `?${query}` : ''}`;
+            try {
+                const response = await fetch(endpoint);
+                if (!response.ok) {
+                    const err = await response.json().catch(() => ({ detail: `Failed to download clone voice (${response.status}).` }));
+                    showToast(err.detail || `Failed to download clone voice (${response.status}).`, 'error');
+                    return;
+                }
+                const blob = await response.blob();
+                const href = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = href;
+                link.download = `${window._safeCloneActionFilename(optionText)}.wav`;
+                link.rel = 'noopener';
+                link.style.display = 'none';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                URL.revokeObjectURL(href);
+            } catch (e) {
+                showToast(`Clone download failed: ${e.message}`, 'error');
+            }
+        };
+
         window.deleteDesignedVoice = async (voiceId) => {
             if (!await showConfirm('Delete this designed voice?')) return;
             try {
@@ -123,6 +206,9 @@
                 if (playBtn) playBtn.style.display = 'none';
                 if (deleteBtn) deleteBtn.style.display = 'none';
                 refAudio.focus();
+                if (typeof window.updateCloneActionButtonForCard === 'function') {
+                    window.updateCloneActionButtonForCard(card);
+                }
                 return;
             }
 
@@ -157,6 +243,8 @@
                     if (deleteBtn) deleteBtn.style.display = 'none';
                 }
             }
+            if (typeof window.updateCloneActionButtonForCard === 'function') {
+                window.updateCloneActionButtonForCard(card);
+            }
             debouncedSaveVoices();
         };
-

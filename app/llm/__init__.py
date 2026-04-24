@@ -11,6 +11,7 @@ from .contracts import (
 )
 from .errors import LLMResponseParseError, LLMServiceError, LLMTransportError
 from .gateway import clear_llm_gateway_cache, get_llm_gateway
+from .lmstudio_runtime_coordinator import LMStudioRuntimeCoordinator
 from .model_load_service import LMStudioModelLoadService
 from .models import (
     ChatCompletionParams,
@@ -34,6 +35,7 @@ __all__ = [
     "clear_llm_gateway_cache",
     "get_llm_gateway",
     "LLMClientFactory",
+    "LMStudioRuntimeCoordinator",
     "LMStudioModelLoadService",
     "LLMRuntimeConfig",
     "LLMResponseParseError",

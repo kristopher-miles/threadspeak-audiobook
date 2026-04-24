@@ -103,6 +103,305 @@ def test_clone_voices_upload_and_delete():
         raise TestFailure(f"Deleted voice {voice_id} still in list")
 
 
+def _load_voice_profile_fixture():
+    import json
+    from pathlib import Path
+
+    manifest_path = Path(REPO_DIR) / "app/test_fixtures/e2e_sim/voice_profiles_test_book_manifest.json"
+    if not manifest_path.exists():
+        raise TestFailure(f"Missing fixture manifest: {manifest_path}")
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+    profiles = manifest.get("voice_profiles") or []
+    if not profiles:
+        raise TestFailure("No fixture voice profiles available for realistic clone audio tests")
+    return profiles
+
+
+def test_clone_voices_upload_with_transcript_metadata():
+    import os
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    from ffmpeg_utils import get_ffmpeg_exe
+
+    profiles = _load_voice_profile_fixture()
+    profile = profiles[0]
+    audio_path = Path(REPO_DIR) / profile.get("fixture_audio_path", "")
+    if not audio_path.exists():
+        raise TestFailure(f"Missing fixture clone audio: {audio_path}")
+
+    speaker = profile.get("speaker", "")
+    sample_text = profile.get("sample_text", "")
+
+    ffmpeg_exe = get_ffmpeg_exe()
+    tmp_path = Path(tempfile.gettempdir()) / f"threadspeak_clone_upload_meta_{int(time.time_ns())}.wav"
+    proc = subprocess.run(
+        [
+            ffmpeg_exe,
+            "-y",
+            "-i", str(audio_path),
+            "-c:a", "copy",
+            "-metadata", f"title=Clone voice reference: {speaker}",
+            "-metadata", f"artist={speaker}",
+            "-metadata", f"comment={sample_text}",
+            str(tmp_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        if tmp_path.exists():
+            os.unlink(tmp_path)
+        raise TestFailure(
+            f"Failed to prepare fixture audio with metadata: {proc.stderr.strip() or proc.stdout.strip()}"
+        )
+
+    with open(tmp_path, "rb") as f:
+        files = {"file": (audio_path.name, f.read(), "audio/wav")}
+    try:
+        r = requests.post(f"{common.BASE_URL}/api/clone_voices/upload", files=files)
+        assert_status(r, 200)
+        data = r.json()
+        assert_key(data, "voice_id")
+        voice_id = data["voice_id"]
+
+        r = get("/api/clone_voices/list")
+        assert_status(r, 200)
+        entry = next((item for item in r.json() if item.get("id") == voice_id), None)
+        if not entry:
+            raise TestFailure(f"Uploaded voice {voice_id} not found in list")
+
+        stored_text = (entry.get("sample_text") or "").strip()
+        if stored_text != (sample_text or "").strip():
+            raise TestFailure(
+                f"Expected uploaded clone sample_text {sample_text!r}, got {stored_text!r} for {speaker!r}"
+            )
+    finally:
+        voice_id = data["voice_id"] if "data" in locals() else None
+        if voice_id:
+            try:
+                delete(f"/api/clone_voices/{voice_id}")
+            except Exception:
+                pass
+        if tmp_path.exists():
+            os.unlink(tmp_path)
+
+
+def test_clone_voices_upload_without_transcript_metadata():
+    import struct
+
+    sample_rate = 16000
+    num_samples = 16000
+    data_size = num_samples * 2
+    wav_header = struct.pack('<4sI4s4sIHHIIHH4sI',
+        b'RIFF', 36 + data_size, b'WAVE',
+        b'fmt ', 16, 1, 1, sample_rate, sample_rate * 2, 2, 16,
+        b'data', data_size)
+    wav_bytes = wav_header + b'\x00' * data_size
+    files = {"file": (f"{TEST_PREFIX}clone_nometadata.wav", wav_bytes, "audio/wav")}
+
+    r = requests.post(f"{common.BASE_URL}/api/clone_voices/upload", files=files)
+    assert_status(r, 200)
+    data = r.json()
+    assert_key(data, "voice_id")
+    assert_key(data, "filename")
+    voice_id = data["voice_id"]
+
+    try:
+        r = get("/api/clone_voices/list")
+        assert_status(r, 200)
+        entry = next((item for item in r.json() if item.get("id") == voice_id), None)
+        if not entry:
+            raise TestFailure(f"Uploaded voice {voice_id} not found in list")
+        if entry.get("sample_text"):
+            raise TestFailure(
+                f"Expected no embedded sample_text when none is present, got {entry.get('sample_text')!r}"
+            )
+    finally:
+        # Ensure cleanup even on assertion failure.
+        try:
+            delete(f"/api/clone_voices/{voice_id}")
+        except Exception:
+            pass
+
+
+def _extract_riff_wav_metadata(wav_bytes):
+    import struct
+
+    tags = {}
+    if len(wav_bytes) < 12:
+        return tags
+    if wav_bytes[:4] != b"RIFF" or wav_bytes[8:12] != b"WAVE":
+        return tags
+
+    idx = 12
+    size = len(wav_bytes)
+    while idx + 8 <= size:
+        chunk_id = wav_bytes[idx:idx+4]
+        chunk_size = struct.unpack("<I", wav_bytes[idx+4:idx+8])[0]
+        data_start = idx + 8
+        data_end = data_start + chunk_size
+        if data_end > size:
+            break
+
+        if chunk_id == b"LIST" and data_end - data_start >= 4 and wav_bytes[data_start:data_start+4] == b"INFO":
+            info_idx = data_start + 4
+            while info_idx + 8 <= data_end:
+                info_id = wav_bytes[info_idx:info_idx+4]
+                if len(info_id) != 4:
+                    break
+                try:
+                    key = info_id.decode("ascii")
+                except Exception:
+                    break
+                if not key.isalnum():
+                    break
+                info_value_len = struct.unpack("<I", wav_bytes[info_idx+4:info_idx+8])[0]
+                value_start = info_idx + 8
+                value_end = value_start + info_value_len
+                if value_end > data_end:
+                    break
+                value = wav_bytes[value_start:value_end].decode("utf-8", "replace").rstrip("\x00").strip()
+                if key == "INAM":
+                    tags["title"] = value
+                elif key == "IART":
+                    tags["artist"] = value
+                elif key == "ICMT":
+                    tags["comment"] = value
+                info_idx = value_end + (info_value_len % 2)
+
+        idx = data_end + (chunk_size % 2)
+
+    return tags
+
+
+def test_clone_voices_download_with_transcript_metadata():
+    import json
+    import os
+    import tempfile
+    from pathlib import Path
+    from ffmpeg_utils import get_ffprobe_exe
+    import subprocess
+
+    manifest_path = Path(REPO_DIR) / "app/test_fixtures/e2e_sim/voice_profiles_test_book_manifest.json"
+    if not manifest_path.exists():
+        raise TestFailure(f"Missing fixture manifest: {manifest_path}")
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    profiles = manifest.get("voice_profiles") or []
+    if not profiles:
+        raise TestFailure("No fixture voice profiles available for realistic download metadata test")
+
+    profile = None
+    for candidate in profiles:
+        sample = candidate.get("sample_text", "")
+        try:
+            sample.encode("ascii")
+        except UnicodeEncodeError:
+            continue
+        profile = candidate
+        break
+    if profile is None:
+        profile = profiles[0]
+
+    audio_path = Path(REPO_DIR) / profile.get("fixture_audio_path", "")
+    if not audio_path.exists():
+        raise TestFailure(f"Missing fixture clone audio: {audio_path}")
+    speaker = profile.get("speaker", "")
+    ref_text = profile.get("sample_text", "")
+
+    with open(audio_path, "rb") as f:
+        files = {"file": (audio_path.name, f.read(), "audio/wav")}
+
+    try:
+        r = requests.post(f"{common.BASE_URL}/api/clone_voices/upload", files=files)
+        assert_status(r, 200)
+        data = r.json()
+        assert_key(data, "voice_id")
+        voice_id = data["voice_id"]
+
+        response = requests.get(
+            f"{common.BASE_URL}/api/clone_voices/{voice_id}/download",
+            params={"speaker": speaker, "ref_text": ref_text},
+        )
+        assert_status(response, 200)
+        wav_bytes = response.content
+        if not str(response.headers.get("Content-Type", "")).startswith("audio/wav"):
+            raise TestFailure(f"Unexpected content type: {response.headers.get('Content-Type')}")
+
+        tags = _extract_riff_wav_metadata(wav_bytes)
+        if "title" not in tags or "artist" not in tags or "comment" not in tags:
+            temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            try:
+                temp_file.write(wav_bytes)
+                temp_file.flush()
+                temp_file.close()
+                ffprobe = get_ffprobe_exe()
+                proc = subprocess.run(
+                    [
+                        ffprobe,
+                        "-v", "error",
+                        "-show_entries", "format_tags",
+                        "-of", "json",
+                        temp_file.name,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                if proc.returncode != 0:
+                    raise TestFailure(f"ffprobe failed to inspect downloaded WAV: {proc.stderr.strip() or proc.stdout.strip()}")
+                try:
+                    probe_data = json.loads((proc.stdout or "{}").strip() or "{}")
+                except Exception as exc:
+                    raise TestFailure(f"ffprobe output could not be parsed as JSON: {exc}") from exc
+                format_tags = (probe_data.get("format") or {}).get("tags", {})
+                fallback = {
+                    "title": (
+                        format_tags.get("title")
+                        or format_tags.get("Title")
+                        or format_tags.get("INAM")
+                    ),
+                    "artist": (
+                        format_tags.get("artist")
+                        or format_tags.get("Artist")
+                        or format_tags.get("IART")
+                    ),
+                    "comment": (
+                        format_tags.get("comment")
+                        or format_tags.get("Comment")
+                        or format_tags.get("ICMT")
+                    ),
+                }
+                tags = {**fallback, **{k: v for k, v in tags.items() if v}}
+            finally:
+                try:
+                    os.unlink(temp_file.name)
+                except OSError:
+                    pass
+
+        if tags.get("artist") != speaker:
+            raise TestFailure(f"Expected artist={speaker!r}, got {tags.get('artist')!r}")
+        if tags.get("comment") != ref_text:
+            raise TestFailure(f"Expected comment/ref text metadata to match source profile sample text")
+        if not (tags.get("title") or "").startswith("Clone voice reference"):
+            raise TestFailure(f"Expected title to include clone reference marker, got {tags.get('title')!r}")
+        if not str(tags.get("title")).endswith(speaker):
+            raise TestFailure(f"Expected title to end with speaker name {speaker!r}, got {tags.get('title')!r}")
+
+    finally:
+        # Clean up uploaded fixture data so test state stays minimal
+        voice_id = data["voice_id"] if "data" in locals() else None
+        if voice_id:
+            try:
+                delete(f"/api/clone_voices/{voice_id}")
+            except Exception:
+                pass
+
 # ── Section 10: LoRA Datasets ───────────────────────────────
 
 def test_lora_list_datasets():

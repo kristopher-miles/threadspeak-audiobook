@@ -62,6 +62,9 @@ def run_all_tests():
     run_test("clone_voices_upload_bad_format", test_clone_voices_upload_bad_format)
     run_test("clone_voices_delete_404", test_clone_voices_delete_404)
     run_test("clone_voices_upload_and_delete", test_clone_voices_upload_and_delete)
+    run_test("clone_voices_upload_with_transcript_metadata", test_clone_voices_upload_with_transcript_metadata)
+    run_test("clone_voices_upload_without_transcript_metadata", test_clone_voices_upload_without_transcript_metadata)
+    run_test("clone_voices_download_with_transcript_metadata", test_clone_voices_download_with_transcript_metadata)
 
     section("LoRA Datasets")
     run_test("lora_list_datasets", test_lora_list_datasets)
@@ -155,4 +158,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

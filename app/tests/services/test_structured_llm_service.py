@@ -8,6 +8,11 @@ from llm.structured_service import StructuredLLMService
 
 
 class StructuredLLMServiceTests(unittest.TestCase):
+    class _NoopRuntimeCoordinator:
+        @staticmethod
+        def ensure_ready(runtime):
+            return {"status": "skipped", "reason": "test_noop"}
+
     def test_extract_tool_arguments_from_tool_calls(self):
         response = SimpleNamespace(
             choices=[
@@ -140,6 +145,7 @@ class StructuredLLMServiceTests(unittest.TestCase):
         service = StructuredLLMService(
             chat_service=chat_service,
             capability_service=_FakeCapabilityService(),
+            runtime_coordinator=self._NoopRuntimeCoordinator(),
         )
 
         result = service.run(
@@ -184,6 +190,7 @@ class StructuredLLMServiceTests(unittest.TestCase):
         service = StructuredLLMService(
             chat_service=_FakeChatService(),
             capability_service=_FakeCapabilityService(),
+            runtime_coordinator=self._NoopRuntimeCoordinator(),
         )
 
         with self.assertRaises(LLMResponseParseError):
@@ -238,6 +245,7 @@ class StructuredLLMServiceTests(unittest.TestCase):
         service = StructuredLLMService(
             chat_service=chat_service,
             capability_service=capability_service,
+            runtime_coordinator=self._NoopRuntimeCoordinator(),
         )
 
         runtime = LLMRuntimeConfig(

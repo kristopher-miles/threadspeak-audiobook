@@ -55,7 +55,7 @@ class LMStudioUnloadRouterWiringTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         unload_mock.assert_called_once_with("voices_bulk_generation")
 
-    def test_generate_batch_calls_central_helper(self):
+    def test_generate_batch_does_not_call_legacy_unload_helper(self):
         request = editor_audio_router.BatchGenerateRequest(indices=["chunk-1"])
         with (
             mock.patch.object(editor_audio_router, "_attempt_lmstudio_unload_all_models") as unload_mock,
@@ -68,9 +68,9 @@ class LMStudioUnloadRouterWiringTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "started")
         self.assertEqual(result["workers"], 2)
-        unload_mock.assert_called_once_with("render_pending")
+        unload_mock.assert_not_called()
 
-    def test_generate_batch_fast_calls_central_helper(self):
+    def test_generate_batch_fast_does_not_call_legacy_unload_helper(self):
         request = editor_audio_router.BatchGenerateRequest(indices=["chunk-1"])
         with (
             mock.patch.object(editor_audio_router, "_attempt_lmstudio_unload_all_models") as unload_mock,
@@ -84,9 +84,9 @@ class LMStudioUnloadRouterWiringTests(unittest.TestCase):
         self.assertEqual(result["status"], "started")
         self.assertEqual(result["batch_seed"], 7)
         self.assertEqual(result["batch_size"], 4)
-        unload_mock.assert_called_once_with("render_pending")
+        unload_mock.assert_not_called()
 
-    def test_proofread_calls_central_helper(self):
+    def test_proofread_does_not_call_legacy_unload_helper(self):
         request = editor_audio_router.ProofreadRequest(chapter=None, threshold=0.75)
         with (
             mock.patch.object(editor_audio_router, "_attempt_lmstudio_unload_all_models") as unload_mock,
@@ -97,7 +97,7 @@ class LMStudioUnloadRouterWiringTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "started")
         self.assertEqual(result["run_id"], "proofread-run")
-        unload_mock.assert_called_once_with("proofread")
+        unload_mock.assert_not_called()
 
 
 if __name__ == "__main__":
