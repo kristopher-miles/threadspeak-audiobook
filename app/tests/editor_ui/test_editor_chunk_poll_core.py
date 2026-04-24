@@ -476,6 +476,187 @@ class EditorChunkPollCoreTests(EditorTabChunkPollTests):
             """
         )
 
+    def test_play_sequence_waits_for_silence_rows_between_audio_clips(self):
+        self._run_node_test(
+            """
+            (async () => {
+                const context = createContext();
+                vm.createContext(context);
+                vm.runInContext(source, context);
+
+                const timers = [];
+                context.setTimeout = (fn, ms) => {
+                    timers.push({ fn, ms });
+                    return `timer-${timers.length}`;
+                };
+                context.clearTimeout = () => {};
+
+                const button = context.document.getElementById('btn-play-seq');
+                button.classList.add('btn-primary');
+
+                function makeRow(id, classNames = []) {
+                    const row = createGenericElement();
+                    row.dataset = { id: String(id) };
+                    classNames.forEach(name => row.classList.add(name));
+                    row.scrollIntoView = () => {};
+                    return row;
+                }
+
+                function makeAudio(row, src) {
+                    const audio = createGenericElement();
+                    audio.dataset = { id: row.dataset.id };
+                    audio.src = src;
+                    audio.getAttribute = (name) => name === 'src' ? audio.src : null;
+                    audio.closest = (selector) => selector === 'tr' ? row : null;
+                    audio.playCalls = 0;
+                    audio.play = () => {
+                        audio.playCalls += 1;
+                        return Promise.resolve();
+                    };
+                    return audio;
+                }
+
+                const firstRow = makeRow(1);
+                const silenceRow = makeRow(2, ['chunk-silence-row']);
+                const secondRow = makeRow(3);
+                const firstAudio = makeAudio(firstRow, '/voicelines/one.mp3');
+                const secondAudio = makeAudio(secondRow, '/voicelines/two.mp3');
+                const silenceInput = { value: '1.7' };
+
+                firstRow.querySelector = (selector) => selector === 'audio.chunk-audio' ? firstAudio : null;
+                silenceRow.querySelector = (selector) => selector === 'input' || selector === 'input[type="number"]' ? silenceInput : null;
+                secondRow.querySelector = (selector) => selector === 'audio.chunk-audio' ? secondAudio : null;
+
+                const rows = [firstRow, silenceRow, secondRow];
+                context.document.querySelectorAll = (selector) => {
+                    if (selector === '#chunks-table-body tr[data-id]') return rows;
+                    if (selector === '.chunk-audio') return [firstAudio, secondAudio];
+                    if (selector === 'audio') return [firstAudio, secondAudio];
+                    if (selector === 'tr') return rows;
+                    return [];
+                };
+
+                await context.playSequence();
+
+                assert.strictEqual(firstAudio.playCalls, 1, 'first clip should start immediately');
+                assert.strictEqual(secondAudio.playCalls, 0, 'second clip should wait behind the silence row');
+
+                firstAudio.onended();
+
+                assert.strictEqual(timers.length, 1, 'sequence should schedule a silence wait after the first clip');
+                assert.strictEqual(timers[0].ms, 1700);
+                assert.ok(silenceRow.classList.contains('table-primary'), 'silence row should receive playback highlight');
+                assert.strictEqual(secondAudio.playCalls, 0, 'second clip should not play before the silence timer fires');
+
+                timers[0].fn();
+
+                assert.strictEqual(secondAudio.playCalls, 1, 'second clip should play after the silence duration elapses');
+            })().catch((error) => {
+                console.error(error);
+                process.exit(1);
+            });
+            """
+        )
+
+    def test_play_sequence_uses_export_gaps_between_adjacent_audio_clips(self):
+        self._run_node_test(
+            """
+            (async () => {
+                const context = createContext();
+                vm.createContext(context);
+                vm.runInContext(source, context);
+
+                context.__editorTabTestHooks.setCachedChunks([
+                    { id: 1, speaker: 'A', paragraph_id: 'p1' },
+                    { id: 2, speaker: 'A', paragraph_id: 'p1' },
+                    { id: 3, speaker: 'B', paragraph_id: 'p1' },
+                    { id: 4, speaker: 'B', paragraph_id: 'p2' },
+                ]);
+                context.API.get = async (url) => {
+                    assert.strictEqual(url, '/api/config');
+                    return {
+                        export: {
+                            silence_same_speaker_ms: 111,
+                            silence_between_speakers_ms: 222,
+                            silence_paragraph_ms: 333,
+                        },
+                    };
+                };
+
+                const timers = [];
+                context.setTimeout = (fn, ms) => {
+                    timers.push({ fn, ms });
+                    return `timer-${timers.length}`;
+                };
+                context.clearTimeout = () => {};
+
+                const button = context.document.getElementById('btn-play-seq');
+                button.classList.add('btn-primary');
+
+                function makeRow(id) {
+                    const row = createGenericElement();
+                    row.dataset = { id: String(id) };
+                    row.scrollIntoView = () => {};
+                    return row;
+                }
+
+                function makeAudio(row, src) {
+                    const audio = createGenericElement();
+                    audio.dataset = { id: row.dataset.id };
+                    audio.src = src;
+                    audio.getAttribute = (name) => name === 'src' ? audio.src : null;
+                    audio.closest = (selector) => selector === 'tr' ? row : null;
+                    audio.playCalls = 0;
+                    audio.play = () => {
+                        audio.playCalls += 1;
+                        return Promise.resolve();
+                    };
+                    return audio;
+                }
+
+                const rows = [makeRow(1), makeRow(2), makeRow(3), makeRow(4)];
+                const audios = rows.map((row) => makeAudio(row, `/voicelines/${row.dataset.id}.mp3`));
+                rows.forEach((row, index) => {
+                    row.querySelector = (selector) => selector === 'audio.chunk-audio' ? audios[index] : null;
+                });
+
+                context.document.querySelectorAll = (selector) => {
+                    if (selector === '#chunks-table-body tr[data-id]') return rows;
+                    if (selector === '.chunk-audio') return audios;
+                    if (selector === 'audio') return audios;
+                    if (selector === 'tr') return rows;
+                    return [];
+                };
+
+                await context.playSequence();
+
+                assert.strictEqual(audios[0].playCalls, 1);
+                assert.strictEqual(audios[1].playCalls, 0);
+
+                audios[0].onended();
+                assert.strictEqual(timers.length, 1);
+                assert.strictEqual(timers[0].ms, 111, 'same-speaker clips in the same paragraph use same-speaker export gap');
+                timers.shift().fn();
+                assert.strictEqual(audios[1].playCalls, 1);
+
+                audios[1].onended();
+                assert.strictEqual(timers.length, 1);
+                assert.strictEqual(timers[0].ms, 222, 'speaker changes in the same paragraph use speaker-change export gap');
+                timers.shift().fn();
+                assert.strictEqual(audios[2].playCalls, 1);
+
+                audios[2].onended();
+                assert.strictEqual(timers.length, 1);
+                assert.strictEqual(timers[0].ms, 333, 'paragraph changes take precedence over speaker matching');
+                timers.shift().fn();
+                assert.strictEqual(audios[3].playCalls, 1);
+            })().catch((error) => {
+                console.error(error);
+                process.exit(1);
+            });
+            """
+        )
+
     def test_audio_queue_poll_preserves_existing_audio_element_while_generation_runs(self):
         self._run_node_test(
             """
@@ -660,4 +841,3 @@ class EditorChunkPollCoreTests(EditorTabChunkPollTests):
             }});
             """
         )
-

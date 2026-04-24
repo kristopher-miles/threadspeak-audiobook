@@ -43,6 +43,11 @@ class EditorTabChunkPollTests(unittest.TestCase):
                     remove(...names) {{
                         names.forEach((name) => values.delete(name));
                     }},
+                    replace(oldName, newName) {{
+                        const hadOld = values.delete(oldName);
+                        if (hadOld) values.add(newName);
+                        return hadOld;
+                    }},
                     toggle(name, force) {{
                         if (force === true) {{
                             values.add(name);

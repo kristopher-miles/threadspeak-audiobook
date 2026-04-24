@@ -32,8 +32,14 @@
         const singleChunkPollTimeoutMs = 180000;
         const NARRATOR_SELECTION_KEY = 'threadspeak-narrator-selection';
         const EDITOR_AUDIO_CONTROL_WIDTH = 210;
+        const DEFAULT_SEQUENCE_EXPORT_SILENCE_MS = {
+            sameSpeakerMs: 250,
+            speakerChangeMs: 500,
+            paragraphMs: 750,
+        };
         let activeEditorPreviewButton = null;
         let activeEditorPreviewChunkId = '';
+        let sequenceSilenceTimer = null;
 
         // Check if any audio is currently playing
         function isAudioPlaying() {
@@ -2709,6 +2715,126 @@
             });
         };
 
+        function clearSequenceSilenceTimer() {
+            if (sequenceSilenceTimer != null) {
+                clearTimeout(sequenceSilenceTimer);
+                sequenceSilenceTimer = null;
+            }
+        }
+
+        function getChunkByRow(row) {
+            const rowRef = String(row?.dataset?.id || '').trim();
+            if (!rowRef) return null;
+            return (cachedChunks || []).find(chunk => getChunkRef(chunk) === rowRef) || null;
+        }
+
+        function isSequenceSilenceRow(row) {
+            if (!row) return false;
+            if (row.classList?.contains?.('chunk-silence-row')) return true;
+            return getChunkByRow(row)?.type === 'silence';
+        }
+
+        function getSequenceSilenceDurationMs(row) {
+            const inputValue = row?.querySelector?.('input[type="number"]')?.value ?? row?.querySelector?.('input')?.value;
+            const chunkValue = getChunkByRow(row)?.silence_duration_s;
+            const parsed = Number.parseFloat(inputValue ?? chunkValue ?? 1.0);
+            const seconds = Number.isFinite(parsed) ? Math.max(0, parsed) : 1.0;
+            return Math.round(seconds * 1000);
+        }
+
+        function coerceSequenceSilenceMs(value, fallback) {
+            const parsed = Number.parseInt(value, 10);
+            return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
+        }
+
+        async function loadSequenceExportSilenceConfig() {
+            try {
+                const config = await API.get('/api/config');
+                const exportConfig = config?.export || {};
+                return {
+                    sameSpeakerMs: coerceSequenceSilenceMs(
+                        exportConfig.silence_same_speaker_ms,
+                        DEFAULT_SEQUENCE_EXPORT_SILENCE_MS.sameSpeakerMs
+                    ),
+                    speakerChangeMs: coerceSequenceSilenceMs(
+                        exportConfig.silence_between_speakers_ms,
+                        DEFAULT_SEQUENCE_EXPORT_SILENCE_MS.speakerChangeMs
+                    ),
+                    paragraphMs: coerceSequenceSilenceMs(
+                        exportConfig.silence_paragraph_ms,
+                        DEFAULT_SEQUENCE_EXPORT_SILENCE_MS.paragraphMs
+                    ),
+                };
+            } catch (e) {
+                console.warn('Failed to load export silence settings for sequence playback', e);
+                return { ...DEFAULT_SEQUENCE_EXPORT_SILENCE_MS };
+            }
+        }
+
+        function getSequenceExportGapMs(prevItem, currItem, exportSilenceConfig) {
+            const prevChunk = prevItem?.chunk || {};
+            const currChunk = currItem?.chunk || {};
+            const prevParagraphId = prevChunk.paragraph_id;
+            const currParagraphId = currChunk.paragraph_id;
+
+            if (prevParagraphId && currParagraphId && prevParagraphId !== currParagraphId) {
+                return exportSilenceConfig.paragraphMs;
+            }
+            if (prevChunk.speaker === currChunk.speaker) {
+                return exportSilenceConfig.sameSpeakerMs;
+            }
+            return exportSilenceConfig.speakerChangeMs;
+        }
+
+        function interleaveSequenceExportGaps(items, exportSilenceConfig) {
+            const sequence = [];
+            let previousTimelineItem = null;
+            for (const item of items) {
+                if (item.type === 'audio' && previousTimelineItem?.type === 'audio') {
+                    sequence.push({
+                        type: 'gap',
+                        row: previousTimelineItem.row,
+                        durationMs: getSequenceExportGapMs(previousTimelineItem, item, exportSilenceConfig),
+                    });
+                }
+                sequence.push(item);
+                previousTimelineItem = item;
+            }
+            return sequence;
+        }
+
+        function buildSequencePlaybackItems(exportSilenceConfig = DEFAULT_SEQUENCE_EXPORT_SILENCE_MS) {
+            const rows = Array.from(document.querySelectorAll('#chunks-table-body tr[data-id]'));
+            if (rows.length === 0) {
+                return Array.from(document.querySelectorAll('.chunk-audio'))
+                    .filter(audio => audio.getAttribute('src'))
+                    .map(audio => ({ type: 'audio', audio, row: audio.closest('tr'), chunk: null }));
+            }
+
+            const items = rows.map(row => {
+                if (isSequenceSilenceRow(row)) {
+                    return {
+                        type: 'silence',
+                        row,
+                        durationMs: getSequenceSilenceDurationMs(row),
+                    };
+                }
+
+                const audio = row.querySelector('audio.chunk-audio') || row.querySelector('.chunk-audio') || row.querySelector('audio');
+                if (!audio || !audio.getAttribute('src')) return null;
+                return { type: 'audio', audio, row, chunk: getChunkByRow(row) };
+            }).filter(Boolean);
+
+            return interleaveSequenceExportGaps(items, exportSilenceConfig);
+        }
+
+        function highlightSequenceRow(row) {
+            document.querySelectorAll('tr').forEach(r => r.classList.remove('table-primary'));
+            if (!row) return;
+            row.classList.add('table-primary');
+            row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+
         window.playSequence = async () => {
             isPlayingSequence = true;
             const btn = document.getElementById('btn-play-seq');
@@ -2716,8 +2842,9 @@
             btn.onclick = stopSequence;
             btn.classList.replace('btn-primary', 'btn-danger');
 
-            const audios = Array.from(document.querySelectorAll('.chunk-audio'));
-            if (audios.length === 0) {
+            const exportSilenceConfig = await loadSequenceExportSilenceConfig();
+            const sequenceItems = buildSequencePlaybackItems(exportSilenceConfig);
+            if (sequenceItems.length === 0) {
                 stopSequence();
                 return;
             }
@@ -2726,29 +2853,26 @@
 
             const playNext = () => {
                 if (!isPlayingSequence) return;
+                clearSequenceSilenceTimer();
 
-                // Find next valid audio
-                while (currentIndex < audios.length) {
-                    const audio = audios[currentIndex];
-                    if (audio.getAttribute('src')) {
-                        break;
-                    }
-                    currentIndex++;
-                }
-
-                if (currentIndex >= audios.length) {
+                if (currentIndex >= sequenceItems.length) {
                     stopSequence();
                     return;
                 }
 
-                const audio = audios[currentIndex];
-                const tr = audio.closest('tr');
+                const item = sequenceItems[currentIndex];
+                highlightSequenceRow(item.row);
 
-                // Visual feedback
-                document.querySelectorAll('tr').forEach(r => r.classList.remove('table-primary'));
-                tr.classList.add('table-primary');
-                tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                if (item.type === 'silence' || item.type === 'gap') {
+                    sequenceSilenceTimer = setTimeout(() => {
+                        sequenceSilenceTimer = null;
+                        currentIndex++;
+                        playNext();
+                    }, item.durationMs);
+                    return;
+                }
 
+                const audio = item.audio;
                 const playPromise = audio.play();
 
                 if (playPromise !== undefined) {
@@ -2777,6 +2901,7 @@
 
         window.stopSequence = () => {
             isPlayingSequence = false;
+            clearSequenceSilenceTimer();
             if (window._editorPreviewAudio) {
                 window._editorPreviewAudio.pause();
                 window._editorPreviewAudio.currentTime = 0;
