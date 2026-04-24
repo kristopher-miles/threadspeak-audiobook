@@ -9,6 +9,7 @@
             const file = input.files[0];
             if (!file) return;
             input.value = '';
+            const card = input.closest('.card-body');
 
             const formData = new FormData();
             formData.append('file', file);
@@ -20,6 +21,38 @@
 
                 // Refresh cache and rebuild voice cards
                 window._cloneVoicesCache = await API.get('/api/clone_voices/list');
+                const uploadedVoice = (window._cloneVoicesCache || []).find(v => v.id === result.voice_id) || result;
+                if (card && uploadedVoice?.voice_id) {
+                    uploadedVoice.id = uploadedVoice.voice_id;
+                }
+                if (card && uploadedVoice?.id) {
+                    const select = card.querySelector('.designed-voice-select');
+                    const refAudio = card.querySelector('.ref-audio');
+                    const refText = card.querySelector('.ref-text');
+                    const playBtn = card.querySelector('.clone-play-btn');
+                    const deleteBtn = card.querySelector('.clone-delete-btn');
+                    if (select) {
+                        let option = Array.from(select.options).find(o => o.value === `clone:${uploadedVoice.id}`);
+                        if (!option) {
+                            option = new Option(uploadedVoice.name || file.name.replace(/\.[^.]+$/, ''), `clone:${uploadedVoice.id}`);
+                            select.add(option);
+                        }
+                        select.value = `clone:${uploadedVoice.id}`;
+                    }
+                    if (refAudio) {
+                        refAudio.value = `clone_voices/${uploadedVoice.filename || result.filename}`;
+                        refAudio.readOnly = true;
+                    }
+                    if (refText) {
+                        refText.value = uploadedVoice.sample_text || result.sample_text || '';
+                    }
+                    if (playBtn) playBtn.style.display = 'inline-block';
+                    if (deleteBtn) deleteBtn.style.display = 'inline-block';
+                    if (typeof window.updateCloneActionButtonForCard === 'function') {
+                        window.updateCloneActionButtonForCard(card);
+                    }
+                    await saveVoicesNow({ promptConfirmation: false, retryOnNetworkFailure: true });
+                }
                 await loadVoices();
 
                 showToast(`Uploaded "${file.name}"`, 'success');
@@ -58,4 +91,3 @@
                 showToast('Error: ' + e.message, 'error');
             }
         };
-

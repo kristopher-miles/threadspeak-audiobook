@@ -120,7 +120,12 @@ async def clone_voices_upload(file: UploadFile = File(...)):
     _save_manifest(CLONE_VOICES_MANIFEST, manifest)
 
     logger.info(f"Clone voice uploaded: '{base_name}' as {dest_filename}")
-    return {"status": "uploaded", "voice_id": voice_id, "filename": dest_filename}
+    return {
+        "status": "uploaded",
+        "voice_id": voice_id,
+        "filename": dest_filename,
+        "sample_text": sample_text,
+    }
 
 
 @router.get("/api/clone_voices/{voice_id}/download")

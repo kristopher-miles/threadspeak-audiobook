@@ -119,47 +119,18 @@ def _load_voice_profile_fixture():
 
 
 def test_clone_voices_upload_with_transcript_metadata():
-    import os
-    import subprocess
-    import tempfile
     from pathlib import Path
 
-    from ffmpeg_utils import get_ffmpeg_exe
-
-    profiles = _load_voice_profile_fixture()
-    profile = profiles[0]
-    audio_path = Path(REPO_DIR) / profile.get("fixture_audio_path", "")
+    audio_path = Path(REPO_DIR) / "app/test_fixtures/e2e_sim/audio/GF-Ember.wav"
     if not audio_path.exists():
         raise TestFailure(f"Missing fixture clone audio: {audio_path}")
 
-    speaker = profile.get("speaker", "")
-    sample_text = profile.get("sample_text", "")
-
-    ffmpeg_exe = get_ffmpeg_exe()
-    tmp_path = Path(tempfile.gettempdir()) / f"threadspeak_clone_upload_meta_{int(time.time_ns())}.wav"
-    proc = subprocess.run(
-        [
-            ffmpeg_exe,
-            "-y",
-            "-i", str(audio_path),
-            "-c:a", "copy",
-            "-metadata", f"title=Clone voice reference: {speaker}",
-            "-metadata", f"artist={speaker}",
-            "-metadata", f"comment={sample_text}",
-            str(tmp_path),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
+    sample_text = (
+        "Please, the mark isn't my fault. I've had it since I was born, "
+        "to curse and torment me. It can't hurt you"
     )
-    if proc.returncode != 0:
-        if tmp_path.exists():
-            os.unlink(tmp_path)
-        raise TestFailure(
-            f"Failed to prepare fixture audio with metadata: {proc.stderr.strip() or proc.stdout.strip()}"
-        )
 
-    with open(tmp_path, "rb") as f:
+    with open(audio_path, "rb") as f:
         files = {"file": (audio_path.name, f.read(), "audio/wav")}
     try:
         r = requests.post(f"{common.BASE_URL}/api/clone_voices/upload", files=files)
@@ -167,6 +138,10 @@ def test_clone_voices_upload_with_transcript_metadata():
         data = r.json()
         assert_key(data, "voice_id")
         voice_id = data["voice_id"]
+        if (data.get("sample_text") or "").strip() != sample_text:
+            raise TestFailure(
+                f"Expected upload response sample_text {sample_text!r}, got {data.get('sample_text')!r}"
+            )
 
         r = get("/api/clone_voices/list")
         assert_status(r, 200)
@@ -175,9 +150,9 @@ def test_clone_voices_upload_with_transcript_metadata():
             raise TestFailure(f"Uploaded voice {voice_id} not found in list")
 
         stored_text = (entry.get("sample_text") or "").strip()
-        if stored_text != (sample_text or "").strip():
+        if stored_text != sample_text:
             raise TestFailure(
-                f"Expected uploaded clone sample_text {sample_text!r}, got {stored_text!r} for {speaker!r}"
+                f"Expected uploaded clone sample_text {sample_text!r}, got {stored_text!r}"
             )
     finally:
         voice_id = data["voice_id"] if "data" in locals() else None
@@ -186,8 +161,6 @@ def test_clone_voices_upload_with_transcript_metadata():
                 delete(f"/api/clone_voices/{voice_id}")
             except Exception:
                 pass
-        if tmp_path.exists():
-            os.unlink(tmp_path)
 
 
 def test_clone_voices_upload_without_transcript_metadata():
