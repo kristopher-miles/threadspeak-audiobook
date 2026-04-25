@@ -861,7 +861,7 @@ class ChunkRuntimeOverlayTests(unittest.TestCase):
         self.assertTrue(success)
         self.assertEqual(fake_engine.speakers, ["Jordan"])
 
-    def test_generate_chunk_audio_drops_instruct_only_for_exact_neutral_narrator(self):
+    def test_generate_chunk_audio_uses_neutral_instruction_only_for_exact_neutral_narrator(self):
         chunks = [
             {
                 "id": 0,
@@ -907,9 +907,56 @@ class ChunkRuntimeOverlayTests(unittest.TestCase):
         self.assertEqual(
             fake_engine.calls,
             [
-                {"speaker": "NARRATOR", "instruct": ""},
+                {"speaker": "NARRATOR", "instruct": "Neutral spoken delivery"},
                 {"speaker": "NARRATOR", "instruct": "Keep title case instruct"},
             ],
+        )
+
+    def test_generate_chunk_audio_marks_exact_neutral_narrator_to_override_provider_control_text(self):
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "uid": "narrator-alias-to-ember",
+                "speaker": "NARRATOR",
+                "text": "Narration line has enough words to validate correctly.",
+                "chapter": "Chapter 1",
+                "instruct": "Protective, urgent intensity.",
+                "status": "pending",
+            }
+        ])
+
+        class FakeEngine:
+            def __init__(self):
+                self.calls = []
+
+            def generate_voice(self, text, instruct, speaker, voice_config, temp_path, instruction_override=False):
+                self.calls.append({
+                    "speaker": speaker,
+                    "instruct": instruct,
+                    "instruction_override": instruction_override,
+                })
+                sample_rate = 24000
+                samples = np.zeros(int(sample_rate * 2.0), dtype=np.float32)
+                sf.write(temp_path, samples, sample_rate)
+                return True
+
+        fake_engine = FakeEngine()
+        self.manager.get_engine = lambda: fake_engine
+        self.manager._load_voice_config = lambda: {
+            "NARRATOR": {"alias": "Ember"},
+            "Ember": {
+                "type": "clone",
+                "description": "protective narrator style",
+                "default_style": "urgent voice",
+            },
+        }
+
+        success, _ = self.manager.generate_chunk_audio("narrator-alias-to-ember", neutral_narrator=True)
+
+        self.assertTrue(success)
+        self.assertEqual(
+            fake_engine.calls,
+            [{"speaker": "Ember", "instruct": "Neutral spoken delivery", "instruction_override": True}],
         )
 
     def test_generate_chunk_audio_keeps_alias_instruct_when_neutral_narrator_enabled(self):
@@ -1648,7 +1695,7 @@ class ChunkRuntimeOverlayTests(unittest.TestCase):
             self.manager.get_chunk_raw("clip-log-7")["id"],
         )
 
-    def test_generate_chunks_batch_drops_instruct_only_for_exact_neutral_narrator(self):
+    def test_generate_chunks_batch_uses_neutral_instruction_only_for_exact_neutral_narrator(self):
         self.manager.save_chunks([
             {
                 "id": 0,
@@ -1698,9 +1745,13 @@ class ChunkRuntimeOverlayTests(unittest.TestCase):
                 for chunk in forwarded["batch_chunks"]
             ],
             [
-                {"speaker": "NARRATOR", "instruct": ""},
+                {"speaker": "NARRATOR", "instruct": "Neutral spoken delivery"},
                 {"speaker": "NARRATOR", "instruct": "Keep title case batch instruct"},
             ],
+        )
+        self.assertEqual(
+            [chunk["instruction_override"] for chunk in forwarded["batch_chunks"]],
+            [True, False],
         )
 
     def test_enqueue_audio_finalize_task_returns_before_ledger_persist_completes(self):

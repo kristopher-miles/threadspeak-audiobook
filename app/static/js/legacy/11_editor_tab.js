@@ -1391,7 +1391,9 @@
 
         window.regenerateProofreadChunk = async (chunkRef) => {
             try {
-                await API.post(`/api/chunks/${encodeURIComponent(chunkRef)}/regenerate`, {});
+                await API.post(`/api/chunks/${encodeURIComponent(chunkRef)}/regenerate`, {
+                    neutral_narrator: isNeutralNarratorEnabled(),
+                });
                 markChunkGeneratingLocally(chunkRef);
                 startTrackedChunkStatusPolling(chunkRef, {
                     preserveGeneratingWhilePending: true,

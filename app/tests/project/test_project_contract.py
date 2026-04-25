@@ -304,6 +304,7 @@ EXPECTED_PROJECT_MANAGER_METHODS = {
     "_process_audio_finalize_task",
     "_finalize_generated_audio",
     "_effective_generation_instruct",
+    "_should_use_neutral_narrator_instruction",
     "_generate_chunk_audio_internal",
     "generate_chunk_audio",
     "merge_audio",

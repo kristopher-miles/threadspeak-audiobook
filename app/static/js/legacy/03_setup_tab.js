@@ -477,6 +477,7 @@
                     VOXCPM2_INFERENCE_TIMESTEPS_DEFAULT
                 );
                 document.getElementById('voxcpm-normalize').checked = coerceConfigBool(config.tts.voxcpm_normalize, false);
+                document.getElementById('voxcpm-denoise').checked = coerceConfigBool(config.tts.voxcpm_denoise, false);
                 document.getElementById('voxcpm-load-denoiser').checked = coerceConfigBool(config.tts.voxcpm_load_denoiser, false);
                 document.getElementById('voxcpm-denoise-reference').checked = coerceConfigBool(config.tts.voxcpm_denoise_reference, false);
                 document.getElementById('voxcpm-optimize').checked = coerceConfigBool(config.tts.voxcpm_optimize, false);
@@ -784,6 +785,7 @@
                     VOXCPM2_INFERENCE_TIMESTEPS_DEFAULT
                 ),
                 voxcpm_normalize: document.getElementById('voxcpm-normalize').checked,
+                voxcpm_denoise: document.getElementById('voxcpm-denoise').checked,
                 voxcpm_load_denoiser: document.getElementById('voxcpm-load-denoiser').checked,
                 voxcpm_denoise_reference: document.getElementById('voxcpm-denoise-reference').checked,
                 voxcpm_optimize: !isMacHostUI() && document.getElementById('voxcpm-optimize').checked
@@ -893,7 +895,7 @@
                 'auto-regenerate-bad-clip-attempts': 'tts', 'script-max-length': 'tts',
                 'voxcpm-model-id': 'tts', 'voxcpm-cfg-value': 'tts',
                 'voxcpm-inference-timesteps': 'tts', 'voxcpm-normalize': 'tts',
-                'voxcpm-load-denoiser': 'tts', 'voxcpm-denoise-reference': 'tts',
+                'voxcpm-denoise': 'tts', 'voxcpm-load-denoiser': 'tts', 'voxcpm-denoise-reference': 'tts',
                 'voxcpm-optimize': 'tts',
                 // Generation
                 'script-error-retry-attempts': 'generation', 'chunk-size': 'generation', 'max-tokens': 'generation',

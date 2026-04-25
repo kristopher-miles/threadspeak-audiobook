@@ -93,7 +93,8 @@ class VoxCPM2AudioProvider:
         )
         return output_path, self._sample_rate()
 
-    def generate_voice(self, text, instruct_text, speaker, voice_config, output_path, cancel_check=None):
+    def generate_voice(self, text, instruct_text, speaker, voice_config, output_path, cancel_check=None,
+                       drop_instruct=False, instruction_override=False):
         voice_data = dict((voice_config or {}).get(speaker) or {})
         if not voice_data:
             print(f"Warning: No voice configuration for '{speaker}'. Skipping.")
@@ -104,10 +105,35 @@ class VoxCPM2AudioProvider:
             print("VoxCPM2 provider does not support LoRA voices in this version.")
             return False
         if voice_type == "clone":
-            return self._generate_clone(text, instruct_text, speaker, voice_data, output_path, cancel_check=cancel_check)
+            return self._generate_clone(
+                text,
+                instruct_text,
+                speaker,
+                voice_data,
+                output_path,
+                cancel_check=cancel_check,
+                drop_instruct=drop_instruct,
+                instruction_override=instruction_override,
+            )
         if voice_type == "design":
-            return self._generate_design(text, instruct_text, voice_data, output_path, cancel_check=cancel_check)
-        return self._generate_custom(text, instruct_text, voice_data, output_path, cancel_check=cancel_check)
+            return self._generate_design(
+                text,
+                instruct_text,
+                voice_data,
+                output_path,
+                cancel_check=cancel_check,
+                drop_instruct=drop_instruct,
+                instruction_override=instruction_override,
+            )
+        return self._generate_custom(
+            text,
+            instruct_text,
+            voice_data,
+            output_path,
+            cancel_check=cancel_check,
+            drop_instruct=drop_instruct,
+            instruction_override=instruction_override,
+        )
 
     def generate_batch(self, chunks, voice_config, output_dir, batch_seed=-1, cancel_check=None, log_callback=None):
         results = {"completed": [], "failed": []}
@@ -129,6 +155,8 @@ class VoxCPM2AudioProvider:
                     voice_config,
                     output_path,
                     cancel_check=cancel_check,
+                    drop_instruct=bool(chunk.get("drop_instruct")),
+                    instruction_override=bool(chunk.get("instruction_override")),
                 )
                 if ok:
                     results["completed"].append(idx)
@@ -138,12 +166,13 @@ class VoxCPM2AudioProvider:
                 results["failed"].append((idx, str(exc)))
         return results
 
-    def _generate_custom(self, text, instruct_text, voice_data, output_path, cancel_check=None):
-        style = self._combine_style(
-            voice_data.get("description"),
-            voice_data.get("character_style"),
-            voice_data.get("default_style"),
+    def _generate_custom(self, text, instruct_text, voice_data, output_path, cancel_check=None, drop_instruct=False,
+                         instruction_override=False):
+        style = self._style_for_generation(
+            voice_data,
             instruct_text,
+            drop_instruct=drop_instruct,
+            instruction_override=instruction_override,
         )
         return self._generate_checked(
             text=text,
@@ -151,14 +180,17 @@ class VoxCPM2AudioProvider:
             style=style,
             voice_data=voice_data,
             cancel_check=cancel_check,
+            drop_instruct=drop_instruct,
+            instruction_override=instruction_override,
         )
 
-    def _generate_design(self, text, instruct_text, voice_data, output_path, cancel_check=None):
-        style = self._combine_style(
-            voice_data.get("description"),
-            voice_data.get("character_style"),
-            voice_data.get("default_style"),
+    def _generate_design(self, text, instruct_text, voice_data, output_path, cancel_check=None, drop_instruct=False,
+                         instruction_override=False):
+        style = self._style_for_generation(
+            voice_data,
             instruct_text,
+            drop_instruct=drop_instruct,
+            instruction_override=instruction_override,
         )
         ref_audio = str(voice_data.get("ref_audio") or "").strip()
         if ref_audio:
@@ -173,6 +205,8 @@ class VoxCPM2AudioProvider:
                 voice_data=voice_data,
                 reference_wav_path=ref_audio_path,
                 cancel_check=cancel_check,
+                drop_instruct=drop_instruct,
+                instruction_override=instruction_override,
             )
         return self._generate_checked(
             text=text,
@@ -180,9 +214,12 @@ class VoxCPM2AudioProvider:
             style=style,
             voice_data=voice_data,
             cancel_check=cancel_check,
+            drop_instruct=drop_instruct,
+            instruction_override=instruction_override,
         )
 
-    def _generate_clone(self, text, instruct_text, speaker, voice_data, output_path, cancel_check=None):
+    def _generate_clone(self, text, instruct_text, speaker, voice_data, output_path, cancel_check=None,
+                        drop_instruct=False, instruction_override=False):
         ref_audio_path = str(voice_data.get("ref_audio") or "").strip()
         if not ref_audio_path:
             print(f"Warning: Clone voice for '{speaker}' missing ref_audio. Skipping.")
@@ -192,11 +229,11 @@ class VoxCPM2AudioProvider:
             print(f"Warning: Reference audio not found for '{speaker}': {ref_audio_path}")
             return False
 
-        style = self._combine_style(
-            voice_data.get("description"),
-            voice_data.get("character_style"),
-            voice_data.get("default_style"),
+        style = self._style_for_generation(
+            voice_data,
             instruct_text,
+            drop_instruct=drop_instruct,
+            instruction_override=instruction_override,
         )
         return self._generate_checked(
             text=text,
@@ -205,10 +242,12 @@ class VoxCPM2AudioProvider:
             voice_data=voice_data,
             reference_wav_path=ref_audio_path,
             cancel_check=cancel_check,
+            drop_instruct=drop_instruct,
+            instruction_override=instruction_override,
         )
 
     def _generate_checked(self, *, text, output_path, style="", voice_data=None, reference_wav_path=None,
-                          cancel_check=None):
+                          cancel_check=None, drop_instruct=False, instruction_override=False):
         try:
             transcript = str(
                 (voice_data or {}).get("generated_ref_text")
@@ -223,6 +262,8 @@ class VoxCPM2AudioProvider:
                 transcript=transcript,
                 seed=int((voice_data or {}).get("seed", -1) or -1),
                 cancel_check=cancel_check,
+                drop_instruct=drop_instruct,
+                instruction_override=instruction_override,
             )
             return True
         except Exception as exc:
@@ -230,7 +271,7 @@ class VoxCPM2AudioProvider:
             return False
 
     def _generate_to_file(self, *, text, output_path, style="", reference_wav_path=None, transcript="", seed=-1,
-                          cancel_check=None):
+                          cancel_check=None, drop_instruct=False, instruction_override=False):
         if self.mode != "local":
             self._generate_external_to_file(
                 text=text,
@@ -240,6 +281,8 @@ class VoxCPM2AudioProvider:
                 transcript=transcript,
                 seed=seed,
                 cancel_check=cancel_check,
+                drop_instruct=drop_instruct,
+                instruction_override=instruction_override,
             )
             return
 
@@ -267,10 +310,14 @@ class VoxCPM2AudioProvider:
         if reference_wav_path:
             kwargs["reference_wav_path"] = reference_wav_path
 
-        print(
-            "TTS [voxcpm2] generating "
-            f"reference_wav_path={'yes' if reference_wav_path else 'no'} "
-            f"text='{str(text or '')[:50]}...'"
+        self._log_instruction_usage(
+            "TTS [voxcpm2] generating",
+            text=text,
+            instruction=style,
+            reference_wav_path=reference_wav_path,
+            drop_instruct=drop_instruct,
+            instruction_override=instruction_override,
+            final_text_has_control=bool(style and final_text.startswith("(")),
         )
         start = time.time()
         with self._inference_lock:
@@ -289,34 +336,30 @@ class VoxCPM2AudioProvider:
         self.engine._save_wav(audio, sr, output_path)
 
     def _generate_external_to_file(self, *, text, output_path, style="", reference_wav_path=None, transcript="",
-                                   seed=-1, cancel_check=None):
-        if reference_wav_path:
-            self._generate_external_clone(
-                text=text,
-                style=style,
-                reference_wav_path=reference_wav_path,
-                transcript=transcript,
-                output_path=output_path,
-                seed=seed,
-                cancel_check=cancel_check,
-            )
-            return
-
-        final_text = self.format_control_text(text, style)
-        if not final_text:
+                                   seed=-1, cancel_check=None, drop_instruct=False, instruction_override=False):
+        text = str(text or "").strip()
+        if not text:
             raise ValueError("VoxCPM2 generation requires non-empty text")
 
-        backend = self.engine._init_external()
-        print(f"TTS [voxcpm2 external] generating text='{str(text or '')[:50]}...'")
-        start = time.time()
-        result = self._run_external_gradio_job(
-            backend,
-            cancel_check=cancel_check,
-            text=final_text,
-            **self._external_generation_kwargs(seed=seed),
-            api_name="/tts_generate",
+        self._log_instruction_usage(
+            "TTS [voxcpm2 external] generating",
+            text=text,
+            instruction=style,
+            reference_wav_path=reference_wav_path,
+            drop_instruct=drop_instruct,
+            instruction_override=instruction_override,
         )
-        self._materialize_generated_audio(result, output_path)
+        start = time.time()
+        payload = {
+            "text": text,
+            "instruction": str(style or ""),
+            **self._external_generation_kwargs(seed=seed, include_denoise=True),
+        }
+        if reference_wav_path:
+            payload["ref_audio"] = self._upload_external_reference_audio(reference_wav_path)
+
+        response = self._post_external_controlled(payload, cancel_check=cancel_check)
+        self._materialize_controlled_response(response, output_path)
         elapsed = time.time() - start
         print(f"TTS [voxcpm2 external] done: {elapsed:.1f}s -> {self._audio_duration(output_path):.1f}s audio")
 
@@ -384,6 +427,59 @@ class VoxCPM2AudioProvider:
                 except Exception:
                     continue
 
+    def _post_external_controlled(self, payload, *, cancel_check=None):
+        try:
+            if cancel_check and cancel_check():
+                raise RuntimeError("VoxCPM2 external generation cancelled before submission")
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
+
+        return httpx.post(
+            self._external_url("/voxcpm2_generate_controlled"),
+            json=payload,
+            timeout=180.0,
+            follow_redirects=True,
+        )
+
+    def _upload_external_reference_audio(self, reference_wav_path):
+        with open(reference_wav_path, "rb") as handle:
+            response = httpx.post(
+                self._external_url("/gradio_api/upload"),
+                files=[("files", (os.path.basename(reference_wav_path), handle, "audio/wav"))],
+                timeout=60.0,
+                follow_redirects=True,
+            )
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, list) or not result:
+            raise RuntimeError("VoxCPM2 external upload returned no server path")
+        server_path = str(result[0] or "").strip()
+        if not server_path:
+            raise RuntimeError("VoxCPM2 external upload returned an empty server path")
+        return server_path
+
+    def _external_url(self, path):
+        base = self.engine._normalize_external_url(self.engine._url)
+        return urllib.parse.urljoin(f"{base}/", path.lstrip("/"))
+
+    @staticmethod
+    def _materialize_controlled_response(response, output_path):
+        if not response.is_success:
+            detail = response.text.strip()
+            try:
+                detail_json = response.json()
+                detail = detail_json.get("detail") or detail
+            except Exception:
+                pass
+            raise RuntimeError(f"VoxCPM2 controlled endpoint failed ({response.status_code}): {detail}")
+        if not response.content:
+            raise RuntimeError("VoxCPM2 controlled endpoint returned empty audio")
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        with open(output_path, "wb") as handle:
+            handle.write(response.content)
+
     def _external_generation_kwargs(self, *, seed=-1, include_denoise=False):
         kwargs = {
             "cfg": float(self.engine._voxcpm_cfg_value),
@@ -400,7 +496,7 @@ class VoxCPM2AudioProvider:
             "retry": False,
         }
         if include_denoise:
-            kwargs["denoise"] = bool(self.engine._voxcpm_denoise_reference)
+            kwargs["denoise"] = bool(self.engine._voxcpm_denoise)
         return kwargs
 
     @staticmethod
@@ -586,6 +682,54 @@ class VoxCPM2AudioProvider:
             return int(sample_rate or 48000)
         except (TypeError, ValueError):
             return 48000
+
+    @staticmethod
+    def _style_for_generation(voice_data, instruct_text, *, drop_instruct=False, instruction_override=False):
+        if instruction_override:
+            return VoxCPM2AudioProvider._log_value(instruct_text)
+        if drop_instruct:
+            return ""
+        return VoxCPM2AudioProvider._combine_style(
+            (voice_data or {}).get("description"),
+            (voice_data or {}).get("character_style"),
+            (voice_data or {}).get("default_style"),
+            instruct_text,
+        )
+
+    @staticmethod
+    def _log_value(value):
+        return " ".join(str(value or "").strip().split())
+
+    @classmethod
+    def _log_instruction_usage(
+        cls,
+        prefix,
+        *,
+        text,
+        instruction="",
+        reference_wav_path=None,
+        drop_instruct=False,
+        instruction_override=False,
+        final_text_has_control=None,
+    ):
+        instruction_text = cls._log_value(instruction)
+        if instruction_override:
+            policy = "override"
+        elif drop_instruct:
+            policy = "dropped"
+        else:
+            policy = "send" if instruction_text else "empty"
+        parts = [
+            str(prefix),
+            f"reference_wav_path={'yes' if reference_wav_path else 'no'}",
+            f"instruction_policy={policy}",
+            f"instruction_present={'yes' if instruction_text else 'no'}",
+            f"instruction='{instruction_text}'",
+        ]
+        if final_text_has_control is not None:
+            parts.append(f"final_text_has_control={'yes' if final_text_has_control else 'no'}")
+        parts.append(f"text='{str(text or '')[:50]}...'")
+        print(" ".join(parts))
 
     @staticmethod
     def _combine_style(*parts: Any) -> str:

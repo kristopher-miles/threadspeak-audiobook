@@ -28,6 +28,7 @@
     "voxcpm_cfg_value": 1.6,
     "voxcpm_inference_timesteps": 10,
     "voxcpm_normalize": false,
+    "voxcpm_denoise": false,
     "voxcpm_load_denoiser": false,
     "voxcpm_denoise_reference": false,
     "voxcpm_optimize": false

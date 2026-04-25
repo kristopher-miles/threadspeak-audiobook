@@ -88,6 +88,35 @@ class LMStudioUnloadRouterWiringTests(unittest.TestCase):
         unload_mock.assert_not_called()
         self.assertTrue(enqueue_mock.call_args.kwargs["neutral_narrator"])
 
+    def test_single_chunk_generate_preserves_neutral_narrator_flag(self):
+        request = editor_audio_router.ChunkGenerateRequest(neutral_narrator=True)
+        manager = mock.Mock()
+        manager.get_chunk_raw.return_value = {"uid": "chunk-1", "id": 12, "text": "line"}
+        with (
+            mock.patch.object(editor_audio_router, "project_manager", manager),
+            mock.patch.object(editor_audio_router, "_raise_if_generation_voice_issue"),
+            mock.patch.object(editor_audio_router, "_enqueue_audio_job", return_value={"status": "started"}) as enqueue_mock,
+        ):
+            result = asyncio.run(editor_audio_router.generate_chunk_endpoint("chunk-1", BackgroundTasks(), request))
+
+        self.assertEqual(result["status"], "started")
+        self.assertTrue(enqueue_mock.call_args.kwargs["neutral_narrator"])
+
+    def test_single_chunk_regenerate_preserves_neutral_narrator_flag(self):
+        request = editor_audio_router.ChunkGenerateRequest(neutral_narrator=True)
+        prepared = {"chunk": {"uid": "chunk-1", "id": 12, "text": "line"}}
+        manager = mock.Mock()
+        manager.prepare_chunk_for_regeneration.return_value = prepared
+        with (
+            mock.patch.object(editor_audio_router, "project_manager", manager),
+            mock.patch.object(editor_audio_router, "_raise_if_generation_voice_issue"),
+            mock.patch.object(editor_audio_router, "_enqueue_audio_job", return_value={"status": "started"}) as enqueue_mock,
+        ):
+            result = asyncio.run(editor_audio_router.regenerate_chunk_endpoint("chunk-1", BackgroundTasks(), request))
+
+        self.assertEqual(result["status"], "started")
+        self.assertTrue(enqueue_mock.call_args.kwargs["neutral_narrator"])
+
     def test_proofread_does_not_call_legacy_unload_helper(self):
         request = editor_audio_router.ProofreadRequest(chapter=None, threshold=0.75)
         with (

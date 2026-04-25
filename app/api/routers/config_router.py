@@ -383,6 +383,7 @@ async def get_config():
             "voxcpm_cfg_value": VOXCPM2_CFG_VALUE_DEFAULT,
             "voxcpm_inference_timesteps": VOXCPM2_INFERENCE_TIMESTEPS_DEFAULT,
             "voxcpm_normalize": False,
+            "voxcpm_denoise": False,
             "voxcpm_load_denoiser": False,
             "voxcpm_denoise_reference": False,
             "voxcpm_optimize": False,

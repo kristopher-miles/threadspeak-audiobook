@@ -1,5 +1,6 @@
 import unittest
 from unittest import mock
+import contextlib
 import concurrent.futures
 import tempfile
 import os
@@ -508,23 +509,29 @@ class VoxCPM2ProviderTests(unittest.TestCase):
             provider = engine._provider
             provider._model = fake_model
 
-            ok = provider.generate_voice(
-                "Hello from the book.",
-                "urgent and afraid",
-                "Aerial",
-                {
-                    "Aerial": {
-                        "type": "clone",
-                        "ref_audio": "clone_voices/sample.wav",
-                        "description": "young woman",
-                        "default_style": "warm",
-                    }
-                },
-                output_path,
-            )
+            log_buffer = io.StringIO()
+            with contextlib.redirect_stdout(log_buffer):
+                ok = provider.generate_voice(
+                    "Hello from the book.",
+                    "urgent and afraid",
+                    "Aerial",
+                    {
+                        "Aerial": {
+                            "type": "clone",
+                            "ref_audio": "clone_voices/sample.wav",
+                            "description": "young woman",
+                            "default_style": "warm",
+                        }
+                    },
+                    output_path,
+                )
 
             self.assertTrue(ok)
             self.assertTrue(os.path.exists(output_path))
+            log_text = log_buffer.getvalue()
+            self.assertIn("instruction_present=yes", log_text)
+            self.assertIn("instruction='young woman, warm, urgent and afraid'", log_text)
+            self.assertIn("final_text_has_control=yes", log_text)
             fake_model.generate.assert_called_once()
             kwargs = fake_model.generate.call_args.kwargs
             self.assertEqual(kwargs["text"], "(young woman, warm, urgent and afraid)Hello from the book.")
@@ -533,6 +540,58 @@ class VoxCPM2ProviderTests(unittest.TestCase):
             self.assertEqual(kwargs["inference_timesteps"], 12)
             self.assertNotIn("prompt_text", kwargs)
             self.assertNotIn("prompt_wav_path", kwargs)
+
+    def test_voxcpm2_local_instruction_override_uses_only_passed_instruction(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            clone_dir = os.path.join(temp_root, "clone_voices")
+            os.makedirs(clone_dir, exist_ok=True)
+            ref_path = os.path.join(clone_dir, "sample.wav")
+            with wave.open(ref_path, "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(24000)
+                wav_file.writeframes(b"\x00\x00" * 240)
+
+            output_path = os.path.join(temp_root, "out.wav")
+            fake_model = mock.Mock()
+            fake_model.tts_model.sample_rate = 48000
+            fake_model.generate.return_value = np.zeros(480, dtype=np.float32)
+
+            engine = TTSEngine(
+                {"tts": {"mode": "local", "provider": "voxcpm2"}},
+                project_root=temp_root,
+            )
+            provider = engine._provider
+            provider._model = fake_model
+
+            log_buffer = io.StringIO()
+            with contextlib.redirect_stdout(log_buffer):
+                ok = provider.generate_voice(
+                    "Hello from the book.",
+                    "urgent and afraid",
+                    "Aerial",
+                    {
+                        "Aerial": {
+                            "type": "clone",
+                            "ref_audio": "clone_voices/sample.wav",
+                            "description": "young woman",
+                            "character_style": "low and tense",
+                            "default_style": "warm",
+                        }
+                    },
+                    output_path,
+                    instruction_override=True,
+                )
+
+            self.assertTrue(ok)
+            log_text = log_buffer.getvalue()
+            self.assertIn("instruction_policy=override", log_text)
+            self.assertIn("instruction_present=yes", log_text)
+            self.assertIn("instruction='urgent and afraid'", log_text)
+            self.assertIn("final_text_has_control=yes", log_text)
+            kwargs = fake_model.generate.call_args.kwargs
+            self.assertEqual(kwargs["text"], "(urgent and afraid)Hello from the book.")
+            self.assertEqual(kwargs["reference_wav_path"], ref_path)
 
     def test_voxcpm2_design_audio_can_be_reused_for_style_guided_clone(self):
         with tempfile.TemporaryDirectory() as temp_root:
@@ -588,13 +647,13 @@ class VoxCPM2ProviderTests(unittest.TestCase):
             )
             self.assertEqual(clone_kwargs["reference_wav_path"], preview_path)
 
-    def test_voxcpm2_external_custom_voice_calls_tts_generate_without_local_model(self):
+    def test_voxcpm2_external_custom_voice_calls_controlled_endpoint_without_spoken_instruction(self):
         with tempfile.TemporaryDirectory() as temp_root:
-            generated_path = os.path.join(temp_root, "generated.wav")
             output_path = os.path.join(temp_root, "out.wav")
-            self._write_wav(generated_path)
-            backend = mock.Mock()
-            backend.predict.return_value = (generated_path, 1234)
+            response = mock.Mock()
+            response.is_success = True
+            response.headers = {"content-type": "audio/wav"}
+            response.content = self._wav_bytes()
 
             engine = TTSEngine(
                 {
@@ -611,7 +670,9 @@ class VoxCPM2ProviderTests(unittest.TestCase):
             )
             provider = engine._provider
 
-            with mock.patch.object(engine, "_init_external", return_value=backend), \
+            log_buffer = io.StringIO()
+            with contextlib.redirect_stdout(log_buffer), \
+                 mock.patch("tts_providers.voxcpm2.httpx.post", return_value=response) as post, \
                  mock.patch.object(provider, "_init_model") as init_model:
                 ok = provider.generate_voice(
                     "Hello from the book.",
@@ -630,45 +691,38 @@ class VoxCPM2ProviderTests(unittest.TestCase):
 
             self.assertTrue(ok)
             self.assertTrue(os.path.exists(output_path))
+            log_text = log_buffer.getvalue()
+            self.assertIn("TTS [voxcpm2 external] generating", log_text)
+            self.assertIn("instruction_present=yes", log_text)
+            self.assertIn("instruction='young woman, warm, urgent and afraid'", log_text)
             init_model.assert_not_called()
-            backend.predict.assert_called_once_with(
-                text="(young woman, warm, urgent and afraid)Hello from the book.",
-                cfg=2.25,
-                steps=12,
-                fmt="wav",
-                retry_max=3,
-                retry_ratio=6.0,
-                min_len=2,
-                max_len=4096,
-                streaming=True,
-                seed=42,
-                locked=False,
-                normalize=True,
-                retry=False,
-                api_name="/tts_generate",
+            post.assert_called_once_with(
+                "http://example.invalid/voxcpm2_generate_controlled",
+                json={
+                    "text": "Hello from the book.",
+                    "instruction": "young woman, warm, urgent and afraid",
+                    "cfg": 2.25,
+                    "steps": 12,
+                    "fmt": "wav",
+                    "retry_max": 3,
+                    "retry_ratio": 6.0,
+                    "min_len": 2,
+                    "max_len": 4096,
+                    "streaming": True,
+                    "seed": 42,
+                    "locked": False,
+                    "normalize": True,
+                    "denoise": False,
+                    "retry": False,
+                },
+                timeout=180.0,
+                follow_redirects=True,
             )
 
     def test_voxcpm2_external_batch_cancels_remote_gradio_job(self):
         with tempfile.TemporaryDirectory() as temp_root:
             output_path = os.path.join(temp_root, "out.wav")
-            cancel_now = False
-
-            class FakeJob:
-                def __init__(self):
-                    self.cancelled = False
-                    self.result_calls = 0
-
-                def result(self, timeout=None):
-                    self.result_calls += 1
-                    raise concurrent.futures.TimeoutError()
-
-                def cancel(self):
-                    self.cancelled = True
-                    return True
-
-            job = FakeJob()
-            backend = mock.Mock()
-            backend.submit.return_value = job
+            cancel_now = True
 
             engine = TTSEngine(
                 {
@@ -683,12 +737,9 @@ class VoxCPM2ProviderTests(unittest.TestCase):
             provider = engine._provider
 
             def cancel_check():
-                nonlocal cancel_now
-                if job.result_calls:
-                    cancel_now = True
                 return cancel_now
 
-            with mock.patch.object(engine, "_init_external", return_value=backend):
+            with mock.patch("tts_providers.voxcpm2.httpx.post") as post:
                 results = provider.generate_batch(
                     [
                         {
@@ -714,11 +765,9 @@ class VoxCPM2ProviderTests(unittest.TestCase):
                     cancel_check=cancel_check,
                 )
 
-            self.assertTrue(job.cancelled)
-            backend.submit.assert_called_once()
-            backend.predict.assert_not_called()
+            post.assert_not_called()
             self.assertEqual(results["completed"], [])
-            self.assertEqual(len(results["failed"]), 1)
+            self.assertEqual(results["failed"], [])
             self.assertFalse(os.path.exists(output_path))
 
     def test_voxcpm2_external_voice_design_calls_voice_design_and_returns_sample_rate(self):
@@ -824,12 +873,15 @@ class VoxCPM2ProviderTests(unittest.TestCase):
             clone_dir = os.path.join(temp_root, "clone_voices")
             os.makedirs(clone_dir, exist_ok=True)
             ref_path = os.path.join(clone_dir, "sample.wav")
-            generated_path = os.path.join(temp_root, "generated-clone.wav")
             output_path = os.path.join(temp_root, "clone-output.wav")
             self._write_wav(ref_path)
-            self._write_wav(generated_path)
-            backend = mock.Mock()
-            backend.predict.return_value = (generated_path, 9876)
+            upload_response = mock.Mock()
+            upload_response.raise_for_status.return_value = None
+            upload_response.json.return_value = ["C:\\pinokio\\api\\VoxCPM2\\app\\temp\\sample.wav"]
+            generate_response = mock.Mock()
+            generate_response.is_success = True
+            generate_response.headers = {"content-type": "audio/wav"}
+            generate_response.content = self._wav_bytes()
 
             engine = TTSEngine(
                 {
@@ -837,6 +889,7 @@ class VoxCPM2ProviderTests(unittest.TestCase):
                         "mode": "external",
                         "provider": "voxcpm2",
                         "url": "http://example.invalid",
+                        "voxcpm_denoise": True,
                         "voxcpm_denoise_reference": True,
                     }
                 },
@@ -844,8 +897,7 @@ class VoxCPM2ProviderTests(unittest.TestCase):
             )
             provider = engine._provider
 
-            with mock.patch.object(engine, "_init_external", return_value=backend), \
-                 mock.patch("tts_providers.voxcpm2.handle_file", side_effect=lambda path: f"handled:{path}", create=True), \
+            with mock.patch("tts_providers.voxcpm2.httpx.post", side_effect=[upload_response, generate_response]) as post, \
                  mock.patch.object(provider, "_init_model") as init_model:
                 ok = provider.generate_voice(
                     "Now read this with more urgency.",
@@ -866,26 +918,83 @@ class VoxCPM2ProviderTests(unittest.TestCase):
             self.assertTrue(ok)
             self.assertTrue(os.path.exists(output_path))
             init_model.assert_not_called()
-            backend.predict.assert_called_once_with(
-                text="Now read this with more urgency.",
-                ref_audio=f"handled:{ref_path}",
-                style="warm narrator voice, urgent, voice tight",
-                transcript="This is the reusable reference line.",
-                cfg=1.6,
-                steps=10,
-                fmt="wav",
-                retry_max=3,
-                retry_ratio=6.0,
-                min_len=2,
-                max_len=4096,
-                streaming=True,
-                seed=5,
-                locked=False,
-                normalize=False,
-                denoise=True,
-                retry=False,
-                api_name="/voice_clone",
+            self.assertEqual(post.call_count, 2)
+            self.assertEqual(post.call_args_list[0].args[0], "http://example.invalid/gradio_api/upload")
+            self.assertEqual(
+                post.call_args_list[1].args[0],
+                "http://example.invalid/voxcpm2_generate_controlled",
             )
+            self.assertEqual(
+                post.call_args_list[1].kwargs["json"],
+                {
+                    "text": "Now read this with more urgency.",
+                    "instruction": "warm narrator voice, urgent, voice tight",
+                    "ref_audio": "C:\\pinokio\\api\\VoxCPM2\\app\\temp\\sample.wav",
+                    "cfg": 1.6,
+                    "steps": 10,
+                    "fmt": "wav",
+                    "retry_max": 3,
+                    "retry_ratio": 6.0,
+                    "min_len": 2,
+                    "max_len": 4096,
+                    "streaming": True,
+                    "seed": 5,
+                    "locked": False,
+                    "normalize": False,
+                    "denoise": True,
+                    "retry": False,
+                },
+            )
+
+    def test_voxcpm2_external_denoise_payload_uses_denoise_not_denoise_reference(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            clone_dir = os.path.join(temp_root, "clone_voices")
+            os.makedirs(clone_dir, exist_ok=True)
+            ref_path = os.path.join(clone_dir, "sample.wav")
+            output_path = os.path.join(temp_root, "clone-output.wav")
+            self._write_wav(ref_path)
+            upload_response = mock.Mock()
+            upload_response.raise_for_status.return_value = None
+            upload_response.json.return_value = ["C:\\pinokio\\api\\VoxCPM2\\app\\temp\\sample.wav"]
+            generate_response = mock.Mock()
+            generate_response.is_success = True
+            generate_response.headers = {"content-type": "audio/wav"}
+            generate_response.content = self._wav_bytes()
+
+            engine = TTSEngine(
+                {
+                    "tts": {
+                        "mode": "external",
+                        "provider": "voxcpm2",
+                        "url": "http://example.invalid",
+                        "voxcpm_denoise": False,
+                        "voxcpm_denoise_reference": True,
+                    }
+                },
+                project_root=temp_root,
+            )
+            provider = engine._provider
+
+            with mock.patch("tts_providers.voxcpm2.httpx.post", side_effect=[upload_response, generate_response]) as post:
+                ok = provider.generate_voice(
+                    "Read this line.",
+                    "",
+                    "NARRATOR",
+                    {
+                        "NARRATOR": {
+                            "type": "clone",
+                            "ref_audio": "clone_voices/sample.wav",
+                            "description": "warm narrator voice",
+                        }
+                    },
+                    output_path,
+                )
+
+            self.assertTrue(ok)
+            self.assertFalse(provider.engine._voxcpm_denoise)
+            self.assertTrue(provider.engine._voxcpm_denoise_reference)
+            self.assertEqual(post.call_count, 2)
+            self.assertFalse(post.call_args_list[1].kwargs["json"]["denoise"])
 
 
 class LocalBackendResolutionTests(unittest.TestCase):

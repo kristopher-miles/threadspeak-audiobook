@@ -52,6 +52,61 @@ class ProofreadChunkPollUiTests(EditorTabChunkPollTests):
             """
         )
 
+    def test_regenerate_proofread_chunk_sends_neutral_narrator_toggle(self):
+        self._run_node_test(
+            """
+            (async () => {
+                const context = createContext();
+                let regeneratePayload = null;
+                const neutralToggle = context.document.getElementById('editor-neutral-narrator');
+                neutralToggle.checked = true;
+
+                context.API.post = async (url, payload) => {
+                    if (url === '/api/chunks/12/regenerate') {
+                        regeneratePayload = payload;
+                        return { status: 'started' };
+                    }
+                    throw new Error(`Unexpected POST ${url}`);
+                };
+                context.API.get = async (url) => {
+                    if (url === '/api/chunks/12') {
+                        return {
+                            id: 12,
+                            speaker: 'NARRATOR',
+                            text: 'Proofread neutral narrator line',
+                            instruct: 'Furious with anger, shouting.',
+                            status: 'done',
+                            audio_path: 'voicelines/proofread-neutral.wav',
+                            audio_validation: { file_size_bytes: 10, actual_duration_sec: 1.0 },
+                        };
+                    }
+                    throw new Error(`Unexpected GET ${url}`);
+                };
+
+                vm.createContext(context);
+                vm.runInContext(source, context);
+                context.__editorTabTestHooks.setCachedChunks([{
+                    id: 12,
+                    speaker: 'NARRATOR',
+                    text: 'Proofread neutral narrator line',
+                    instruct: 'Furious with anger, shouting.',
+                    status: 'pending',
+                    audio_path: null,
+                    audio_validation: null,
+                }]);
+
+                await context.window.regenerateProofreadChunk('12');
+                await flushTicks();
+
+                assert.strictEqual(regeneratePayload.neutral_narrator, true);
+                assert.deepStrictEqual(Object.keys(regeneratePayload), ['neutral_narrator']);
+            })().catch((error) => {{
+                console.error(error);
+                process.exit(1);
+            }});
+            """
+        )
+
     def test_regenerate_proofread_chunk_keeps_generating_state_during_initial_pending_race(self):
         self._run_node_test(
             """
@@ -260,4 +315,3 @@ class ProofreadChunkPollUiTests(EditorTabChunkPollTests):
             });
             """
         )
-

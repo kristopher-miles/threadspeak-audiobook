@@ -587,6 +587,7 @@ def test_save_setup_config_roundtrip_visible_voxcpm2_settings():
             "voxcpm_cfg_value": 1.35,
             "voxcpm_inference_timesteps": 14,
             "voxcpm_normalize": True,
+            "voxcpm_denoise": True,
             "voxcpm_load_denoiser": True,
             "voxcpm_denoise_reference": True,
             "voxcpm_optimize": False,

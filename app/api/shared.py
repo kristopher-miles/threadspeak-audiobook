@@ -989,6 +989,7 @@ class TTSConfig(BaseModel):
     voxcpm_cfg_value: float = VOXCPM2_CFG_VALUE_DEFAULT
     voxcpm_inference_timesteps: int = VOXCPM2_INFERENCE_TIMESTEPS_DEFAULT
     voxcpm_normalize: bool = False
+    voxcpm_denoise: bool = False
     voxcpm_load_denoiser: bool = False
     voxcpm_denoise_reference: bool = False
     voxcpm_optimize: bool = False

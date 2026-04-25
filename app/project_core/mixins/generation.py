@@ -48,6 +48,8 @@ from project_core.chunking import _coerce_bool, get_speaker, _is_structural_text
 
 class ProjectGenerationMixin:
         """Generate and persist chunk audio through TTS pipelines."""
+        NEUTRAL_NARRATOR_INSTRUCTION = "Neutral spoken delivery"
+
         def _load_generation_chunks(self, chunk_refs):
             refs = [str(chunk_ref).strip() for chunk_ref in (chunk_refs or []) if str(chunk_ref).strip()]
             if not refs:
@@ -224,9 +226,16 @@ class ProjectGenerationMixin:
             }
 
         @staticmethod
+        def _should_use_neutral_narrator_instruction(chunk, neutral_narrator=False):
+            return bool(neutral_narrator and chunk.get("speaker") == "NARRATOR")
+
+        @staticmethod
         def _effective_generation_instruct(chunk, neutral_narrator=False):
-            if neutral_narrator and chunk.get("speaker") == "NARRATOR":
-                return ""
+            if ProjectGenerationMixin._should_use_neutral_narrator_instruction(
+                chunk,
+                neutral_narrator=neutral_narrator,
+            ):
+                return ProjectGenerationMixin.NEUTRAL_NARRATOR_INSTRUCTION
             return chunk.get("instruct", "")
 
         def _generate_chunk_audio_internal(self, index, attempt=0, generation_token=None, async_finalize=False,
@@ -262,12 +271,17 @@ class ProjectGenerationMixin:
                 text = chunk["text"]
                 transformed_text, _ = apply_dictionary_to_text(text, self.load_dictionary_entries())
                 instruct = self._effective_generation_instruct(chunk, neutral_narrator=neutral_narrator)
+                instruction_override = self._should_use_neutral_narrator_instruction(
+                    chunk,
+                    neutral_narrator=neutral_narrator,
+                )
                 auto_regen_retry_attempts = self._get_auto_regen_retry_attempts()
                 display_index = int(chunk.get("id") or 0)
                 chunk_uid = chunk.get("uid")
 
                 print(
                     f"Generating chunk {display_index}: speaker={speaker}, resolved_speaker={resolved_speaker}, "
+                    f"neutral_narrator={bool(neutral_narrator)}, instruction_override={bool(instruction_override)}, "
                     f"instruct='{instruct}', text='{transformed_text[:50]}...'"
                 )
 
@@ -280,6 +294,8 @@ class ProjectGenerationMixin:
                     generate_voice_signature = None
                 if generate_voice_signature and "cancel_check" in generate_voice_signature.parameters:
                     generate_voice_kwargs["cancel_check"] = cancel_check
+                if generate_voice_signature and "instruction_override" in generate_voice_signature.parameters:
+                    generate_voice_kwargs["instruction_override"] = instruction_override
                 success = engine.generate_voice(
                     transformed_text,
                     instruct,
@@ -718,6 +734,10 @@ class ProjectGenerationMixin:
                         "display_id": chunk.get("id"),
                         "text": transformed_text,
                         "instruct": self._effective_generation_instruct(chunk, neutral_narrator=neutral_narrator),
+                        "instruction_override": self._should_use_neutral_narrator_instruction(
+                            chunk,
+                            neutral_narrator=neutral_narrator,
+                        ),
                         "speaker": resolved_speaker,
                     })
 

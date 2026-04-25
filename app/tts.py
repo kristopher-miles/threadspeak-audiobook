@@ -93,7 +93,17 @@ class AudioProvider:
     def local_backend(self):
         raise NotImplementedError
 
-    def generate_voice(self, text, instruct_text, speaker, voice_config, output_path, cancel_check=None):
+    def generate_voice(
+        self,
+        text,
+        instruct_text,
+        speaker,
+        voice_config,
+        output_path,
+        cancel_check=None,
+        drop_instruct=False,
+        instruction_override=False,
+    ):
         raise NotImplementedError
 
     def generate_batch(self, chunks, voice_config, output_dir, batch_seed=-1, cancel_check=None, log_callback=None):
@@ -125,7 +135,19 @@ class QwenAudioProvider(AudioProvider):
             return None
         return self.engine._resolve_local_backend()
 
-    def generate_voice(self, text, instruct_text, speaker, voice_config, output_path, cancel_check=None):
+    def generate_voice(
+        self,
+        text,
+        instruct_text,
+        speaker,
+        voice_config,
+        output_path,
+        cancel_check=None,
+        drop_instruct=False,
+        instruction_override=False,
+    ):
+        if drop_instruct and not instruction_override:
+            instruct_text = ""
         return self.engine._provider_generate_voice(text, instruct_text, speaker, voice_config, output_path)
 
     def generate_batch(self, chunks, voice_config, output_dir, batch_seed=-1, cancel_check=None, log_callback=None):
@@ -215,6 +237,7 @@ class TTSEngine:
             VOXCPM2_INFERENCE_TIMESTEPS_DEFAULT,
         )
         self._voxcpm_normalize = bool(tts_config.get("voxcpm_normalize", False))
+        self._voxcpm_denoise = bool(tts_config.get("voxcpm_denoise", False))
         self._voxcpm_load_denoiser = bool(tts_config.get("voxcpm_load_denoiser", False))
         self._voxcpm_denoise_reference = bool(tts_config.get("voxcpm_denoise_reference", False))
         self._voxcpm_optimize = bool(tts_config.get("voxcpm_optimize", False)) and py_platform.system().lower() != "darwin"
@@ -1356,7 +1379,17 @@ class TTSEngine:
         else:
             return self._external_generate_clone(text, speaker, voice_config, output_path)
 
-    def generate_voice(self, text, instruct_text, speaker, voice_config, output_path, cancel_check=None):
+    def generate_voice(
+        self,
+        text,
+        instruct_text,
+        speaker,
+        voice_config,
+        output_path,
+        cancel_check=None,
+        drop_instruct=False,
+        instruction_override=False,
+    ):
         return self._provider.generate_voice(
             text,
             instruct_text,
@@ -1364,6 +1397,8 @@ class TTSEngine:
             voice_config,
             output_path,
             cancel_check=cancel_check,
+            drop_instruct=drop_instruct,
+            instruction_override=instruction_override,
         )
 
     def _provider_generate_voice(self, text, instruct_text, speaker, voice_config, output_path):
