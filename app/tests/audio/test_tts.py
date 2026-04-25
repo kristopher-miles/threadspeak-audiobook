@@ -1,5 +1,6 @@
 import unittest
 from unittest import mock
+import concurrent.futures
 import tempfile
 import os
 import base64
@@ -8,6 +9,7 @@ import sys
 import types
 import wave
 import numpy as np
+import soundfile as sf
 
 from tts import TTSEngine
 from tts_providers.voxcpm2 import VoxCPM2AudioProvider
@@ -371,6 +373,22 @@ class ProviderDelegationTests(unittest.TestCase):
 
 
 class VoxCPM2ProviderTests(unittest.TestCase):
+    @staticmethod
+    def _write_wav(path, sample_rate=48000, frames=480):
+        payload = VoxCPM2ProviderTests._wav_bytes(sample_rate=sample_rate, frames=frames)
+        with open(path, "wb") as handle:
+            handle.write(payload)
+
+    @staticmethod
+    def _wav_bytes(sample_rate=48000, frames=480):
+        buffer = io.BytesIO()
+        with wave.open(buffer, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(b"\x00\x00" * frames)
+        return buffer.getvalue()
+
     def test_format_control_text_prefixes_style(self):
         self.assertEqual(
             VoxCPM2AudioProvider.format_control_text("Hello.", "warm, calm"),
@@ -569,6 +587,305 @@ class VoxCPM2ProviderTests(unittest.TestCase):
                 "(warm narrator voice, urgent, voice tight)Now read this with more urgency.",
             )
             self.assertEqual(clone_kwargs["reference_wav_path"], preview_path)
+
+    def test_voxcpm2_external_custom_voice_calls_tts_generate_without_local_model(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            generated_path = os.path.join(temp_root, "generated.wav")
+            output_path = os.path.join(temp_root, "out.wav")
+            self._write_wav(generated_path)
+            backend = mock.Mock()
+            backend.predict.return_value = (generated_path, 1234)
+
+            engine = TTSEngine(
+                {
+                    "tts": {
+                        "mode": "external",
+                        "provider": "voxcpm2",
+                        "url": "http://example.invalid",
+                        "voxcpm_cfg_value": 2.25,
+                        "voxcpm_inference_timesteps": 12,
+                        "voxcpm_normalize": True,
+                    }
+                },
+                project_root=temp_root,
+            )
+            provider = engine._provider
+
+            with mock.patch.object(engine, "_init_external", return_value=backend), \
+                 mock.patch.object(provider, "_init_model") as init_model:
+                ok = provider.generate_voice(
+                    "Hello from the book.",
+                    "urgent and afraid",
+                    "Aerial",
+                    {
+                        "Aerial": {
+                            "type": "custom",
+                            "description": "young woman",
+                            "default_style": "warm",
+                            "seed": 42,
+                        }
+                    },
+                    output_path,
+                )
+
+            self.assertTrue(ok)
+            self.assertTrue(os.path.exists(output_path))
+            init_model.assert_not_called()
+            backend.predict.assert_called_once_with(
+                text="(young woman, warm, urgent and afraid)Hello from the book.",
+                cfg=2.25,
+                steps=12,
+                fmt="wav",
+                retry_max=3,
+                retry_ratio=6.0,
+                min_len=2,
+                max_len=4096,
+                streaming=True,
+                seed=42,
+                locked=False,
+                normalize=True,
+                retry=False,
+                api_name="/tts_generate",
+            )
+
+    def test_voxcpm2_external_batch_cancels_remote_gradio_job(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            output_path = os.path.join(temp_root, "out.wav")
+            cancel_now = False
+
+            class FakeJob:
+                def __init__(self):
+                    self.cancelled = False
+                    self.result_calls = 0
+
+                def result(self, timeout=None):
+                    self.result_calls += 1
+                    raise concurrent.futures.TimeoutError()
+
+                def cancel(self):
+                    self.cancelled = True
+                    return True
+
+            job = FakeJob()
+            backend = mock.Mock()
+            backend.submit.return_value = job
+
+            engine = TTSEngine(
+                {
+                    "tts": {
+                        "mode": "external",
+                        "provider": "voxcpm2",
+                        "url": "http://example.invalid",
+                    }
+                },
+                project_root=temp_root,
+            )
+            provider = engine._provider
+
+            def cancel_check():
+                nonlocal cancel_now
+                if job.result_calls:
+                    cancel_now = True
+                return cancel_now
+
+            with mock.patch.object(engine, "_init_external", return_value=backend):
+                results = provider.generate_batch(
+                    [
+                        {
+                            "index": "clip-1",
+                            "text": "First remote Vox line.",
+                            "instruct": "tense",
+                            "speaker": "Aerial",
+                        },
+                        {
+                            "index": "clip-2",
+                            "text": "Second remote Vox line.",
+                            "instruct": "calm",
+                            "speaker": "Aerial",
+                        },
+                    ],
+                    {
+                        "Aerial": {
+                            "type": "custom",
+                            "description": "young woman",
+                        }
+                    },
+                    temp_root,
+                    cancel_check=cancel_check,
+                )
+
+            self.assertTrue(job.cancelled)
+            backend.submit.assert_called_once()
+            backend.predict.assert_not_called()
+            self.assertEqual(results["completed"], [])
+            self.assertEqual(len(results["failed"]), 1)
+            self.assertFalse(os.path.exists(output_path))
+
+    def test_voxcpm2_external_voice_design_calls_voice_design_and_returns_sample_rate(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            generated_path = os.path.join(temp_root, "designed.wav")
+            preview_path = os.path.join(temp_root, "preview.wav")
+            self._write_wav(generated_path, sample_rate=44100)
+            backend = mock.Mock()
+            backend.predict.return_value = (generated_path, 77)
+
+            engine = TTSEngine(
+                {
+                    "tts": {
+                        "mode": "external",
+                        "provider": "voxcpm2",
+                        "url": "http://example.invalid",
+                        "voxcpm_cfg_value": 1.75,
+                        "voxcpm_inference_timesteps": 9,
+                    }
+                },
+                project_root=temp_root,
+            )
+            provider = engine._provider
+
+            with mock.patch.object(engine, "_init_external", return_value=backend), \
+                 mock.patch.object(engine, "_new_voice_design_preview_path", return_value=preview_path), \
+                 mock.patch.object(provider, "_init_model") as init_model:
+                wav_path, sample_rate = provider.generate_voice_design(
+                    "warm narrator voice",
+                    "This is the reusable reference line.",
+                    seed=13,
+                )
+
+            self.assertEqual(wav_path, preview_path)
+            self.assertEqual(sample_rate, 44100)
+            self.assertTrue(os.path.exists(preview_path))
+            init_model.assert_not_called()
+            backend.predict.assert_called_once_with(
+                description="warm narrator voice",
+                text="This is the reusable reference line.",
+                cfg=1.75,
+                steps=9,
+                fmt="wav",
+                retry_max=3,
+                retry_ratio=6.0,
+                min_len=2,
+                max_len=4096,
+                streaming=True,
+                seed=13,
+                locked=False,
+                normalize=False,
+                retry=False,
+                api_name="/voice_design",
+            )
+
+    def test_voxcpm2_external_voice_design_materializes_gradio_stream_result(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            preview_path = os.path.join(temp_root, "preview.wav")
+            backend = mock.Mock()
+            backend.predict.return_value = (
+                {
+                    "path": "session/playlist.m3u8",
+                    "url": "http://voxcpm.test/gradio_api/stream/session/playlist.m3u8",
+                    "is_stream": True,
+                    "meta": {"_type": "gradio.FileData"},
+                },
+                123,
+            )
+            playlist_response = mock.Mock()
+            playlist_response.is_success = True
+            playlist_response.text = "#EXTM3U\n#EXTINF:1.0,\nsegment.wav\n#EXT-X-ENDLIST\n"
+            segment_response = mock.Mock()
+            segment_response.is_success = True
+            segment_response.content = self._wav_bytes(sample_rate=32000)
+
+            engine = TTSEngine(
+                {
+                    "tts": {
+                        "mode": "external",
+                        "provider": "voxcpm2",
+                        "url": "http://example.invalid",
+                    }
+                },
+                project_root=temp_root,
+            )
+            provider = engine._provider
+
+            with mock.patch.object(engine, "_init_external", return_value=backend), \
+                 mock.patch.object(engine, "_new_voice_design_preview_path", return_value=preview_path), \
+                 mock.patch("tts_providers.voxcpm2.httpx.get", side_effect=[playlist_response, segment_response]):
+                wav_path, sample_rate = provider.generate_voice_design(
+                    "warm narrator voice",
+                    "This is the reusable reference line.",
+                )
+
+            self.assertEqual(wav_path, preview_path)
+            self.assertEqual(sample_rate, 32000)
+            self.assertTrue(os.path.exists(preview_path))
+            self.assertEqual(sf.info(preview_path).format, "WAV")
+
+    def test_voxcpm2_external_clone_generation_calls_voice_clone_with_reference_audio(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            clone_dir = os.path.join(temp_root, "clone_voices")
+            os.makedirs(clone_dir, exist_ok=True)
+            ref_path = os.path.join(clone_dir, "sample.wav")
+            generated_path = os.path.join(temp_root, "generated-clone.wav")
+            output_path = os.path.join(temp_root, "clone-output.wav")
+            self._write_wav(ref_path)
+            self._write_wav(generated_path)
+            backend = mock.Mock()
+            backend.predict.return_value = (generated_path, 9876)
+
+            engine = TTSEngine(
+                {
+                    "tts": {
+                        "mode": "external",
+                        "provider": "voxcpm2",
+                        "url": "http://example.invalid",
+                        "voxcpm_denoise_reference": True,
+                    }
+                },
+                project_root=temp_root,
+            )
+            provider = engine._provider
+
+            with mock.patch.object(engine, "_init_external", return_value=backend), \
+                 mock.patch("tts_providers.voxcpm2.handle_file", side_effect=lambda path: f"handled:{path}", create=True), \
+                 mock.patch.object(provider, "_init_model") as init_model:
+                ok = provider.generate_voice(
+                    "Now read this with more urgency.",
+                    "urgent, voice tight",
+                    "NARRATOR",
+                    {
+                        "NARRATOR": {
+                            "type": "clone",
+                            "ref_audio": "clone_voices/sample.wav",
+                            "ref_text": "This is the reusable reference line.",
+                            "description": "warm narrator voice",
+                            "seed": 5,
+                        }
+                    },
+                    output_path,
+                )
+
+            self.assertTrue(ok)
+            self.assertTrue(os.path.exists(output_path))
+            init_model.assert_not_called()
+            backend.predict.assert_called_once_with(
+                text="Now read this with more urgency.",
+                ref_audio=f"handled:{ref_path}",
+                style="warm narrator voice, urgent, voice tight",
+                transcript="This is the reusable reference line.",
+                cfg=1.6,
+                steps=10,
+                fmt="wav",
+                retry_max=3,
+                retry_ratio=6.0,
+                min_len=2,
+                max_len=4096,
+                streaming=True,
+                seed=5,
+                locked=False,
+                normalize=False,
+                denoise=True,
+                retry=False,
+                api_name="/voice_clone",
+            )
 
 
 class LocalBackendResolutionTests(unittest.TestCase):

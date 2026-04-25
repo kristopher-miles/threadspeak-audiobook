@@ -1152,6 +1152,9 @@ class ASRTranscribeRequest(BaseModel):
 class RenderPrepStateRequest(BaseModel):
     complete: bool = True
 
+class ChunkGenerateRequest(BaseModel):
+    neutral_narrator: bool = False
+
 class BatchGenerateRequest(BaseModel):
     indices: List[Union[str, int]] = []
     label: Optional[str] = None
@@ -1159,6 +1162,7 @@ class BatchGenerateRequest(BaseModel):
     scope_mode: Optional[str] = None
     chapter: Optional[str] = None
     regenerate_all: bool = False
+    neutral_narrator: bool = False
 
 
 class DictionaryEntry(BaseModel):
@@ -1974,6 +1978,7 @@ def _serialize_audio_job(job):
         "scope": job["scope"],
         "scope_mode": job.get("scope_mode"),
         "chapter": job.get("chapter"),
+        "neutral_narrator": bool(job.get("neutral_narrator", False)),
         "uids": uids,
         "pending_uids": pending_uids,
         "generation_pending_uids": generation_pending_uids,
@@ -2010,6 +2015,7 @@ def _serialize_audio_job_checkpoint(job):
         "scope": job["scope"],
         "scope_mode": job.get("scope_mode"),
         "chapter": job.get("chapter"),
+        "neutral_narrator": bool(job.get("neutral_narrator", False)),
         "uids": _job_uids(job),
         "pending_uids": _job_pending_uids(job),
         "generation_pending_uids": _job_generation_pending_uids(job),
@@ -2048,6 +2054,7 @@ def _serialize_audio_job_summary(job):
         "scope": job["scope"],
         "scope_mode": job.get("scope_mode"),
         "chapter": job.get("chapter"),
+        "neutral_narrator": bool(job.get("neutral_narrator", False)),
         "total_chunks": job["total_chunks"],
         "total_words": job.get("total_words", 0),
         "remaining_words": job.get("remaining_words", 0),
@@ -3848,7 +3855,7 @@ def _load_audio_worker_settings():
     }
 
 
-def _enqueue_audio_job(kind, indices, label=None, scope=None, scope_mode=None, chapter=None):
+def _enqueue_audio_job(kind, indices, label=None, scope=None, scope_mode=None, chapter=None, neutral_narrator=False):
     global audio_job_counter
 
     with audio_queue_condition:
@@ -3903,6 +3910,7 @@ def _enqueue_audio_job(kind, indices, label=None, scope=None, scope_mode=None, c
             "scope": scope or "custom",
             "scope_mode": scope_mode,
             "chapter": chapter,
+            "neutral_narrator": bool(neutral_narrator),
             "status": "queued",
             "queued_at": time.time(),
             "started_at": None,
@@ -3965,6 +3973,7 @@ def _clone_audio_job_for_retry(job, pending_uids, reason):
         "scope": job["scope"],
         "scope_mode": job.get("scope_mode"),
         "chapter": job.get("chapter"),
+        "neutral_narrator": bool(job.get("neutral_narrator", False)),
         "status": "queued",
         "queued_at": time.time(),
         "started_at": None,
@@ -4096,6 +4105,7 @@ def _restore_audio_queue_state():
                 "scope": raw_job.get("scope", "custom"),
                 "scope_mode": raw_job.get("scope_mode"),
                 "chapter": raw_job.get("chapter"),
+                "neutral_narrator": bool(raw_job.get("neutral_narrator", False)),
                 "status": "queued",
                 "queued_at": time.time(),
                 "started_at": None,
@@ -4135,6 +4145,7 @@ def _restore_audio_queue_state():
                     "scope": raw_current.get("scope", "custom"),
                     "scope_mode": raw_current.get("scope_mode"),
                     "chapter": raw_current.get("chapter"),
+                    "neutral_narrator": bool(raw_current.get("neutral_narrator", False)),
                     "status": "queued",
                     "queued_at": time.time(),
                     "started_at": None,
@@ -4519,6 +4530,7 @@ def _audio_job_runner(job, settings, run_token, result_holder, done_event):
                 item_callback=item_callback,
                 generation_token=run_token,
                 item_started_callback=item_started_callback,
+                neutral_narrator=bool(job.get("neutral_narrator", False)),
             )
         else:
             result_holder["results"] = project_manager.generate_chunks_batch(
@@ -4532,6 +4544,7 @@ def _audio_job_runner(job, settings, run_token, result_holder, done_event):
                 generation_token=run_token,
                 item_started_callback=item_started_callback,
                 log_callback=log_callback,
+                neutral_narrator=bool(job.get("neutral_narrator", False)),
             )
     except BaseException as e:
         result_holder["error"] = str(e)

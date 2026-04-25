@@ -223,7 +223,14 @@ class ProjectGenerationMixin:
                 "proofread_cleared": True,
             }
 
-        def _generate_chunk_audio_internal(self, index, attempt=0, generation_token=None, async_finalize=False):
+        @staticmethod
+        def _effective_generation_instruct(chunk, neutral_narrator=False):
+            if neutral_narrator and chunk.get("speaker") == "NARRATOR":
+                return ""
+            return chunk.get("instruct", "")
+
+        def _generate_chunk_audio_internal(self, index, attempt=0, generation_token=None, async_finalize=False,
+                                           neutral_narrator=False, cancel_check=None):
             chunk = self.get_chunk_raw(index)
             if chunk is None:
                 return False, "Invalid chunk index"
@@ -254,7 +261,7 @@ class ProjectGenerationMixin:
                 voice_config = self.prepare_runtime_voice_config(voice_config, [resolved_speaker])
                 text = chunk["text"]
                 transformed_text, _ = apply_dictionary_to_text(text, self.load_dictionary_entries())
-                instruct = chunk.get("instruct", "")
+                instruct = self._effective_generation_instruct(chunk, neutral_narrator=neutral_narrator)
                 auto_regen_retry_attempts = self._get_auto_regen_retry_attempts()
                 display_index = int(chunk.get("id") or 0)
                 chunk_uid = chunk.get("uid")
@@ -266,7 +273,21 @@ class ProjectGenerationMixin:
 
                 temp_path = self._spool_audio_full_path(chunk_uid, generation_token, attempt=attempt)
 
-                success = engine.generate_voice(transformed_text, instruct, resolved_speaker, voice_config, temp_path)
+                generate_voice_kwargs = {}
+                try:
+                    generate_voice_signature = inspect.signature(engine.generate_voice)
+                except (TypeError, ValueError):
+                    generate_voice_signature = None
+                if generate_voice_signature and "cancel_check" in generate_voice_signature.parameters:
+                    generate_voice_kwargs["cancel_check"] = cancel_check
+                success = engine.generate_voice(
+                    transformed_text,
+                    instruct,
+                    resolved_speaker,
+                    voice_config,
+                    temp_path,
+                    **generate_voice_kwargs,
+                )
 
                 if generation_token is not None and not self.chunk_has_generation_token(chunk_uid, generation_token):
                     self._cleanup_temp_file(temp_path)
@@ -317,6 +338,8 @@ class ProjectGenerationMixin:
                             attempt=attempt + 1,
                             generation_token=generation_token,
                             async_finalize=False,
+                            neutral_narrator=neutral_narrator,
+                            cancel_check=cancel_check,
                         )
                     if generation_token is None:
                         self.flush_dirty_chunks(force=True)
@@ -352,17 +375,20 @@ class ProjectGenerationMixin:
                     self.flush_dirty_chunks(force=True)
                 return False, str(e)
 
-        def generate_chunk_audio(self, index, attempt=0, generation_token=None):
+        def generate_chunk_audio(self, index, attempt=0, generation_token=None, neutral_narrator=False,
+                                 cancel_check=None):
             return self._generate_chunk_audio_internal(
                 index,
                 attempt=attempt,
                 generation_token=generation_token,
                 async_finalize=False,
+                neutral_narrator=neutral_narrator,
+                cancel_check=cancel_check,
             )
 
         def generate_chunks_parallel(self, indices, max_workers=2, progress_callback=None,
                                       cancel_check=None, item_callback=None, generation_token=None,
-                                      item_started_callback=None):
+                                      item_started_callback=None, neutral_narrator=False):
             """Generate multiple chunks in parallel using ThreadPoolExecutor.
 
             Uses individual TTS API calls with per-speaker voice settings.
@@ -412,6 +438,8 @@ class ProjectGenerationMixin:
                         attempt=attempt,
                         generation_token=generation_token,
                         async_finalize=True,
+                        neutral_narrator=neutral_narrator,
+                        cancel_check=cancel_check,
                     )
                     return success, msg, time.time() - start
                 except Exception as e:
@@ -577,7 +605,8 @@ class ProjectGenerationMixin:
 
         def generate_chunks_batch(self, indices, batch_seed=-1, batch_size=4, progress_callback=None,
                                    batch_group_by_type=False, cancel_check=None, item_callback=None,
-                                   generation_token=None, item_started_callback=None, log_callback=None):
+                                   generation_token=None, item_started_callback=None, log_callback=None,
+                                   neutral_narrator=False):
             """Generate multiple chunks using batch TTS API with a single seed.
 
             Args:
@@ -688,7 +717,7 @@ class ProjectGenerationMixin:
                         "index": uid,
                         "display_id": chunk.get("id"),
                         "text": transformed_text,
-                        "instruct": chunk.get("instruct", ""),
+                        "instruct": self._effective_generation_instruct(chunk, neutral_narrator=neutral_narrator),
                         "speaker": resolved_speaker,
                     })
 

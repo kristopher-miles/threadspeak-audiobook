@@ -861,6 +861,126 @@ class ChunkRuntimeOverlayTests(unittest.TestCase):
         self.assertTrue(success)
         self.assertEqual(fake_engine.speakers, ["Jordan"])
 
+    def test_generate_chunk_audio_drops_instruct_only_for_exact_neutral_narrator(self):
+        chunks = [
+            {
+                "id": 0,
+                "uid": "narrator-exact",
+                "speaker": "NARRATOR",
+                "text": "Narration line has enough words to validate correctly.",
+                "chapter": "Chapter 1",
+                "instruct": "Warm dramatic narrator tone",
+                "status": "pending",
+            },
+            {
+                "id": 1,
+                "uid": "narrator-title",
+                "speaker": "Narrator",
+                "text": "Title case narrator line has enough words to validate correctly.",
+                "chapter": "Chapter 1",
+                "instruct": "Keep title case instruct",
+                "status": "pending",
+            },
+        ]
+        self.manager.save_chunks(chunks)
+
+        class FakeEngine:
+            def __init__(self):
+                self.calls = []
+
+            def generate_voice(self, text, instruct, speaker, voice_config, temp_path):
+                self.calls.append({"speaker": speaker, "instruct": instruct})
+                sample_rate = 24000
+                samples = np.zeros(int(sample_rate * 2.0), dtype=np.float32)
+                sf.write(temp_path, samples, sample_rate)
+                return True
+
+        fake_engine = FakeEngine()
+        self.manager.get_engine = lambda: fake_engine
+        self.manager._load_voice_config = lambda: {"NARRATOR": {}, "Narrator": {}}
+
+        exact_success, _ = self.manager.generate_chunk_audio("narrator-exact", neutral_narrator=True)
+        title_success, _ = self.manager.generate_chunk_audio("narrator-title", neutral_narrator=True)
+
+        self.assertTrue(exact_success)
+        self.assertTrue(title_success)
+        self.assertEqual(
+            fake_engine.calls,
+            [
+                {"speaker": "NARRATOR", "instruct": ""},
+                {"speaker": "NARRATOR", "instruct": "Keep title case instruct"},
+            ],
+        )
+
+    def test_generate_chunk_audio_keeps_alias_instruct_when_neutral_narrator_enabled(self):
+        self.manager.set_narrator_threshold(0)
+        self.manager.set_narrator_override("Chapter 1", "Alice")
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "uid": "alice-alias",
+                "speaker": "Alice",
+                "text": "Alice narration alias has enough words to validate correctly.",
+                "chapter": "Chapter 1",
+                "instruct": "Keep alias instruct",
+                "status": "pending",
+            }
+        ])
+
+        class FakeEngine:
+            def __init__(self):
+                self.calls = []
+
+            def generate_voice(self, text, instruct, speaker, voice_config, temp_path):
+                self.calls.append({"speaker": speaker, "instruct": instruct})
+                sample_rate = 24000
+                samples = np.zeros(int(sample_rate * 2.0), dtype=np.float32)
+                sf.write(temp_path, samples, sample_rate)
+                return True
+
+        fake_engine = FakeEngine()
+        self.manager.get_engine = lambda: fake_engine
+        self.manager._load_voice_config = lambda: {"NARRATOR": {}, "Alice": {}}
+
+        success, _ = self.manager.generate_chunk_audio("alice-alias", neutral_narrator=True)
+
+        self.assertTrue(success)
+        self.assertEqual(fake_engine.calls, [{"speaker": "Alice", "instruct": "Keep alias instruct"}])
+
+    def test_generate_chunks_parallel_passes_cancel_check_to_engine_voice_generation(self):
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "uid": "clip-cancel-callback",
+                "speaker": "Jordan",
+                "text": "Jordan line has enough words to validate correctly.",
+                "chapter": "Chapter 1",
+                "instruct": "",
+                "status": "pending",
+            }
+        ])
+
+        seen_cancel_checks = []
+
+        class FakeEngine:
+            def generate_voice(self, text, instruct, speaker, voice_config, temp_path, cancel_check=None):
+                seen_cancel_checks.append(cancel_check)
+                return False
+
+        self.manager.get_engine = lambda: FakeEngine()
+        self.manager._load_voice_config = lambda: {"Jordan": {}}
+
+        results = self.manager.generate_chunks_parallel(
+            ["clip-cancel-callback"],
+            max_workers=1,
+            cancel_check=lambda: False,
+        )
+
+        self.assertEqual(results["completed"], [])
+        self.assertEqual(len(results["failed"]), 1)
+        self.assertEqual(len(seen_cancel_checks), 1)
+        self.assertIsNotNone(seen_cancel_checks[0])
+
     def test_load_chunks_view_repairs_selected_chapter_narrator_narrates_flag(self):
         self.manager.save_chunks([
             {
@@ -1528,6 +1648,61 @@ class ChunkRuntimeOverlayTests(unittest.TestCase):
             self.manager.get_chunk_raw("clip-log-7")["id"],
         )
 
+    def test_generate_chunks_batch_drops_instruct_only_for_exact_neutral_narrator(self):
+        self.manager.save_chunks([
+            {
+                "id": 0,
+                "uid": "batch-narrator-exact",
+                "speaker": "NARRATOR",
+                "text": "Exact narrator batch line has enough words to validate correctly.",
+                "chapter": "Chapter 1",
+                "instruct": "Drop this narrator instruct",
+                "status": "pending",
+            },
+            {
+                "id": 1,
+                "uid": "batch-narrator-title",
+                "speaker": "Narrator",
+                "text": "Title case narrator batch line has enough words to validate correctly.",
+                "chapter": "Chapter 1",
+                "instruct": "Keep title case batch instruct",
+                "status": "pending",
+            },
+        ])
+
+        forwarded = {"batch_chunks": None}
+
+        class FakeBatchEngine:
+            def generate_batch(engine_self, batch_chunks, voice_config, output_dir, batch_seed, cancel_check=None):
+                forwarded["batch_chunks"] = list(batch_chunks)
+                sample_rate = 24000
+                samples = np.zeros(int(sample_rate * 2.0), dtype=np.float32)
+                for chunk in batch_chunks:
+                    sf.write(os.path.join(output_dir, f"temp_batch_{chunk['index']}.wav"), samples, sample_rate)
+                return {"completed": [chunk["index"] for chunk in batch_chunks], "failed": []}
+
+        self.manager.get_engine = lambda: FakeBatchEngine()
+        self.manager._load_voice_config = lambda: {"NARRATOR": {}, "Narrator": {}}
+
+        results = self.manager.generate_chunks_batch(
+            ["batch-narrator-exact", "batch-narrator-title"],
+            batch_size=2,
+            neutral_narrator=True,
+        )
+
+        self.assertEqual(results["failed"], [])
+        self.assertEqual(results["completed"], ["batch-narrator-exact", "batch-narrator-title"])
+        self.assertEqual(
+            [
+                {"speaker": chunk["speaker"], "instruct": chunk["instruct"]}
+                for chunk in forwarded["batch_chunks"]
+            ],
+            [
+                {"speaker": "NARRATOR", "instruct": ""},
+                {"speaker": "NARRATOR", "instruct": "Keep title case batch instruct"},
+            ],
+        )
+
     def test_enqueue_audio_finalize_task_returns_before_ledger_persist_completes(self):
         chunk = {
             "id": 0,
@@ -1876,4 +2051,3 @@ class ChunkRuntimeOverlayTests(unittest.TestCase):
         self.assertEqual(result["reason"], "db_transactional")
         self.assertEqual(len(synced), 1)
         self.assertEqual(synced[0]["uid"], "oldchunk")
-

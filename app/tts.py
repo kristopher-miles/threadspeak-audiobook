@@ -93,7 +93,7 @@ class AudioProvider:
     def local_backend(self):
         raise NotImplementedError
 
-    def generate_voice(self, text, instruct_text, speaker, voice_config, output_path):
+    def generate_voice(self, text, instruct_text, speaker, voice_config, output_path, cancel_check=None):
         raise NotImplementedError
 
     def generate_batch(self, chunks, voice_config, output_dir, batch_seed=-1, cancel_check=None, log_callback=None):
@@ -125,7 +125,7 @@ class QwenAudioProvider(AudioProvider):
             return None
         return self.engine._resolve_local_backend()
 
-    def generate_voice(self, text, instruct_text, speaker, voice_config, output_path):
+    def generate_voice(self, text, instruct_text, speaker, voice_config, output_path, cancel_check=None):
         return self.engine._provider_generate_voice(text, instruct_text, speaker, voice_config, output_path)
 
     def generate_batch(self, chunks, voice_config, output_dir, batch_seed=-1, cancel_check=None, log_callback=None):
@@ -1179,7 +1179,10 @@ class TTSEngine:
         for url in self._external_url_candidates(self._url):
             try:
                 print(f"Connecting to TTS server at {url}...")
-                self._gradio_client = Client(url)
+                if self._provider_name == "voxcpm2":
+                    self._gradio_client = Client(url, download_files=False)
+                else:
+                    self._gradio_client = Client(url)
                 self._external_backend = "gradio"
                 print("Connected to external TTS server.")
                 return self._gradio_client
@@ -1353,8 +1356,15 @@ class TTSEngine:
         else:
             return self._external_generate_clone(text, speaker, voice_config, output_path)
 
-    def generate_voice(self, text, instruct_text, speaker, voice_config, output_path):
-        return self._provider.generate_voice(text, instruct_text, speaker, voice_config, output_path)
+    def generate_voice(self, text, instruct_text, speaker, voice_config, output_path, cancel_check=None):
+        return self._provider.generate_voice(
+            text,
+            instruct_text,
+            speaker,
+            voice_config,
+            output_path,
+            cancel_check=cancel_check,
+        )
 
     def _provider_generate_voice(self, text, instruct_text, speaker, voice_config, output_path):
         """Generate audio using the appropriate method based on voice type config."""

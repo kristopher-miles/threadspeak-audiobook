@@ -128,7 +128,8 @@ class AudioQueueMetricsTests(unittest.TestCase):
         def fake_generate_chunks_batch(indices, batch_seed, batch_size, progress_callback=None,
                                        batch_group_by_type=False, cancel_check=None,
                                        item_callback=None, generation_token=None,
-                                       item_started_callback=None, log_callback=None):
+                                       item_started_callback=None, log_callback=None,
+                                       neutral_narrator=False):
             captured["indices"] = list(indices)
             captured["generation_token"] = generation_token
             if log_callback:
@@ -208,7 +209,8 @@ class AudioQueueMetricsTests(unittest.TestCase):
 
         def fake_generate_chunks_parallel(indices, max_workers=2, progress_callback=None,
                                           cancel_check=None, item_callback=None,
-                                          generation_token=None, item_started_callback=None):
+                                          generation_token=None, item_started_callback=None,
+                                          neutral_narrator=False):
             self.assertEqual(indices, ["u3"])
             self.assertEqual(generation_token, "run-finalize")
             self.assertIsNotNone(item_callback)

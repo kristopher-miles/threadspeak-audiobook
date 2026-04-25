@@ -501,7 +501,7 @@ async def delete_chapter_endpoint(chapter_name: str):
     return {"status": "ok", "deleted_count": count}
 
 @router.post("/api/chunks/{index}/generate")
-async def generate_chunk_endpoint(index: str, background_tasks: BackgroundTasks):
+async def generate_chunk_endpoint(index: str, background_tasks: BackgroundTasks, request: Optional[ChunkGenerateRequest] = None):
     chunk = project_manager.get_chunk_raw(index)
     if chunk is None:
         raise HTTPException(status_code=404, detail="Invalid chunk id")
@@ -513,10 +513,11 @@ async def generate_chunk_endpoint(index: str, background_tasks: BackgroundTasks)
         [chunk.get("uid")],
         label=f"Single chunk render ({chunk.get('id')})",
         scope="single_chunk",
+        neutral_narrator=bool((request or ChunkGenerateRequest()).neutral_narrator),
     )
 
 @router.post("/api/chunks/{index}/regenerate")
-async def regenerate_chunk_endpoint(index: str, background_tasks: BackgroundTasks):
+async def regenerate_chunk_endpoint(index: str, background_tasks: BackgroundTasks, request: Optional[ChunkGenerateRequest] = None):
     prepared = project_manager.prepare_chunk_for_regeneration(index)
     if prepared is None:
         raise HTTPException(status_code=404, detail="Invalid chunk id")
@@ -530,6 +531,7 @@ async def regenerate_chunk_endpoint(index: str, background_tasks: BackgroundTask
         [chunk.get("uid")],
         label=f"Single chunk regenerate ({chunk.get('id')})",
         scope="single_chunk",
+        neutral_narrator=bool((request or ChunkGenerateRequest()).neutral_narrator),
     )
 
 @router.post("/api/merge")
@@ -1178,6 +1180,7 @@ async def generate_batch_endpoint(request: BatchGenerateRequest, background_task
         scope=request.scope or scope_mode,
         scope_mode=scope_mode,
         chapter=chapter,
+        neutral_narrator=bool(request.neutral_narrator),
     ) | {"workers": settings["workers"]}
 
 @router.post("/api/generate_batch_fast")
@@ -1203,6 +1206,7 @@ async def generate_batch_fast_endpoint(request: BatchGenerateRequest, background
         scope=request.scope or scope_mode,
         scope_mode=scope_mode,
         chapter=chapter,
+        neutral_narrator=bool(request.neutral_narrator),
     ) | {
         "batch_seed": settings["batch_seed"],
         "batch_size": settings["batch_size"],

@@ -578,6 +578,10 @@
             return !toggle || toggle.checked;
         }
 
+        function isNeutralNarratorEnabled() {
+            return Boolean(document.getElementById('editor-neutral-narrator')?.checked);
+        }
+
         function getActionTargetChunks(chunks) {
             return isChapterOnlyEnabled() ? getVisibleChunks(chunks) : chunks;
         }
@@ -3064,7 +3068,9 @@
                     }
                 }
 
-                await API.post(`/api/chunks/${id}/generate`, {});
+                await API.post(`/api/chunks/${id}/generate`, {
+                    neutral_narrator: isNeutralNarratorEnabled(),
+                });
                 markChunkGeneratingLocally(id);
                 startTrackedChunkStatusPolling(id, {
                     preserveGeneratingWhilePending: true,
@@ -3159,6 +3165,7 @@
                     regenerate_all: regenerateAll,
                     label: regenerateAll ? `Regenerate ${getActionScopeLabel()}` : `Render pending in ${getActionScopeLabel()}`,
                     scope: getActionScopeLabel(),
+                    neutral_narrator: isNeutralNarratorEnabled(),
                 });
                 if (window.setNavTaskSpinner) {
                     window.setNavTaskSpinner('editor');
@@ -3214,6 +3221,7 @@
                     regenerate_all: regenerateAll,
                     label: regenerateAll ? `Batch regenerate ${getActionScopeLabel()}` : `Batch render pending in ${getActionScopeLabel()}`,
                     scope: getActionScopeLabel(),
+                    neutral_narrator: isNeutralNarratorEnabled(),
                 });
                 if (window.setNavTaskSpinner) {
                     window.setNavTaskSpinner('editor');
