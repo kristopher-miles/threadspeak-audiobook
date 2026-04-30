@@ -711,6 +711,38 @@ class ChunkRuntimeOverlayTests(unittest.TestCase):
         self.assertEqual(issue["chunk_uid"], "aerial-0")
         self.assertIn("no voice selected", issue["message"])
 
+    def test_validate_generation_voice_targets_empty_speaker_uses_narrator_resolution(self):
+        chunks = [
+            {
+                "id": 0,
+                "uid": "blank-speaker-0",
+                "speaker": "",
+                "text": "Line without an explicit speaker still needs rendering.",
+                "chapter": "Chapter 1",
+                "instruct": "",
+                "status": "pending",
+                "audio_path": None,
+                "audio_validation": None,
+            }
+        ]
+        self.manager.save_chunks(chunks)
+        self.manager._save_voice_config({
+            "NARRATOR": {
+                "type": "custom",
+                "voice": "",
+                "alias": "Ember",
+            },
+            "Ember": {
+                "type": "custom",
+                "voice": "ember",
+                "alias": "",
+            },
+        })
+
+        issue = self.manager.validate_generation_voice_targets(["blank-speaker-0"])
+
+        self.assertIsNone(issue)
+
     def test_preview_voice_config_invalidation_resolves_once_per_generated_speaker(self):
         chunks = [
             {

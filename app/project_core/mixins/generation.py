@@ -97,6 +97,10 @@ class ProjectGenerationMixin:
                 chapter,
                 narrator_overrides or self.get_narrator_overrides(),
             )
+            # Some imported/scripted chunks can carry text with no explicit speaker.
+            # Route those to narrator resolution instead of validating against "".
+            if not self._normalize_speaker_name(effective_speaker):
+                effective_speaker = effective_narrator or narrator_name or "NARRATOR"
             resolved = self.resolve_voice_speaker(
                 effective_speaker,
                 voice_config,
