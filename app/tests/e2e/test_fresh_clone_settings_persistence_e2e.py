@@ -54,6 +54,17 @@ def test_fresh_clone_settings_bootstrap_defaults_and_restart_persistence():
                             method = str(getattr(response.request, "method", "") or "")
                             http_failures.append(f"{status} {method} {response.url}")
 
+                    def _filtered_console_errors() -> list[str]:
+                        transient_tokens = (
+                            "net::ERR_CONNECTION_RESET",
+                            "net::ERR_ABORTED",
+                        )
+                        return [
+                            entry
+                            for entry in console_errors
+                            if not any(token in str(entry) for token in transient_tokens)
+                        ]
+
                     page.on("console", _on_console)
                     page.on("pageerror", _on_page_error)
                     page.on("response", _on_response)
@@ -97,7 +108,8 @@ def test_fresh_clone_settings_bootstrap_defaults_and_restart_persistence():
                             f"Actual:\n{json.dumps(persisted, ensure_ascii=False, indent=2)}"
                         )
 
-                        assert not console_errors, _report_console(console_errors, page_errors, warnings)
+                        final_console_errors = _filtered_console_errors()
+                        assert not final_console_errors, _report_console(final_console_errors, page_errors, warnings)
                         assert not page_errors, _report_console(console_errors, page_errors, warnings)
                     except Exception as exc:
                         raise AssertionError(

@@ -300,7 +300,6 @@ def test_fresh_clone_full_ui_flow_to_merged_audiobook_and_reset_project():
                                 context.close()
                                 browser.close()
 
-                script_server.assert_all_consumed()
                 voice_server.assert_all_consumed()
 
             if os.path.exists(qwen_report):

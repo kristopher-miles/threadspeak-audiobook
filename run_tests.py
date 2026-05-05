@@ -21,11 +21,13 @@ import os
 import shlex
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent
 APP_DIR = REPO_ROOT / "app"
+TEST_SUPPORT_DIR = APP_DIR / "test_support"
 WIN_ENV_PY = APP_DIR / "env" / "Scripts" / "python.exe"
 POSIX_ENV_PY = APP_DIR / "env" / "bin" / "python"
 EXTRA_ARGS_ENV = "THREADSPEAK_TEST_PYTEST_ARGS"
@@ -63,6 +65,48 @@ def _run(cmd: list[str], *, cwd: Path, env: dict[str, str]) -> int:
     return int(completed.returncode)
 
 
+def _temp_root_is_writable(path: str) -> bool:
+    candidate = Path(path).expanduser()
+    try:
+        candidate.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=str(candidate), delete=True):
+            pass
+    except Exception:
+        return False
+    return True
+
+
+def _ensure_writable_temp_env(env: dict[str, str]) -> None:
+    preferred_roots = [
+        env.get("TMPDIR"),
+        env.get("TMP"),
+        env.get("TEMP"),
+        tempfile.gettempdir(),
+    ]
+    selected_root = None
+    for root in preferred_roots:
+        if root and _temp_root_is_writable(root):
+            selected_root = Path(root).expanduser()
+            break
+
+    if selected_root is None:
+        selected_root = REPO_ROOT / ".tmp_test_runtime"
+        selected_root.mkdir(parents=True, exist_ok=True)
+
+    selected_text = str(selected_root)
+    env["TMPDIR"] = selected_text
+    env["TEMP"] = selected_text
+    env["TMP"] = selected_text
+
+
+def _ensure_test_support_path(env: dict[str, str]) -> None:
+    current = env.get("PYTHONPATH", "")
+    entries = [str(TEST_SUPPORT_DIR)]
+    if current:
+        entries.append(current)
+    env["PYTHONPATH"] = os.pathsep.join(entries)
+
+
 def _has_explicit_pytest_selection(pytest_args: str) -> bool:
     extra_args = _split_args(pytest_args)
     if not extra_args:
@@ -82,7 +126,7 @@ def main() -> int:
     parser.add_argument(
         "--fresh-clone-e2e",
         action="store_true",
-        help="Also run dedicated fresh-clone E2E lane after the primary run.",
+        help="Also run dedicated fresh-clone E2E lane after the primary run (passes --critical-path-e2e).",
     )
     parser.add_argument(
         "--split-stage-ui",
@@ -108,6 +152,8 @@ def main() -> int:
         return 2
 
     env = os.environ.copy()
+    _ensure_writable_temp_env(env)
+    _ensure_test_support_path(env)
     if args.split_stage_ui:
         env[SPLIT_STAGE_ENV] = "1"
     else:
@@ -115,7 +161,7 @@ def main() -> int:
 
     primary_cmd = [str(python_bin), "-m", "pytest", "-q"]
     if args.fresh_clone_e2e:
-        primary_cmd.append("--run-fresh-clone-e2e")
+        primary_cmd.append("--critical-path-e2e")
     primary_cmd.extend(_split_args(args.pytest_args))
     rc = _run(primary_cmd, cwd=APP_DIR, env=env)
     if rc != 0:
@@ -128,7 +174,7 @@ def main() -> int:
             "pytest",
             "-q",
             "tests/e2e",
-            "--run-fresh-clone-e2e",
+            "--critical-path-e2e",
             "-k",
             "fresh_clone",
         ]
